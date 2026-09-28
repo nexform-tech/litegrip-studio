@@ -87,6 +87,28 @@ class TestTheReadoutWidget:
         assert readout.target.isVisibleTo(readout)
         assert readout.error.isVisibleTo(readout)
 
+    def test_a_grasp_shows_only_where_the_jaws_are(self, qapp) -> None:
+        """Holding an object at 28 mm with the grasp targeting 0 mm: the target
+        and the error are the object's width, and read as a move that has gone
+        badly wrong rather than as a grasp that is working."""
+        readout = PositionReadout()
+        readout.update_position(28.0, 0.0, grasping=True)
+
+        assert readout.actual.isVisibleTo(readout)
+        assert not readout.target.isVisibleTo(readout)
+        assert not readout.error.isVisibleTo(readout)
+
+    def test_letting_go_puts_the_two_lines_back(self, qapp) -> None:
+        """The state is the frame's, not a mode the readout latches: the first
+        frame after the grasp ends is a normal move again."""
+        readout = PositionReadout()
+        readout.update_position(28.0, 0.0, grasping=True)
+
+        readout.update_position(28.0, 38.0)
+
+        assert readout.target.isVisibleTo(readout)
+        assert readout.error.isVisibleTo(readout)
+
 
 class TestTheBanner:
     def test_a_severity_colours_the_edge(self, qapp) -> None:

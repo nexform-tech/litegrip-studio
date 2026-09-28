@@ -134,6 +134,13 @@ on.
 Following live is safe only because every motion command goes through the rate-limited reference
 generator: drag out a 120 mm jump and the gripper still crosses it at the configured speed.
 
+While the jaws are holding something (`frame.grasped`, which is `HOLD_FORCE`) the read-out shows
+**the actual position only**. A grasp drives to 0 mm under a force cap, so its target is the closed
+end and its error is the width of the object — both true, and side by side they read as a move that
+has gone badly wrong ("28 mm short of the target, and not closing"). During the approach, before
+the jaws meet anything, the target and the error are shown as usual: they are the real trajectory
+and the real following error, which is what an operator watching for contact is reading them for.
+
 Each end of the slider has a **one-press** button, placed next to the end it drives:
 
 | Button | Command | Where it goes |

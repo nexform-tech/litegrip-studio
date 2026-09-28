@@ -180,6 +180,38 @@ class TestBeforeTheAxisHasAnswered:
         assert "37.5" in page.readout.actual.text()
 
 
+class TestWhatTheReadoutSaysWhileGrasping:
+    """``frame.grasped`` is the grasp held under a force cap.
+
+    The page is where the frame becomes a number on a panel, and these two
+    numbers describe the object rather than the move: the target is the closed
+    end the grasp was aimed at and the error is the width of what is between the
+    jaws.
+    """
+
+    def test_only_the_actual_position_is_shown(self, page) -> None:
+        page.update_frame(
+            frame(position_mm=28.0, cmd_mm=0.0, err_mm=-28.0, grasped=True,
+                  motion_state="HOLD_FORCE")
+        )
+
+        assert "28.0" in page.readout.actual.text()
+        assert not page.readout.target.isVisibleTo(page.readout)
+        assert not page.readout.error.isVisibleTo(page.readout)
+
+    def test_approaching_the_object_still_shows_the_trajectory(self, page) -> None:
+        """Before the jaws meet anything the target and the error are the real
+        trajectory and the real following error, and this is the phase an
+        operator watching for contact is reading them in."""
+        page.update_frame(
+            frame(position_mm=28.0, cmd_mm=0.0, err_mm=-28.0, moving=True,
+                  motion_state="SERVO")
+        )
+
+        assert page.readout.target.isVisibleTo(page.readout)
+        assert page.readout.error.isVisibleTo(page.readout)
+
+
 class TestTheButtonMoves:
     def test_open_and_close_send_their_commands(self, page) -> None:
         page._open.click()

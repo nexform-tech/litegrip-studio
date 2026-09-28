@@ -270,7 +270,9 @@ class ControlPage(QWidget):
         # than one publish later.
         self._track(frame)
         self.slider.set_actual(frame.position_mm)
-        self.readout.update_position(frame.position_mm, frame.cmd_mm)
+        self.readout.update_position(
+            frame.position_mm, frame.cmd_mm, grasping=frame.grasped
+        )
         self._state_label.setText(
             f'<span style="color:{theme.TEXT_MUTED}">状态 </span>'
             f'<span style="color:{self._state_colour(frame)}">{frame.motion_state}</span>'
