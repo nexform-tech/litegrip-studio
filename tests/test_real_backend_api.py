@@ -26,7 +26,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from litegrip import GripperConfig, LiteGripError
+#: The SDK is a checkout beside this one rather than a dependency — it is not on
+#: PyPI, and the repository meant to carry it is still empty — so a machine
+#: without that checkout can only skip these.  Everything here is about the
+#: surface of the real SDK: which of its names the backend may call, and what it
+#: does with the errors that SDK raises.  A stand-in would test the stand-in.
+litegrip = pytest.importorskip("litegrip")
+GripperConfig = litegrip.GripperConfig
+LiteGripError = litegrip.LiteGripError
 
 from litegrip_studio import calibration, constants
 from litegrip_studio.backend import (

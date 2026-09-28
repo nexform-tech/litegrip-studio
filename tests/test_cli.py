@@ -53,6 +53,10 @@ def real_backend(monkeypatch):
     The point is the argument plumbing, without a CAN interface; what the real
     backend then does with those arguments has its own tests.
     """
+    # Importing the real backend imports the SDK, which is a checkout beside
+    # this one rather than a dependency.  The plumbing below is worth testing
+    # either way, so these tests skip on a machine that has no such checkout.
+    pytest.importorskip("litegrip")
     import litegrip_studio.backend.real as real
 
     monkeypatch.setattr(cli, "ensure_sdk", lambda: True)
@@ -292,6 +296,9 @@ class TestEnsureSdk:
         monkeypatch.setattr(sys, "path", list(sys.path))
 
     def test_it_finds_the_checkout_on_the_path(self) -> None:
+        # About finding a checkout, so it needs one to find.
+        pytest.importorskip("litegrip")
+
         assert cli.ensure_sdk() is True
 
     def test_it_reports_failure_and_says_where_it_looked(
