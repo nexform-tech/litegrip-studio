@@ -1014,6 +1014,17 @@ class WorkerLoop:
         self._conn_emit(CONN_DISCONNECTED, "已断开连接")
 
     def _enable(self) -> None:
+        # First, because it is the reason that explains the others: the latch
+        # has already disabled the motor, so an enable that got past this would
+        # look like it worked and leave the axis dead.  The connect bar blocks
+        # the button, but commands are serviced before the tick's own E-stop
+        # check, so an 使能 already in the queue would re-energise a latched
+        # axis — and the queue is reachable without the window.
+        if self._estop.is_set():
+            self._alert(
+                "warn", f"急停中，无法使能（{self._estop_reason}）；请先复位"
+            )
+            return
         if not self._connected:
             self._alert("warn", "请先连接")
             return

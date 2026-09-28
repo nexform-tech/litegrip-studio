@@ -1499,6 +1499,26 @@ class TestStopping:
         assert not [c for c in bench.backend.calls if c[0] == "stream_frame"]
         assert all("急停" in text for text in bench.signals.alerts()[-4:])
 
+    def test_the_estop_latches_against_enabling_too(self) -> None:
+        """The bar blocks the button, but the worker has to block the command.
+
+        ``_service_commands`` runs before the tick's E-stop check, so an 使能
+        that was already in the queue when the latch went down would be
+        serviced first — re-energising the axis the E-stop had just put down,
+        while every frame after it was refused for being latched."""
+        bench = Bench()
+        bench.bring_up()
+        bench.loop.estop("测试")
+        bench.tick()
+        assert not bench.loop.enabled
+        bench.backend.calls.clear()
+
+        bench.send(cmd.Enable())
+
+        assert not bench.loop.enabled
+        assert "enable" not in bench.backend.names()
+        assert "急停" in bench.signals.alerts()[-1]
+
     def test_resetting_the_estop_does_not_re_enable(self) -> None:
         """Releasing the latch and energising the motor are two different
         decisions, and the operator has only made the first one."""
