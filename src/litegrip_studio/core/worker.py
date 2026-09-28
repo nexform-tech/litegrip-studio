@@ -1064,15 +1064,60 @@ class WorkerLoop:
             reason = "；".join(info.problems) if info is not None else "未知原因"
             self._alert("error", f"标定不可用：{reason}")
 
-    def _save_calibration(self, path: str | None) -> None:
+    def _save_calibration(self, path: str | None) -> str | None:
+        """Write the calibration out, returning where it landed or ``None``.
+
+        The return value exists for the one caller that has to *decide*
+        something on the answer — a finished probe, whose hand-back depends on
+        whether the file now carries the result (see :meth:`_save_probe_result`).
+        Everything else reports the outcome through the alerts below.
+        """
         try:
             written = self.backend.save_calibration(path)
         except Exception as exc:
             self._alert("error", f"保存标定失败: {exc}")
-            return
+            return None
         self._refresh_calibration()
         self._alert("info", f"标定已保存到 {written}")
         self._log("info", f"标定已保存: {written}")
+        return written
+
+    def _save_probe_result(self, probe: Any, info: CalibrationInfo) -> bool:
+        """Write a finished probe out, and say whether the file now carries it.
+
+        The operator used to have to press 保存 for this, and that press was the
+        only thing between a finished probe and a console that would not move: a
+        result in memory is *usable* but not *saved*, and an unsaved calibration
+        holds the gate shut.  A probe is a calibration the operator asked for by
+        hand, step by step, so it is written without being asked for once more.
+        The button survives as the retry for the case where the write itself
+        fails — a read-only directory, a full disk, the SDK refusing.
+
+        A result that does not pass validation is deliberately *not* written.
+        The file on disk is a working calibration, and replacing it with numbers
+        the console has just called unusable would destroy it; the operator is
+        better served by a console that keeps refusing to move than by one that
+        moves on bad numbers.  The check has to live here because saving is
+        automatic now: the probe itself refuses only a degenerate travel
+        (calibration_fsm.summarise), so this is the first place the rest of
+        ``validate_limits`` gets a say.
+        """
+        if not info.usable:
+            reason = "；".join(info.problems) or "未通过校验"
+            self._alert(
+                "warn",
+                f"{probe.note}。结果未自动保存：{reason}。"
+                "运动限制未解除，请重新标定或手工修好文件",
+            )
+            return False
+        if self._save_calibration(None) is None:
+            self._alert(
+                "warn",
+                f"{probe.note}。结果尚未保存，保存之前不会解除运动限制。"
+                "排除原因后可按「重新保存标定…」重试",
+            )
+            return False
+        return True
 
     def _record_manual_limit(self, opening: bool) -> None:
         """Take the labelled point the operator has just pressed for.
@@ -1237,10 +1282,7 @@ class WorkerLoop:
             self._refresh_calibration(info)
             for line in result.notes:
                 self._log("info", f"标定记录：{line}")
-            self._alert(
-                "info",
-                f"{probe.note}。结果尚未保存，保存之前不会解除运动限制",
-            )
+            saved = self._save_probe_result(probe, info)
         else:
             # What the probe did get to see, logged *before* the verdict: on a
             # failed probe these lines are the whole account of it — which limit
@@ -1250,6 +1292,7 @@ class WorkerLoop:
                 self._log("info", f"标定记录：{line}")
             self._refresh_calibration()
             self._alert("warn", f"标定未完成：{probe.note}")
+            saved = False
         self._signals.calib_progress.emit(probe.phase.value, 1.0, probe.note)
 
         # Hand the axis back — which, for an enabled motor, cannot mean dropping
@@ -1261,6 +1304,13 @@ class WorkerLoop:
         # stops telling the motor anything.
         if not self._enabled:
             self._motion.idle()
+        elif saved:
+            # Nothing left to hand back: writing the result is what opened the
+            # gate, and the re-read that follows the write saw a READY gate and
+            # held the measured pose there and then (see _refresh_calibration).
+            # Sending the hold a second time would repeat the same frame, so the
+            # hand-back is over before it starts.
+            return
         elif self._gate is GateState.READY:
             self._hold_measured("标定结束，但尚未读到位置，先松力")
         else:

@@ -89,8 +89,9 @@ sudo ip link set can0 up
 ./run_litegrip_studio.sh gui
 ```
 
-**On a real gripper, run the guided calibration from the calibration page and save it before
-touching the slider.** If the fingers are mounted the other way round — the encoder angle growing
+**On a real gripper, run the guided calibration from the calibration page before touching the
+slider.** The result is written out as soon as the probe finishes. If the fingers are mounted the
+other way round — the encoder angle growing
 as the jaws open — tick 反向装配 first, or use the manual two-point wizard, which takes the
 direction from the labels the operator presses instead. If the calibration page shows `FACTORY` or
 `BLOCKED`, calibrate first rather than overriding the gate.
@@ -238,11 +239,21 @@ intention expressed in the old frame's millimetres has no honest conversion. Wit
 steps, loading a *correct* calibration sends the axis straight for the other end of the new travel.
 
 A probe result lives only in memory at first (`in_memory_unsaved`), and **the gate stays shut
-while it does**: you look at what was measured before deciding it should govern motion. Saving is
-followed by the backend reading the file back, and only then does the provenance become
-`user_file` and the gate `READY`. Both the real and the simulated backend do this: a simulation
-that wrote without reading back would leave the operator with the gate shut after a successful
-calibration and save.
+while it does**: you look at what was measured before deciding it should govern motion. A probe
+that runs to the end therefore **writes itself out** rather than waiting to be told — the two
+presses of 记录 are already the request for a calibration, and leaving the axis locked until the
+operator works out that a third press is needed is how a finished calibration looks like a broken
+console. Saving is followed by the backend reading the file back, and only then does the provenance
+become `user_file` and the gate `READY`. Both the real and the simulated backend do this: a
+simulation that wrote without reading back would leave the operator with the gate shut after a
+successful calibration.
+
+Two things the automatic write deliberately will not do. It will not save a result that failed
+validation, because the file it would replace is a working calibration — the operator keeps a
+console that refuses to move over one that moves on numbers it has just called unusable. And it
+will not save over the SDK's own factory file, which ships with the package and describes whichever
+unit it was taken on. 重新保存标定… stays on the page for the one case that is left: the write
+itself failing, on a read-only directory or a disk that has filled up.
 
 ### Enabling: read a position first, then hold it
 

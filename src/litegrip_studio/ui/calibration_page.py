@@ -171,7 +171,7 @@ class CalibrationPage(QWidget):
 
         self._reload = QPushButton("重新读取")
         self._load = QPushButton("载入文件…")
-        self._save = QPushButton("保存标定…")
+        self._save = QPushButton("重新保存标定…")
 
         self._progress = QProgressBar()
         self._phase_label = QLabel()
@@ -358,7 +358,8 @@ class CalibrationPage(QWidget):
         text = QLabel(
             "标定期间电机零力矩，用手把夹爪分别摆到两个极限，每到一个按一次对应的"
             "「记录」：先记张开极限，再记闭合极限（闭合记为 0 mm）。"
-            "两个极限都记到之后才能保存。"
+            "两个极限都记到之后标定自动完成并写入文件，不需要再按保存；"
+            "写入失败时可以用「重新保存标定…」重试。"
         )
         text.setWordWrap(True)
 
@@ -588,9 +589,18 @@ class CalibrationPage(QWidget):
 
         self._reload.setEnabled(not any_running)
         self._load.setEnabled(not any_running)
-        # Only a calibration whose numbers are self-consistent is worth writing
-        # out; saving a file the console has just called unusable would launder
-        # it into one that looks like a user calibration next launch.
+        # Still only a calibration whose numbers are self-consistent, and still
+        # never the factory one.  The probe writes its own result out now, so
+        # this button is normally a retry for a write that failed on something
+        # outside the numbers (a read-only directory, a full disk, the SDK
+        # refusing) — and a usable in-memory result is exactly what a retry
+        # needs.  Two things are not for retrying.  Numbers the console has just
+        # called unusable come back with no limits, so writing them would save a
+        # file that only looks like a calibration.  The factory numbers are the
+        # one case the backend's own guard cannot catch: they can arrive with no
+        # path at all (the SDK's bundled fallback), and then the target is the
+        # *user* file, which is how they would be laundered into this gripper's
+        # own calibration on the next launch.
         self._save.setEnabled(
             not any_running
             and info is not None

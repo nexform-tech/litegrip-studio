@@ -33,6 +33,7 @@ import logging
 import math
 import time
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from litegrip import GripperConfig, LiteGrip, LiteGripError, describe_error
@@ -53,6 +54,22 @@ from . import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def _same_file(a: str | Path, b: str | Path) -> bool:
+    """Whether two paths name the same file, spelling and symlinks aside.
+
+    The two sides arrive from opposite directions — the save target is
+    whatever string the console was launched with, the factory path is built
+    from the package location — so a plain string comparison would miss
+    ``~``, ``..`` and a symlinked package directory.  Neither file need exist
+    for the answer to be useful, which is why this resolves rather than
+    statistics.
+    """
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except OSError:  # pragma: no cover - unresolvable path
+        return str(a) == str(b)
 
 
 class RealBackend(GripperBackend):
@@ -363,6 +380,20 @@ class RealBackend(GripperBackend):
         if info is None or info.limits is None:
             raise NotReady("没有可保存的标定")
         target = path or self._calibration_path or str(calibration.default_user_path())
+
+        # The SDK's own file is data, not state: it ships with the package and
+        # describes whichever unit it was taken on.  Overwriting it would
+        # replace the fallback every later install of this console relies on,
+        # and it is reachable without meaning to — the target is the stored
+        # path, which is whatever the console was told to load at launch.  The
+        # UI's own check is about the calibration in hand, not about where the
+        # write is going, and a finished probe writes itself out now, so the
+        # target needs a guard of its own.
+        if _same_file(target, calibration.factory_path()):
+            raise BackendError(
+                f"拒绝覆盖出厂标定文件 {target}：那是 SDK 自带的数据，"
+                "请把结果保存到用户标定路径"
+            )
 
         # The SDK writes the file from its own config, so the config has to
         # carry our numbers first or we would save whatever was there before.

@@ -37,6 +37,7 @@ LiteGripError = litegrip.LiteGripError
 
 from litegrip_studio import calibration, constants
 from litegrip_studio.backend import (
+    BackendError,
     ConnectFailed,
     EnableFailed,
     FaultActive,
@@ -773,6 +774,40 @@ class TestSaveCalibration:
         assert written["max_position_rad"] == pytest.approx(-0.064279)
         assert written["rad_to_mm"] == pytest.approx(backend.limits().rad_to_mm)
         assert written["rad_to_mm"] != pytest.approx(65.21)
+
+    def test_the_factory_file_is_never_the_save_target(self, backend, env) -> None:
+        """The SDK's bundled file describes whichever unit it was taken on.
+
+        Overwriting it would replace the fallback every later install of this
+        console depends on.  It is also reachable without meaning to: the target
+        is the stored path, which is whatever the console was told to load at
+        launch.  The UI used to keep it out of reach by offering the save only
+        for a USER or MEMORY provenance — a finished probe now writes itself
+        out, so the refusal has to live here.
+        """
+        backend.set_calibration_memory(1.775959, -0.064279, 65.21)
+
+        with pytest.raises(BackendError, match="出厂标定"):
+            backend.save_calibration(str(env.factory))
+
+        assert not env.factory.exists()
+        assert _stub(backend).saved == [], "nothing reached the SDK"
+
+    def test_a_symlink_to_the_factory_file_is_the_factory_file(
+        self, backend, env
+    ) -> None:
+        """The target arrives as a string the operator typed, so the same file
+        can be named more than one way — and the ways that look least like the
+        factory file are the ones a check on the string would miss."""
+        env.factory.write_text("{}", encoding="utf-8")
+        innocent = env.dir / "innocent.json"
+        innocent.symlink_to(env.factory)
+        backend.set_calibration_memory(1.775959, -0.064279, 65.21)
+
+        with pytest.raises(BackendError, match="出厂标定"):
+            backend.save_calibration(str(innocent))
+
+        assert env.factory.read_text(encoding="utf-8") == "{}"
 
     def test_saving_with_nothing_to_save_is_refused(self, backend) -> None:
         with pytest.raises(NotReady):

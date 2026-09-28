@@ -80,6 +80,15 @@ MEMORY_CAL = CalibrationInfo(
     path=None,
     warnings=("结果尚未保存",),
 )
+#: A probe result whose numbers did not survive validation.  ``in_memory``
+#: drops the limits when a hard check fails, so this is what a result that
+#: cannot be saved actually looks like — not merely one that is unsaved.
+BROKEN_MEMORY_CAL = CalibrationInfo(
+    provenance=calibration.PROVENANCE_MEMORY,
+    limits=None,
+    path=None,
+    problems=("由行程 0.003824 rad 与设定行程 85.0 mm 推出的 mm/rad 超出合理范围",),
+)
 
 
 def frame(**changes) -> TelemetryFrame:
@@ -450,14 +459,31 @@ class TestSaving:
         assert page._save.isEnabled()
 
     def test_an_unsaved_result_can_be_saved(self, page) -> None:
+        """An in-memory result blocks motion, and that is precisely why the
+        button has to stay live: a finished probe writes itself out, so what is
+        left for the button is the retry after that write failed — and a retry
+        on a result that is merely unsaved is the whole case it exists for."""
         page.set_calibration(MEMORY_CAL)
 
+        assert not MEMORY_CAL.motion_allowed, "still gated, and still savable"
         assert page._save.isEnabled()
+
+    def test_a_broken_memory_result_offers_nothing_to_save(self, page) -> None:
+        """A result that failed validation comes back with no limits, and a
+        file written from it would only look like a calibration — the next
+        launch would load it as this gripper's own and refuse to move."""
+        page.set_calibration(BROKEN_MEMORY_CAL)
+
+        assert not page._save.isEnabled()
 
     def test_the_factory_file_is_not_the_operator_s_to_overwrite(self, page) -> None:
         """Saving the factory numbers into the user path would launder them into
         a user calibration, and the next launch would show them as this
-        gripper's own."""
+        gripper's own.
+
+        The backend refuses the factory path by name as well, but that guard
+        cannot see this case: a factory calibration the SDK fell back to has no
+        path of its own, so the target would be the *user* file."""
         page.set_calibration(FACTORY_CAL)
 
         assert not page._save.isEnabled()
@@ -466,6 +492,11 @@ class TestSaving:
         page.set_calibration(INVALID_CAL)
 
         assert not page._save.isEnabled()
+
+    def test_the_button_says_it_is_a_retry(self, page) -> None:
+        """No probe ever needs it pressed, so it must not read like a step of
+        the procedure."""
+        assert page._save.text() == "重新保存标定…"
 
     def test_nothing_is_offered_while_a_probe_runs(self, page) -> None:
         page.set_calibration(USER_CAL)
