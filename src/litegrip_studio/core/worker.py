@@ -1178,6 +1178,32 @@ class WorkerLoop:
         self._probe = probe
         self._probe_pub_t = 0.0
         self._probe_unsent_s = 0.0
+        if not guided:
+            # A manual probe is the operator's hands on the jaws, so the axis has
+            # to be free for the whole of it and the console has to say so — a
+            # 记录 button that works while the page still looks like it is
+            # holding a position is a wizard nobody trusts.
+            #
+            # After ``probe.start``, not before: a probe that refuses to start
+            # returns above, and it must not leave a zero-gravity state behind it
+            # for a wizard that never opened.  ``None`` for the measurement
+            # because entering needs none — zero stiffness commands no pose.
+            #
+            # The frames do not change, and there are not two things driving the
+            # axis.  The probe's own frames are zero-gain and ungated — the same
+            # ones ZERO_G sends, from TwoPointCalibFSM.tick through FREE_FRAME —
+            # and the motion FSM is not ticked while a probe is active
+            # (tick_once branches on the probe first).  So this is the label the
+            # operator reads, not a second owner of the axis.
+            #
+            # The guided probe is left exactly as it was: it drives the jaws into
+            # the stops itself and needs the axis to itself to do it.
+            self._motion.zero_gravity(True, None, "开始手动标定")
+            self._log(
+                "warn",
+                "已进入零重力：用手把两片手指分别推到张开和闭合极限，"
+                "每到一个按一次对应的「记录」；标定结束时自动退出零重力并驻留",
+            )
         kind = "引导式" if guided else "手动两点"
         self._log("warn", f"开始{kind}标定，入口位置 {self._tele.position_rad:.6f} rad")
 
@@ -1294,14 +1320,35 @@ class WorkerLoop:
             self._alert("warn", f"标定未完成：{probe.note}")
             saved = False
         self._signals.calib_progress.emit(probe.phase.value, 1.0, probe.note)
+        self._hand_back_after_probe(probe, saved=saved)
 
-        # Hand the axis back — which, for an enabled motor, cannot mean dropping
-        # to IDLE: that state sends no frame at all, and a drive with no frame
-        # to act on is a drive whose jaws are free.  What it was holding is a
-        # press against a hard stop, and what it is left holding is nothing, so
-        # the fingers answer with whatever the mechanism's own springs want —
-        # which is the pop the operator sees, at the one moment the console
-        # stops telling the motor anything.
+    def _hand_back_after_probe(self, probe: Any, *, saved: bool) -> None:
+        """Close a probe out: leave zero gravity and put the axis somewhere.
+
+        Reached by every way a probe can end — finished, cancelled, failed —
+        and it is the last of those that makes it matter: the operator's hands
+        are on the jaws for the whole of a manual probe, so a console that
+        quietly stays free is a console they are still holding up, at the moment
+        the wizard has just said the calibration is over.
+
+        Leaving zero gravity goes through ``hold_rad`` rather than
+        ``zero_gravity(False, measured_mm)``, which holds a *clamped* millimetre
+        — derived from the very limits that are in doubt on this path, and the
+        one thing a shut gate must not command.  What is held instead is a
+        measurement: the pose the encoder has just reported, which needs no
+        limits at all.
+
+        For an enabled motor this cannot mean dropping to IDLE: that state sends
+        no frame at all, and a drive with no frame to act on is a drive whose
+        jaws are free.  What it was holding is a press against a hard stop, and
+        what it is left holding is nothing, so the fingers answer with whatever
+        the mechanism's own springs want — which is the pop the operator sees, at
+        the one moment the console stops telling the motor anything.
+        """
+        if not isinstance(probe, GuidedCalibFSM):
+            # Only a manual probe put the axis in zero gravity, so only a manual
+            # probe has one to leave.
+            self._log("info", "标定结束，已退出零重力")
         if not self._enabled:
             self._motion.idle()
         elif saved:

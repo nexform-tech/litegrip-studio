@@ -340,7 +340,10 @@ numerator is the travel the operator measured — see "Known limitations".
 The guided probe needs the stops to be reachable and detectable. When they are not — a stiff
 linkage, a travel that is not where the SDK expects it, a drive that will not take a probe step at
 all — the manual wizard takes over: the axis is held limp and the operator works the jaws to each
-extreme by hand.
+extreme by hand. **Starting it puts the axis in zero gravity and says so**, and finishing it takes
+the axis back — on every way out, including a cancel, because the operator's hands are on the jaws
+for all of it. The guided probe is left alone: it drives the jaws into the stops itself and needs
+the axis to itself to do it.
 
 - **Two labelled buttons, not one.** The open extreme is recorded first, then the closed one, which
   is 0 mm. The label on the button is the operator's whole answer to "which end is zero", so a
@@ -364,7 +367,9 @@ extreme by hand.
 - **Every wait is bounded** at `TWO_POINT_TIMEOUT_S` (5 minutes per point). The axis is limp for the
   whole procedure, and a console left holding an enabled, limp motor is a gripper that falls open on
   whatever is under it. A probe that fails or is cancelled stays limp; only one that ran to the end
-  hands the axis back under position control, at the SDK's exit gains.
+  hands the axis back under position control, at the SDK's exit gains — and with the write broken it
+  is handed back at the *angle the encoder reports*, because a hold in millimetres would have to
+  come from the very limits that are still in doubt.
 
 ---
 

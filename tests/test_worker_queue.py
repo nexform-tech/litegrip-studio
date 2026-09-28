@@ -1368,6 +1368,67 @@ class TestCalibrationCommands:
         ][-1]
         assert (kp, kd, tau) == (0.0, 0.0, 0.0)
 
+    def test_starting_a_manual_probe_enters_zero_gravity(self) -> None:
+        """The wizard asks the operator to push the jaws, so the axis has to be
+        free *and say so*: a 记录 button that works while the page looks like it
+        is holding a position is a wizard nobody trusts."""
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.StartManualCalibration())
+        bench.tick()
+
+        assert bench.loop.motion.state is MotionState.ZERO_G
+        assert bench.loop.motion.source == "开始手动标定"
+
+    def test_starting_a_guided_probe_does_not_enter_zero_gravity(self) -> None:
+        """A guided probe drives the jaws into the stops itself.  Freeing the
+        axis would take away the only thing doing the driving."""
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.StartGuidedCalibration())
+        bench.tick()
+
+        assert bench.loop.motion.state is not MotionState.ZERO_G
+
+    def test_finishing_a_manual_probe_leaves_zero_gravity_and_holds_the_angle(
+        self,
+    ) -> None:
+        """The operator is holding the jaws for the whole probe, so the console
+        has to take them back at the end — and with the write broken, the only
+        thing it can name is the angle the encoder reports."""
+        bench = Bench(RecordingBackend(fail=("save_calibration",)))
+        bench.bring_up()
+        bench.send(cmd.StartManualCalibration())
+        bench.tick()
+        assert bench.loop.motion.state is MotionState.ZERO_G
+
+        bench.drive_to(120.0)
+        bench.send(cmd.RecordOpenLimit())
+        bench.drive_to(0.0)
+        bench.send(cmd.RecordCloseLimit())
+
+        assert bench.loop.motion.state is MotionState.HOLD_RAD
+        logged = [text for _level, text in bench.signals.of("log")]
+        assert any("已退出零重力" in text for text in logged)
+
+    def test_a_cancelled_manual_probe_also_leaves_zero_gravity(self) -> None:
+        """Cancelling is the way out an operator reaches for when something is
+        wrong, which makes it the worst possible time to leave the axis free."""
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.StartManualCalibration())
+        bench.tick()
+        assert bench.loop.motion.state is MotionState.ZERO_G
+
+        bench.send(cmd.CancelCalibration())
+        bench.run_until_probe_finishes()
+
+        assert bench.loop.probe is None
+        assert bench.loop.motion.state is not MotionState.ZERO_G
+        bench.backend.calls.clear()
+        bench.tick(3)
+        assert len([c for c in bench.backend.calls if c[0] == "stream_frame"]) == 3
+
     def test_the_two_labelled_points_finish_the_probe(self) -> None:
         """The reported flow end to end, at the worker's own level: the
         operator works the jaws to the open extreme, records it, works them back
