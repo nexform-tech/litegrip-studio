@@ -351,7 +351,7 @@ class TestTheGate:
         assert "缺少标定文件" in page.slider.toolTip()
 
     def test_a_blocked_gate_disables_the_moves_but_not_the_stops(self, page) -> None:
-        """停止 and 松力 are the two controls whose purpose is to stop rather
+        """停止 and 零重力 are the two controls whose purpose is to stop rather
         than to go anywhere; refusing them would be refusing to let go.
 
         放开 is *not* one of them: it is a millimetre command derived from the
@@ -398,7 +398,13 @@ class TestSpeedAndForce:
     def test_the_grasp_button_says_what_it_will_do(self, page) -> None:
         page._force.setValue(18.0)
 
+        assert "夹取" in page._grasp.text()
         assert "18.0" in page._grasp.text()
+
+    def test_the_release_button_is_named_what_the_operator_calls_it(self, page) -> None:
+        """The same word the calibration wizard uses for the same state, and the
+        one the log line carries — one name for one physical thing."""
+        assert page._release.text() == "零重力（可手掰）"
 
     def test_a_force_near_the_rating_is_flagged_before_it_is_reached(self, page) -> None:
         page._force.setValue(constants.FORCE_SOFT_WARN_N + 1.0)

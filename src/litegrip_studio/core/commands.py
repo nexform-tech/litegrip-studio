@@ -126,7 +126,7 @@ class Grasp(Command):
 
     def describe(self) -> str:
         cap = "" if self.force_n is None else f" {self.force_n:.1f} N"
-        return f"夹持{cap}（来源 {self.source}）"
+        return f"夹取{cap}（来源 {self.source}）"
 
 
 @dataclass(frozen=True)
@@ -164,12 +164,20 @@ class Stop(Command):
 
 @dataclass(frozen=True)
 class Release(Command):
-    """Zero torque, still enabled and back-drivable.  The jaws can be pushed."""
+    """Zero torque, still enabled and back-drivable.  The jaws can be pushed.
+
+    Named 零重力 on the button and in the log, like :class:`SetZeroGravity`
+    below it — the two are the same physical state and the operator has one word
+    for it.  They stay two commands because they are two different acts: this
+    one is a resting state the button puts the axis in, and
+    :class:`SetZeroGravity` is a step of the calibration wizard that has to be
+    left again to finish.
+    """
 
     source: str = "release"
 
     def describe(self) -> str:
-        return f"松力（零力矩，来源 {self.source}）"
+        return f"零重力（零力矩，来源 {self.source}）"
 
 
 @dataclass(frozen=True)

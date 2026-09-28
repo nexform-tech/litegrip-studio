@@ -72,7 +72,7 @@ class ControlPage(QWidget):
         self._grasp = QPushButton()
         self._back_off = QPushButton("放开")
         self._stop = QPushButton("停止（保持位置）")
-        self._release = QPushButton("松力（可手掰）")
+        self._release = QPushButton("零重力（可手掰）")
 
         self._speed = QSlider(Qt.Horizontal)
         self._speed_value = QLabel()
@@ -356,7 +356,7 @@ class ControlPage(QWidget):
 
     def _on_force_changed(self, value: float) -> None:
         self._submit(cmd.SetForce(force_n=float(value)))
-        self._grasp.setText(f"夹持 {value:.1f} N")
+        self._grasp.setText(f"夹取 {value:.1f} N")
         if value >= constants.FORCE_MAX_N:
             self._force.setStyleSheet(f"color: {theme.ERROR};")
         elif value > constants.FORCE_SOFT_WARN_N:

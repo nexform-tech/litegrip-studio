@@ -35,11 +35,17 @@ Stopping is three different things
 The SDK offers one ``stop()``.  An operator needs three, and conflating them is
 how a gripper gets dropped or keeps squeezing:
 
-======  =========================================  ==================
-停止     hold the current position, position gain     stays enabled
-松力     zero stiffness, zero torque, back-drivable    stays enabled
-急停     zero torque then disable, and latch           disabled
-======  =========================================  ==================
+========  =========================================  ==================
+停止       hold the current position, position gain     stays enabled
+零重力     zero stiffness, zero torque, back-drivable    stays enabled
+急停       zero torque then disable, and latch           disabled
+========  =========================================  ==================
+
+The middle one is ``MotionState.RELEASE`` — the button's zero gravity.  The
+calibration wizard has a zero-gravity state of its own (``ZERO_G``, entered by
+``SetZeroGravity``): same physics, and the two are deliberately separate states,
+because the wizard's has to be left again before the manual two-point flow can
+record anything.
 
 The latch is what makes the third one different in kind: once tripped, every
 motion command is refused until :class:`~litegrip_studio.core.commands.ResetEStop`,
@@ -905,7 +911,7 @@ class WorkerLoop:
             # whole purpose is to stop rather than to go anywhere.  It holds at
             # the measured angle when the gate is shut, which needs no limits.
             if self._gate is GateState.READY:
-                self._hold_measured("已停止，但尚未读到位置，先松力")
+                self._hold_measured("已停止，但尚未读到位置，先零重力")
             else:
                 self._motion.idle()
                 self._zero_torque_quietly(f"已停止：{self._gate_reason}")
@@ -1098,7 +1104,7 @@ class WorkerLoop:
             # frame arrives, which the tick below picks up.
             self._awaiting_position = True
             self._motion.release("使能后尚未读到位置")
-            self._log("info", "电机已使能；尚未读到位置，先松力，读到后自动保持")
+            self._log("info", "电机已使能；尚未读到位置，先零重力，读到后自动保持")
         else:
             self._awaiting_position = False
             self._hold_measured("使能后尚未读到位置")
@@ -1457,7 +1463,7 @@ class WorkerLoop:
             # hand-back is over before it starts.
             return
         elif self._gate is GateState.READY:
-            self._hold_measured("标定结束，但尚未读到位置，先松力")
+            self._hold_measured("标定结束，但尚未读到位置，先零重力")
         else:
             # Behind a shut gate there is no vetted travel to name a millimetre
             # in, and there does not need to be: the pose to hold is the one the

@@ -197,8 +197,9 @@ class RealBackend(GripperBackend):
         ``ungated`` is for frames that carry no target this gate has anything to
         say about: the calibration probes, which look for the mechanical stops
         beyond the red lines and run before there is a calibration to check
-        against; and 松力, 零重力 and the hold a probe is left in, which command
-        either no stiffness or the angle the encoder has just reported.  The
+        against; and 零重力 (``RELEASE``), the wizard's zero gravity
+        (``ZERO_G``) and the hold a probe is left in, which command either no
+        stiffness or the angle the encoder has just reported.  The
         three refusals below exist to stop a *position command derived from a
         calibration in doubt* from reaching the drive, and none of those frames
         is one.  The name describes the frame rather than its caller because a

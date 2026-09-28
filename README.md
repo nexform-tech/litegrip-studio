@@ -105,7 +105,7 @@ disable / clear fault / reset emergency stop), the emergency-stop button, and th
 
 | Page | Contents |
 | --- | --- |
-| Control | Position slider, open all / close all, stop (hold position), release (back-drivable), speed, grasp force, grasp / let go |
+| Control | Position slider, open all / close all, stop (hold position), zero gravity (back-drivable), speed, grasp force, grasp / let go |
 | Status | Telemetry table, temperature, faults and clearing them, link health |
 | Plots | pyqtgraph position and force plots (the force axis autoscales) |
 | Calibration | Provenance banner, file actions, guided and manual two-point wizards, the gate |
@@ -155,7 +155,7 @@ the jaws **are** (`RELEASE_OPEN_MM`), to release whatever they are holding. It m
 its target is always the closed end and "target + 10 mm" is a command straight back into the
 object. At the top of the range it is a move of zero length (`move_to_mm` clamps) rather than an
 error. It is a millimetre command, so the gate refuses it like any other move; with an unusable
-calibration the two ways to let go are **release (back-drivable)** and **stop**.
+calibration the two ways to let go are **zero gravity (back-drivable)** and **stop**.
 
 ### The force plot autoscales
 
@@ -275,11 +275,11 @@ The position reading therefore has two states, and `TelemetryFrame.position_mm` 
 frames itself (`_rx_frames > 0`, the same signal the gate and the link liveness check use). Before
 that:
 
-- **Enabling** does not hold, it releases (`kp=kd=tau=0`). Zero gain needs no position and is the
-  only honest command in that window; the first frame turns it into a hold at the measured position
-  automatically, with a log line.
+- **Enabling** does not hold, it goes to zero gravity (`RELEASE`, `kp=kd=tau=0`). Zero gain needs
+  no position and is the only honest command in that window; the first frame turns it into a hold at
+  the measured position automatically, with a log line.
 - Stop / leaving zero-gravity / clearing a fault / reopening the gate all need to "hold in place",
-  and the rule is the same: with no measurement, release.
+  and the rule is the same: with no measurement, zero gravity.
 - A motion request is refused with the reason spelled out: "no position read yet; the motor has
   never reported a status frame".
 - No number appears anywhere in the interface: the slider draws no measured triangle and does not
@@ -305,14 +305,15 @@ calibration existed, not whether this frame carried a target the check could jud
 calibration shut the probe inside the very travel it was there to measure, and it recorded "the
 last step I was allowed to command" as the open limit — a wrong answer that reads like a successful
 measurement. Such frames now say so explicitly (`ungated=True`): the probe steps, which are looking
-for stops beyond the red lines, and the frames that carry no target at all — 松力, 零重力, and the
-hold a probe is left in, whose pose is the angle the encoder has just reported. An ungated frame
-still refuses non-finite values and negative gains, which are wrong whatever the calibration says.
+for stops beyond the red lines, and the frames that carry no target at all — 零重力 (`RELEASE`),
+the wizard's zero gravity (`ZERO_G`), and the hold a probe is left in, whose pose is the angle the
+encoder has just reported. An ungated frame still refuses non-finite values and negative gains,
+which are wrong whatever the calibration says.
 
 The flag is named for what the frame *is* rather than for who sent it, and that includes the
-long-lived states: 松力 can be held open for an hour without widening what it permits, because what
+long-lived states: 零重力 can be held open for an hour without widening what it permits, because what
 it permits is a frame with no stiffness in it. Before it existed there was one flag named after its
-first caller, and 松力 behind a shut gate — the state an operator needs precisely when the file is
+first caller, and 零重力 behind a shut gate — the state an operator needs precisely when the file is
 bad — was refused by the gate it was there to work around.
 
 The probe also has to know **which way the jaws open**, and it cannot read that from a file: it is

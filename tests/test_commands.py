@@ -115,6 +115,13 @@ class TestDescribe:
         assert "12.0 N" in Close(force_n=12.0).describe()
         assert "N" not in Close().describe()
 
+    def test_the_action_lines_use_the_names_printed_on_the_buttons(self) -> None:
+        """An operator reading the log after a mistake is looking for the button
+        they pressed.  A synonym there is a second name for one thing, and the
+        two have to be kept in step by hand."""
+        assert "夹取" in Grasp(force_n=12.0).describe()
+        assert "零重力" in Release().describe()
+
     def test_a_release_says_how_far_it_opens_and_who_asked(self) -> None:
         """How far this release went is the whole content of the line, and it is
         the move that is otherwise reconstructed from the frames around it."""

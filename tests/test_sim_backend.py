@@ -60,7 +60,7 @@ class Bench:
 class TestZeroTorqueIsNotAShutdown:
     """``zero_torque`` mirrors ``LiteGrip.stop()``: zero gain, motor still on.
 
-    The distinction matters because the console uses it for both "松力" and the
+    The distinction matters because the console uses it for both 零重力 and the
     gate-closing path, and because on the bench a stopped DM motor keeps
     listening — a console that had to re-enable before every command would work
     in the simulator and not on hardware.
