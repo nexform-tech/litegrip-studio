@@ -156,6 +156,11 @@ class RecordingBackend(GripperBackend):
         self.connected = False
         self.enabled = False
         self.q_rad = MID_RAD
+        #: The angle the drive last reported while it was being addressed.  A
+        #: disabled DM motor stops answering, so the SDK goes on serving this
+        #: number while the mechanism itself sits wherever it was left — which is
+        #: why :meth:`drag` moves ``q_rad`` without touching it.
+        self._served_rad: float | None = None
         self.error_code = constants.ERROR_DISABLED
         self.rx_frames = 0
 
@@ -206,16 +211,30 @@ class RecordingBackend(GripperBackend):
         self._record("poll")
         return self.fresh
 
+    def drag(self, q_rad: float) -> None:
+        """Push the jaws by hand while the drive is dark.
+
+        The real backend reads the SDK's cache, and a disabled drive stops
+        updating it: the angle served stays where it was while the mechanism
+        moves.  A fake whose ``read`` followed ``q_rad`` straight away would hand
+        the worker the hand's work as though the encoder had seen it, and the
+        tests below would pass with the bug they exist to catch still in place.
+        """
+        self.q_rad = q_rad
+
     def read(self) -> Telemetry:
         self._claim()
+        if self.enabled or self._served_rad is None:
+            self._served_rad = self.q_rad
+        q_rad = self._served_rad
         return Telemetry(
-            position_rad=self.q_rad,
+            position_rad=q_rad,
             velocity_rad_s=0.0,
             torque_nm=0.0,
             temperature_mos=30,
             temperature_coil=30,
             error_code=self.error_code,
-            position_mm=self._limits.to_mm(self.q_rad),
+            position_mm=self._limits.to_mm(q_rad),
             force_n=0.0,
             t=0.0,
         )
@@ -586,15 +605,22 @@ class TestGateInTheLoop:
         assert bench.loop.gate is GateState.FACTORY
 
         bench.send(cmd.Enable())
-        assert not bench.loop.enabled
-        assert not bench.loop.enabled
+        # The axis comes up regardless: it has to, because the probe that would
+        # replace this file records its limits off a motor that answers.  What
+        # the acknowledgement buys is *motion*, and that is what stays refused.
+        assert bench.loop.enabled
+        assert bench.loop.motion.state is MotionState.HOLD_RAD
         assert "出厂标定" in bench.signals.alerts()[-1]
+
+        bench.send(cmd.MoveToMm(30.0), count=4)
+        assert bench.loop.motion.state is MotionState.HOLD_RAD
+        assert "被拒绝" in bench.signals.alerts()[-1]
 
         bench.loop.set_allow_factory(True)
         assert bench.tick().motion_state != "ESTOP"
         assert bench.loop.gate is GateState.READY
-        bench.send(cmd.Enable())
-        assert bench.loop.enabled
+        bench.send(cmd.MoveToMm(30.0), count=10)
+        assert bench.loop.motion.state is MotionState.SERVO
 
     def test_a_move_is_refused_while_the_gate_is_shut(self) -> None:
         bench = Bench()
@@ -691,6 +717,146 @@ class TestGateInTheLoop:
         assert sent, "the axis takes up its hold again"
         assert all(this_unit.rad_low <= q <= this_unit.rad_high for q in sent)
         assert abs(sent[-1] - backend.q_rad) < constants.CALIB_MISMATCH_RAD
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Energising a console whose calibration is unusable
+# ═══════════════════════════════════════════════════════════════════════════
+class TestEnablingWithNoUsableCalibration:
+    """使能 must not be the thing that gets refused.
+
+    It used to be: a calibration that fails validation shuts the gate, and a
+    shut gate refused 使能 outright — which locks the operator out of the one
+    flow that can replace the file.  The manual probe records its limits off a
+    motor that answers, and enabling is what makes it answer.
+
+    What the gate withholds is *millimetres*, so the axis comes up on a hold of
+    the angle the encoder reports.  That needs no calibration at all: it is the
+    identity under every file there could be, and it is the only hold that is
+    safe under a file whose numbers are in doubt — a millimetre hold would clamp
+    the measured angle into a travel nobody has vetted and drive there.
+    """
+
+    def blocked(self) -> Bench:
+        bench = Bench(RecordingBackend(info=BROKEN, limits=LIMITS))
+        bench.send(cmd.Connect())
+        assert bench.loop.gate is GateState.BLOCKED
+        return bench
+
+    def held_frames(self, bench: Bench) -> list[tuple]:
+        bench.backend.calls.clear()
+        bench.tick(5)
+        return [c[1] for c in bench.backend.calls if c[0] == "stream_frame"]
+
+    def test_a_blocked_gate_still_lets_the_axis_be_energised(self) -> None:
+        bench = self.blocked()
+
+        bench.send(cmd.Enable())
+
+        assert bench.loop.enabled
+        assert bench.loop.motion.state is MotionState.HOLD_RAD
+
+    def test_the_operator_is_told_why_it_cannot_move_in_millimetres(self) -> None:
+        """Left unsaid, a gripper that holds but will not move reads as broken,
+        and the operator goes looking for a hardware fault instead of a probe."""
+        bench = self.blocked()
+
+        bench.send(cmd.Enable())
+
+        alert = bench.signals.alerts()[-1]
+        assert "标定不可用" in alert
+        assert "重新标定" in alert, "the way out, not just the refusal"
+
+    def test_the_hold_is_the_angle_the_encoder_reports(self) -> None:
+        bench = self.blocked()
+
+        bench.send(cmd.Enable())
+
+        frames = self.held_frames(bench)
+        assert len(frames) == 5, "an enabled axis is talked to every tick"
+        assert all(f[0] == pytest.approx(bench.backend.q_rad) for f in frames)
+        assert all(f[1] == constants.KP_MOVE for f in frames)
+        assert all(f[4] == 0.0 for f in frames), "no feed-forward from a bad file"
+
+    def test_the_hold_claims_no_millimetre_target(self) -> None:
+        """Published as no command, so the UI never shows a target derived from
+        the limits under suspicion — and so nothing in the frame goes through
+        the conversion that a wrong file would corrupt."""
+        bench = self.blocked()
+
+        bench.send(cmd.Enable())
+
+        assert self.held_frames(bench), "held, not left silent"
+        assert bench.frame().cmd_mm is None
+
+    def test_a_multi_tick_hold_never_clamps_the_measured_angle(self) -> None:
+        """The failure a millimetre hold would produce here: the reading is
+        outside ``LIMITS``, so a conversion would pull it to the nearest end of
+        the travel and command the jaws *there*."""
+        backend = RecordingBackend(info=BROKEN, limits=LIMITS)
+        backend.q_rad = -1.0  # outside LIMITS in both directions
+        bench = Bench(backend)
+        bench.send(cmd.Connect())
+        assert not (LIMITS.rad_low <= backend.q_rad <= LIMITS.rad_high)
+
+        bench.send(cmd.Enable())
+
+        frames = self.held_frames(bench)
+        assert len(frames) == 5
+        assert all(f[0] == pytest.approx(-1.0) for f in frames)
+
+    def test_a_move_is_still_refused_while_the_gate_is_shut(self) -> None:
+        """Energising is allowed; steering by a number nobody has vetted is
+        not."""
+        bench = self.blocked()
+        bench.send(cmd.Enable())
+
+        bench.send(cmd.MoveToMm(30.0), count=4)
+
+        assert bench.loop.motion.state is MotionState.HOLD_RAD
+        assert "被拒绝" in bench.signals.alerts()[-1]
+
+    def test_loading_a_usable_file_returns_the_hold_to_millimetres(self) -> None:
+        """The radian hold is a fallback, not a mode.  Once a travel can be
+        trusted the console names the pose in millimetres again — the same
+        pose, but with a target the UI can show and a move that starts from
+        where the operator thinks it does."""
+        backend = RecordingBackend(limits=LIMITS, info=BROKEN)
+        bench = Bench(backend)
+        bench.send(cmd.Connect())
+        bench.send(cmd.Enable())
+        bench.tick(3)
+        assert bench.loop.motion.state is MotionState.HOLD_RAD
+
+        backend.info = USER_CAL
+        bench.send(cmd.LoadCalibration())
+        bench.tick(3)
+
+        assert bench.loop.gate is GateState.READY
+        assert bench.loop.motion.state is MotionState.HOLD
+        assert bench.frame().cmd_mm == pytest.approx(
+            LIMITS.to_mm(backend.q_rad), abs=1e-6
+        )
+
+    def test_a_dark_axis_does_not_condemn_the_file_with_a_leftover_angle(self) -> None:
+        """The gate is a judgement about the hardware, so it needs the hardware
+        to be answering.  A disabled drive goes on serving the angle it last
+        saw while the jaws sit anywhere at all; judging the file against that
+        leftover is a verdict about nothing — and it would tell the operator
+        their calibration is wrong when the gripper is simply switched off."""
+        backend = RecordingBackend(limits=LIMITS, info=USER_CAL)
+        backend.q_rad = -1.0  # a pose LIMITS knows nothing about
+        bench = Bench(backend)
+        bench.send(cmd.Connect())
+        bench.send(cmd.Enable())
+        bench.tick(3)
+        assert bench.loop.gate is GateState.BLOCKED, "while it is answering"
+
+        bench.send(cmd.Disable())
+        bench.tick(3)
+
+        assert backend.read().position_rad == pytest.approx(-1.0), "still served"
+        assert bench.loop.gate is GateState.READY, "but not by anyone answering"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1039,6 +1205,93 @@ class TestEnablingBeforeTheAxisHasAnswered:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 使能 an axis a hand has moved while the drive was dark
+# ═══════════════════════════════════════════════════════════════════════════
+class TestEnablingAfterTheJawsWerePushedByHand:
+    """使能 holds where the jaws *are*, not what the drive last said.
+
+    A disabled drive stops answering, so the SDK goes on serving the angle from
+    before the disable while a hand can push the jaws anywhere.  The worker's own
+    frame count outlived the disable, so the next 使能 took the hold branch with
+    that pre-disable pose, froze it, and commanded it with full position gain —
+    driving the gripper back to where it had been pushed away from.  The display
+    is drawn from the same reading, so the number the operator watched while they
+    pushed was the number the hold then aimed at.
+    """
+
+    PUSHED_RAD = LIMITS.to_rad(52.5)
+
+    def frames_since(self, bench: Bench, mark: int) -> list[tuple]:
+        """Every frame the backend was sent after ``mark`` calls were made.
+
+        The mark matters: the axis was *holding* before it was disabled, so a
+        scan of the whole call log would find the pre-disable hold and read the
+        bug into frames that predate it.
+        """
+        return [
+            call[1] for call in bench.backend.calls[mark:] if call[0] == "stream_frame"
+        ]
+
+    def pushed(self) -> Bench:
+        """Enabled and measured, then disabled and shoved a long way by hand."""
+        bench = Bench()
+        bench.bring_up()
+        bench.tick(2)
+        assert bench.loop.motion.state is MotionState.HOLD
+        assert bench.loop.last_frame.position_mm == pytest.approx(60.0, abs=1e-6)
+        bench.send(cmd.Disable())
+        bench.backend.drag(self.PUSHED_RAD)
+        bench.tick(2)
+        return bench
+
+    def test_a_dark_axis_claims_no_position(self) -> None:
+        """``None``, so the display reads 「—」.  The drive's last angle describes
+        where the jaws *were*, and drawing it as the current position is what
+        made a stale pose look like a live one."""
+        bench = self.pushed()
+        assert bench.loop.last_frame.position_mm is None
+
+    def test_the_next_enable_holds_where_the_hand_left_the_jaws(self) -> None:
+        bench = self.pushed()
+        bench.send(cmd.Enable())
+        bench.tick(2)
+        assert bench.loop.motion.state is MotionState.HOLD
+        assert bench.loop.last_frame.cmd_mm == pytest.approx(52.5, abs=1e-6)
+
+    def test_no_frame_ever_aims_at_the_pose_from_before_the_disable(self) -> None:
+        """The regression itself, stated as the thing that hurt: not one frame
+        may carry the old pose with a stiffness on it.  A hold freezes its target
+        when it is entered, so a single such frame is enough to drive there."""
+        bench = self.pushed()
+        mark = len(bench.backend.calls)
+        bench.send(cmd.Enable())
+        bench.tick(4)
+        aimed = [(q_rad, kp) for (q_rad, kp, *_rest) in self.frames_since(bench, mark) if kp]
+        assert aimed, "使能后必须真的发出一个带增益的驻留帧"
+        assert all(
+            q_rad == pytest.approx(self.PUSHED_RAD) for q_rad, _kp in aimed
+        ), "驻留帧指向了失能前的位姿"
+
+    def test_a_re_enable_whose_link_stays_dark_holds_nothing(self) -> None:
+        """The other way the same mistake lands: with no frame since this
+        energisation there is no pose to hold, so the axis is left free.  The
+        frames counted in the session before the disable are not evidence about
+        this one, and holding on their strength would aim at that old pose."""
+        bench = self.pushed()
+        bench.backend.fresh = False
+        mark = len(bench.backend.calls)
+        bench.send(cmd.Enable())
+        assert bench.loop.motion.state is MotionState.RELEASE
+        assert all(kp == 0.0 for _q, kp, *_rest in self.frames_since(bench, mark))
+
+    def test_the_console_says_where_it_is_holding(self) -> None:
+        bench = self.pushed()
+        bench.send(cmd.Enable())
+        bench.tick(2)
+        assert any("52.5 mm" in text for text in bench.signals.logs())
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # The CAN interface, prepared before the bus is opened
 # ═══════════════════════════════════════════════════════════════════════════
 class TestTheInterfaceIsPreparedBeforeConnecting:
@@ -1246,6 +1499,26 @@ class TestStopping:
         assert not [c for c in bench.backend.calls if c[0] == "stream_frame"]
         assert all("急停" in text for text in bench.signals.alerts()[-4:])
 
+    def test_the_estop_latches_against_enabling_too(self) -> None:
+        """The bar blocks the button, but the worker has to block the command.
+
+        ``_service_commands`` runs before the tick's E-stop check, so an 使能
+        that was already in the queue when the latch went down would be
+        serviced first — re-energising the axis the E-stop had just put down,
+        while every frame after it was refused for being latched."""
+        bench = Bench()
+        bench.bring_up()
+        bench.loop.estop("测试")
+        bench.tick()
+        assert not bench.loop.enabled
+        bench.backend.calls.clear()
+
+        bench.send(cmd.Enable())
+
+        assert not bench.loop.enabled
+        assert "enable" not in bench.backend.names()
+        assert "急停" in bench.signals.alerts()[-1]
+
     def test_resetting_the_estop_does_not_re_enable(self) -> None:
         """Releasing the latch and energising the motor are two different
         decisions, and the operator has only made the first one."""
@@ -1276,13 +1549,17 @@ class TestStopping:
 # ═══════════════════════════════════════════════════════════════════════════
 class TestCalibrationCommands:
     def test_a_probe_needs_an_enabled_motor(self) -> None:
+        """Both start buttons, because this refusal is now the whole answer to
+        a click: the page no longer greys them out on a motor that is off, so
+        the operator gets no other signal that anything was missing."""
         bench = Bench()
         bench.send(cmd.Connect())
         bench.loop.set_allow_factory(True)
         bench.tick()
-        bench.send(cmd.StartGuidedCalibration())
-        assert bench.loop.probe is None
-        assert "使能" in bench.signals.alerts()[-1]
+        for command in (cmd.StartGuidedCalibration(), cmd.StartManualCalibration()):
+            bench.send(command)
+            assert bench.loop.probe is None
+            assert "使能" in bench.signals.alerts()[-1]
 
     def test_the_probe_drives_the_axis_with_an_ungated_frame(self) -> None:
         """The one motion in the application allowed before a calibration

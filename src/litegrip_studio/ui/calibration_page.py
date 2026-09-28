@@ -134,7 +134,6 @@ class CalibrationPage(QWidget):
         self._info: CalibrationInfo | None = None
         self._phase = GuidedPhase.IDLE.value
         self._connected = False
-        self._enabled = False
         self._busy = False
 
         self._banner = Banner()
@@ -350,6 +349,14 @@ class CalibrationPage(QWidget):
             "把两片手指推到张得最大的位置，停住，再按这里。"
             "按下之后取下一控制周期的角度读数作为张开极限。"
         )
+        self._guided_start.setToolTip(
+            "需要电机已使能，探针记录的是电机上报的角度。"
+            "未使能时按钮仍可点击，控制台会说明原因。"
+        )
+        self._manual_start.setToolTip(
+            "需要电机已使能：标定一开始就进入零重力，用手掰动之前电机得先上电。"
+            "未使能时按钮仍可点击，控制台会说明原因。"
+        )
         self._manual_close.setToolTip(
             "把两片手指合到最小的位置，停住，再按这里。"
             "这一端记为 0 mm，张开那一端记为设定的行程。"
@@ -467,11 +474,10 @@ class CalibrationPage(QWidget):
             else f"{frame.position_rad:>8.4f} rad"
         )
         self._position.setText(f"实测位置 {measured} / {angle}")
-        # Whether the motor is enabled comes from the frame rather than from a
-        # flag of its own: the two would drift apart the moment an enable
-        # request failed, and this is a page that lets the operator drive the
-        # axis into a hard stop.
-        self._enabled = frame.enabled
+        # ``frame.enabled`` is deliberately not kept: nothing on this page is
+        # gated on the motor any more (see :meth:`_refresh`), and a flag that
+        # only ever fed the widget states would be the copy that drifts the
+        # moment an enable request fails.
         self._refresh()
 
     def set_progress(self, phase: str, progress: float, note: str = "") -> None:
@@ -562,9 +568,20 @@ class CalibrationPage(QWidget):
         The probes are enabled on the *connection*, not on the gate: a console
         whose gate is blocked is exactly the console that needs a calibration,
         and refusing to probe until one exists would be a deadlock.
+
+        Not on the motor either, for the same reason in a smaller way.  A
+        disabled button is a click Qt throws away without a word, so keying the
+        start buttons on ``self._enabled`` meant the first press of 开始手动标定
+        on a console that was not enabled yet did nothing at all — and a probe
+        that starts by putting the axis in zero gravity is asked for by an
+        operator who has usually just powered the bench up.  The worker answers
+        the command instead: ``_start_probe`` refuses it with the reason, and
+        that reason is what the operator needed.  ``_busy`` stays, because a
+        control that is live while the SDK is inside a blocking call collects
+        clicks that arrive out of order.
         """
         info = self._info
-        ready = self._connected and self._enabled and not self._busy
+        ready = self._connected and not self._busy
         guided_running = guided_active(self._phase)
         manual_running = manual_active(self._phase)
         any_running = guided_running or manual_running

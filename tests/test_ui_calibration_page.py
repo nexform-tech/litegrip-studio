@@ -261,17 +261,31 @@ class TestTheGateIsExplained:
 
 
 class TestTheProbeButtons:
-    def test_a_probe_needs_a_connected_enabled_motor(self, page) -> None:
+    def test_a_click_is_answered_before_the_motor_is_enabled(self, page) -> None:
+        """The reported bug: 开始手动标定 did nothing on the first press.
+
+        The button was disabled on the motor, and Qt drops a click on a disabled
+        button without a word — so the operator, who had just powered the bench
+        up and had not enabled it yet, pressed again.  The page asks the worker
+        instead, and the worker's refusal names the reason, which is the answer
+        they were missing."""
         page.set_calibration(INVALID_CAL)
         page.set_gate(GateState.BLOCKED, "缺少标定文件")
+        page.update_frame(frame(enabled=False))
 
         assert page._guided_start.isEnabled()
         assert page._manual_start.isEnabled()
 
-        page.update_frame(frame(enabled=False))
+        page._manual_start.click()
 
-        assert not page._guided_start.isEnabled()
-        assert not page._manual_start.isEnabled()
+        assert isinstance(page.recorder.last(), cmd.StartManualCalibration)
+
+    def test_the_start_buttons_say_the_motor_has_to_be_enabled(self, page) -> None:
+        """A click that is answered is still a click the operator could have
+        been spared, and the probe is started by someone who is looking at the
+        gripper rather than at the window."""
+        assert "使能" in page._manual_start.toolTip()
+        assert "使能" in page._guided_start.toolTip()
 
     def test_a_disconnected_console_offers_no_probe(self, page) -> None:
         page.set_conn_state(CONN_DISCONNECTED)

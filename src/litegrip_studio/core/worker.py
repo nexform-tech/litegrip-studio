@@ -312,6 +312,12 @@ class WorkerLoop:
         #: yet, so the axis is being left free rather than held somewhere
         #: unknown.  Cleared on the first frame the tick sees.
         self._awaiting_position = False
+        #: Whether a status frame has arrived *since this energisation* — the
+        #: only basis on which this class will name a position.  A disabled drive
+        #: stops answering, and the SDK goes on serving the angle it last saw, so
+        #: a hand can move the jaws while that number sits still.  See
+        #: :meth:`_measured_mm`.
+        self._have_position = False
 
         #: When the GUI last spoke — stamped from the GUI thread by ``submit()``
         #: and read on the worker thread.  A float assignment is atomic and the
@@ -446,10 +452,14 @@ class WorkerLoop:
             if measured is not None:
                 # The frame has arrived: now there is somewhere honest to hold.
                 # Until this ran the axis was left free, which is the only state
-                # that asks nothing of a position nobody has measured.
+                # that asks nothing of a position nobody has measured.  Which
+                # units the hold is in is the gate's answer, not this one's — a
+                # console enabled with no usable calibration holds the angle
+                # rather than a millimetre nobody has vetted.
                 self._awaiting_position = False
-                self._motion.hold(measured)
-                self._log("info", f"已读到位置 {measured:.1f} mm，在此保持")
+                self._hold_measured("使能后尚未读到位置")
+                if self._gate is GateState.READY:
+                    self._log("info", f"已读到位置 {measured:.1f} mm，在此保持")
 
         self._evaluate_gate()
 
@@ -544,6 +554,13 @@ class WorkerLoop:
             self._last_rx_t = now
             self._rx_frames += 1
             self._rx_times.append(now)
+            if self._enabled:
+                # A frame that arrived while the motor is being addressed is an
+                # answer about now.  One that arrives while it is not — a frame
+                # already in flight when 失能 was pressed — is the drive's last
+                # word before it stopped, and says nothing about a hand that has
+                # moved the jaws since.
+                self._have_position = True
         elif not self._enabled:
             # Silence is the expected state while the motor is not being
             # addressed, so the staleness clock restarts rather than runs.  A
@@ -577,7 +594,7 @@ class WorkerLoop:
         return self._stale_ms() > constants.LINK_STALE_MS
 
     def _measured_mm(self) -> float | None:
-        """Where the jaws are, or ``None`` if the axis has never answered.
+        """Where the jaws are, or ``None`` if this energisation has not measured them.
 
         Every position command in this class is computed *from* a measurement —
         the profile is anchored to it, and a hold freezes it — so a command
@@ -589,16 +606,25 @@ class WorkerLoop:
         tick 使能 was pressed — the reading converted to −11 mm, the clamp lifted
         it to 0 mm, and the hold then commanded the closed end.
 
-        The test is the worker's own frame count, which is the same signal
-        :meth:`_evaluate_gate` and :meth:`_link_dead` already trust: ``poll`` can
-        only return True once a frame has arrived, and frames only arrive in
-        answer to frames we sent.  It is deliberately pessimistic — the SDK's own
-        ``enable`` polls for a frame internally, so one may have arrived without
-        this counter seeing it, which makes the window a couple of ticks longer
-        than it strictly needs to be.  Eroding a claim in the direction of
-        refusing motion is the right way round.
+        The test is :attr:`_have_position` — a status frame has arrived since the
+        motor was last energised.  Counting frames from the connection instead is
+        what broke this.  A disabled drive stops answering while the SDK goes on
+        serving the angle from before the disable, and a hand can push the jaws
+        anywhere while that number sits still.  The count outlived the disable, so
+        the next 使能 took the hold branch with the pre-disable pose and commanded
+        it with full position gain — and since the display is drawn from this same
+        reading, the operator had been watching that number the whole time they
+        were pushing.
+
+        Not the worker's frame count itself, which is still the signal
+        :meth:`_link_dead` trusts: that answers "has this link ever spoken", a
+        different question, and its answer must not change here.  The gate is
+        deliberately pessimistic — the SDK's own ``enable`` polls for a frame
+        internally, so one may arrive without this counting it, which costs a
+        couple of ticks.  Eroding a claim in the direction of refusing motion is
+        the right way round.
         """
-        if not self._connected or self._rx_frames == 0:
+        if not self._connected or not self._enabled or not self._have_position:
             return None
         return self._tele.position_mm
 
@@ -609,7 +635,7 @@ class WorkerLoop:
         reason.  It exists for the one command that must not go through the
         calibration at all: a hold at the pose the jaws are already in.
         """
-        if not self._connected or self._rx_frames == 0:
+        if not self._connected or not self._enabled or not self._have_position:
             return None
         return self._tele.position_rad
 
@@ -621,12 +647,26 @@ class WorkerLoop:
         instead — the same mistake :meth:`_measured_mm` exists to prevent, one
         layer down.  Releasing is the safe direction: the motor stays enabled and
         stays where it is, and the next measurement turns this into a real hold.
+
+        A shut gate changes the *units*, not the willingness to hold.  There is
+        no vetted travel to name a millimetre in, and none is needed: the pose
+        worth holding is the one the encoder just measured, and commanding that
+        angle goes through nothing the gate is there to protect — it is the
+        identity under every calibration there could be.  See
+        :meth:`~litegrip_studio.core.motion.MotionFSM.hold_rad`.
         """
-        measured = self._measured_mm()
-        if measured is None:
+        if self._measured_rad() is None:
             self._motion.release(release_reason)
-        else:
-            self._motion.hold(measured)
+            return
+        if self._gate is GateState.READY:
+            self._motion.hold(self._measured_mm())
+            return
+        measured_rad = self._measured_rad()
+        self._motion.hold_rad(measured_rad)
+        self._log(
+            "info",
+            f"标定不可用：已在 {measured_rad:.6f} rad 驻留（按实测角度，不经过毫米换算）",
+        )
 
     def _refusal(self) -> str:
         """Why motion is refused right now, or ``""`` when it is allowed."""
@@ -644,7 +684,7 @@ class WorkerLoop:
         # commanded, but a dead link or a shut gate is *why* there is no
         # measurement, and the cause is the half the operator can act on.
         if self._measured_mm() is None:
-            return "尚未读到位置；电机还没回报过状态帧"
+            return "尚未读到位置；本次使能后还没收到过状态帧"
         if self._tele.is_error:
             return f"电机故障：{constants.describe_error(self._tele.error_code)}"
         return ""
@@ -657,7 +697,7 @@ class WorkerLoop:
         # not enabled anything yet.  ``_track_link`` runs earlier in the tick, so
         # by the time this sees a live angle the tick it arrived on is the tick
         # that checks it — which is the tick before any frame could be sent.
-        measured = self._tele.position_rad if self._connected and self._rx_frames else None
+        measured = self._measured_rad()
         state, reason = evaluate_gate(self._info, self._allow_factory, measured)
         if state is self._gate and reason == self._gate_reason:
             return
@@ -677,7 +717,16 @@ class WorkerLoop:
             return
 
         self._zeroed_for_gate = False
-        if self._enabled and self._motion.state in (MotionState.IDLE, MotionState.BLOCKED):
+        # ``HOLD_RAD`` is in this list because the gate opening is what retires
+        # it: an angle hold was the only hold there was while no travel could be
+        # trusted, and the moment one can be, the console goes back to naming
+        # the pose in millimetres like any other — same pose, ordinary units,
+        # and the UI's target column filled in again.
+        if self._enabled and self._motion.state in (
+            MotionState.IDLE,
+            MotionState.BLOCKED,
+            MotionState.HOLD_RAD,
+        ):
             # The axis holds its pose the moment it is allowed to, rather than
             # waiting for the operator to command a move: an enabled DM motor
             # with no frames sent to it is not a safe resting state.
@@ -965,13 +1014,35 @@ class WorkerLoop:
         self._conn_emit(CONN_DISCONNECTED, "已断开连接")
 
     def _enable(self) -> None:
+        # First, because it is the reason that explains the others: the latch
+        # has already disabled the motor, so an enable that got past this would
+        # look like it worked and leave the axis dead.  The connect bar blocks
+        # the button, but commands are serviced before the tick's own E-stop
+        # check, so an 使能 already in the queue would re-energise a latched
+        # axis — and the queue is reachable without the window.
+        if self._estop.is_set():
+            self._alert(
+                "warn", f"急停中，无法使能（{self._estop_reason}）；请先复位"
+            )
+            return
         if not self._connected:
             self._alert("warn", "请先连接")
             return
+        # The gate decides what may be *commanded*, never whether the axis may be
+        # energised at all.  Refusing to enable on a console whose calibration is
+        # unusable locks the operator out of the one flow that can replace it:
+        # the manual probe records its limits off a motor that answers, and
+        # enabling is what makes it answer.  So the motor comes up either way,
+        # and the hold is taken in whichever units the gate leaves open —
+        # millimetres when it is READY, the measured angle itself when it is not.
+        # See :meth:`_hold_measured`.
         state, reason = evaluate_gate(self._info, self._allow_factory)
-        if state is not GateState.READY:
-            self._alert("warn", f"无法使能：{reason}")
-            return
+        # Whatever this console claimed to know about the jaws is about to stop
+        # being true: the axis has been free, and a hand — or gravity — may have
+        # moved it since.  Forgetting it here, before the motor is energised, is
+        # what makes the hold below a hold at the pose the jaws are in *now*
+        # rather than the pose they were in when 失能 was last pressed.
+        self._have_position = False
         self._signals.busy.emit(True, "正在使能（可能需要数秒）…")
         try:
             self.backend.enable()
@@ -991,21 +1062,31 @@ class WorkerLoop:
         self._enabled = True
         self._reported_error = 0
         self._last_rx_t = self._clock()
+        if state is not GateState.READY:
+            # Said plainly, because the alternative is an operator who believes
+            # a gripper that will not move is a broken one.  It is a gripper
+            # whose calibration nobody has vetted, and the way out is a probe.
+            self._alert(
+                "warn",
+                f"标定不可用（{reason}）：轴按实测角度驻留，不能按毫米运动。"
+                "修好文件或重新标定后即可恢复",
+            )
         measured = self._measured_mm()
         if measured is None:
-            # Enabled, but this console has not counted a status frame of its
-            # own yet — so it does not know where the jaws are, and must not
-            # pretend it does.  Holding a position here would freeze a number
-            # derived from the motor's placeholder angle and send the axis to it;
-            # zero gain instead leaves the motor where it is until the first
+            # Enabled, but no frame has been counted since this energisation —
+            # so it does not know where the jaws are, and must not pretend it
+            # does.  Holding a position here would freeze the motor's placeholder
+            # angle, or the angle from before the last 失能, and send the axis to
+            # it; zero gain instead leaves the motor where it is until the first
             # frame arrives, which the tick below picks up.
             self._awaiting_position = True
             self._motion.release("使能后尚未读到位置")
             self._log("info", "电机已使能；尚未读到位置，先松力，读到后自动保持")
         else:
             self._awaiting_position = False
-            self._motion.hold(measured)
-            self._log("info", f"电机已使能，保持当前位置 {measured:.1f} mm")
+            self._hold_measured("使能后尚未读到位置")
+            if state is GateState.READY:
+                self._log("info", f"电机已使能，保持当前位置 {measured:.1f} mm")
 
     def _clear_fault(self) -> None:
         if not self._connected:
