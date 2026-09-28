@@ -89,9 +89,12 @@ sudo ip link set can0 up
 ./run_litegrip_studio.sh gui
 ```
 
-**On a real gripper, run the guided calibration from the calibration page and save it before
-touching the slider.** If the calibration page shows `FACTORY` or `BLOCKED`, calibrate first
-rather than overriding the gate.
+**On a real gripper, run the guided calibration from the calibration page before touching the
+slider.** The result is written out as soon as the probe finishes. If the fingers are mounted the
+other way round — the encoder angle growing
+as the jaws open — tick 反向装配 first, or use the manual two-point wizard, which takes the
+direction from the labels the operator presses instead. If the calibration page shows `FACTORY` or
+`BLOCKED`, calibrate first rather than overriding the gate.
 
 ---
 
@@ -105,7 +108,7 @@ disable / clear fault / reset emergency stop), the emergency-stop button, and th
 | Control | Position slider, open all / close all, stop (hold position), release (back-drivable), speed, grasp force |
 | Status | Telemetry table, temperature, faults and clearing them, link health |
 | Plots | pyqtgraph position and force plots (the force axis autoscales) |
-| Calibration | Provenance banner, file actions, guided and manual wizards, the gate |
+| Calibration | Provenance banner, file actions, guided and manual two-point wizards, the gate |
 
 **Esc is an application-level shortcut**: it works with a spinbox focused and with a modal dialog
 open.
@@ -191,9 +194,14 @@ itself rather than trusting the SDK's return value:
 - **`load_calibration()` overwrites `kp` / `kd` / `grasp_torque_threshold`**, and reads its fields
   without protection: a bad file raises `KeyError`.
 
-The test the console applies is `zero_rad <= open_rad`, i.e. the dangerous reversed state. It
-separates the three known data sets cleanly: the uncalibrated defaults `(0.0, 1.14)` fail it, the
-factory file `(0.114, -1.491)` passes, and the example user file `(1.776, -0.064)` passes.
+The ordering `zero_rad <= open_rad` is what the SDK's defaults look like — `(0.0, 1.14)` — and it
+is still the signature the console recognises them by. But an ordering is not a verdict: the same
+two numbers, read in the same order, describe a reverse-mounted gripper and a file whose limits
+were recorded the wrong way round, and no amount of arithmetic can tell those apart. So the
+console *reads* the mounting direction out of the two angles (`Limits.direction`) and every
+conversion, clamp and velocity feed-forward uses it, which makes a reverse-mounted unit work end
+to end; a reversed file is a **warning** to be confirmed against the live reading rather than a
+refusal. What refuses a file is `frame_mismatch`, below, which never looks at the ordering.
 
 All of the above is decided by **reading files**, and a file can be perfectly self-consistent while
 describing a different gripper — as long as it was calibrated against another encoder zero (a
@@ -216,7 +224,7 @@ indistinguishable, and the clamped number still looks entirely reasonable. On re
 what "it clamps the moment you enable it" is made of.
 
 The gate has three states: `READY` (user calibration, no problems), `FACTORY` (needs "I understand
-the risk" ticked), and `BLOCKED` (reversed, missing, or a zero that belongs to another machine —
+the risk" ticked), and `BLOCKED` (missing, or a zero that belongs to another machine —
 **never overridable**). **The gate logic lives in the worker, not the UI**: the UI can disable
 widgets, but the refusal has to happen before a frame is sent.
 
@@ -231,11 +239,21 @@ intention expressed in the old frame's millimetres has no honest conversion. Wit
 steps, loading a *correct* calibration sends the axis straight for the other end of the new travel.
 
 A probe result lives only in memory at first (`in_memory_unsaved`), and **the gate stays shut
-while it does**: you look at what was measured before deciding it should govern motion. Saving is
-followed by the backend reading the file back, and only then does the provenance become
-`user_file` and the gate `READY`. Both the real and the simulated backend do this: a simulation
-that wrote without reading back would leave the operator with the gate shut after a successful
-calibration and save.
+while it does**: you look at what was measured before deciding it should govern motion. A probe
+that runs to the end therefore **writes itself out** rather than waiting to be told — the two
+presses of 记录 are already the request for a calibration, and leaving the axis locked until the
+operator works out that a third press is needed is how a finished calibration looks like a broken
+console. Saving is followed by the backend reading the file back, and only then does the provenance
+become `user_file` and the gate `READY`. Both the real and the simulated backend do this: a
+simulation that wrote without reading back would leave the operator with the gate shut after a
+successful calibration.
+
+Two things the automatic write deliberately will not do. It will not save a result that failed
+validation, because the file it would replace is a working calibration — the operator keeps a
+console that refuses to move over one that moves on numbers it has just called unusable. And it
+will not save over the SDK's own factory file, which ships with the package and describes whichever
+unit it was taken on. 重新保存标定… stays on the page for the one case that is left: the write
+itself failing, on a read-only directory or a disk that has filled up.
 
 ### Enabling: read a position first, then hold it
 
@@ -275,11 +293,27 @@ both follow from what it is for:
   and the hard stops are by definition beyond the soft limits.
 
 The second rule was once missing: `stream_frame`'s travel check only asked whether a usable
-calibration existed, not whether this frame was a probe frame, so any valid calibration shut the
-probe inside the very travel it was there to measure, and it recorded "the last step I was allowed
-to command" as the open limit — a wrong answer that reads like a successful measurement. Probe
-frames now skip that check explicitly (`probe_frame=True`) while still refusing non-finite values
-and negative gains, which are wrong whatever the calibration says.
+calibration existed, not whether this frame carried a target the check could judge, so any valid
+calibration shut the probe inside the very travel it was there to measure, and it recorded "the
+last step I was allowed to command" as the open limit — a wrong answer that reads like a successful
+measurement. Such frames now say so explicitly (`ungated=True`): the probe steps, which are looking
+for stops beyond the red lines, and the frames that carry no target at all — 松力, 零重力, and the
+hold a probe is left in, whose pose is the angle the encoder has just reported. An ungated frame
+still refuses non-finite values and negative gains, which are wrong whatever the calibration says.
+
+The flag is named for what the frame *is* rather than for who sent it, and that includes the
+long-lived states: 松力 can be held open for an hour without widening what it permits, because what
+it permits is a frame with no stiffness in it. Before it existed there was one flag named after its
+first caller, and 松力 behind a shut gate — the state an operator needs precisely when the file is
+bad — was refused by the gate it was there to work around.
+
+The probe also has to know **which way the jaws open**, and it cannot read that from a file: it is
+the thing producing the file. It walks the jaws into the open stop and then into the closed one,
+and walking a reverse-mounted gripper the SDK's way drives it into the wrong stop and records the
+two ends the wrong way round — a result that validates, saves, and moves inverted. So the direction
+is declared before the probe starts (反向装配 on the calibration page, carried as
+`StartGuidedCalibration.reversed_mount`), and the page shows the raw encoder angle beside the
+millimetres, because the millimetres are computed through the calibration under suspicion.
 
 The probe decides it has reached a stop when the angle it reads stops changing, and that same
 signal also means "no frame reached the motor" and "the feedback died" — in which case it records
@@ -300,6 +334,42 @@ failed probe those lines are the whole truth.
 The probe measures the distance between the hard stops (the two hard stops, not the distance
 between the soft limits); the angle it measures is the denominator of the mm conversion, and the
 numerator is the travel the operator measured — see "Known limitations".
+
+### The two-point manual probe
+
+The guided probe needs the stops to be reachable and detectable. When they are not — a stiff
+linkage, a travel that is not where the SDK expects it, a drive that will not take a probe step at
+all — the manual wizard takes over: the axis is held limp and the operator works the jaws to each
+extreme by hand. **Starting it puts the axis in zero gravity and says so**, and finishing it takes
+the axis back — on every way out, including a cancel, because the operator's hands are on the jaws
+for all of it. The guided probe is left alone: it drives the jaws into the stops itself and needs
+the axis to itself to do it.
+
+- **Two labelled buttons, not one.** The open extreme is recorded first, then the closed one, which
+  is 0 mm. The label on the button is the operator's whole answer to "which end is zero", so a
+  press that arrives out of step is refused out loud rather than taken as whichever point is due:
+  the two angles swapped pass every check the console makes and drive the gripper backwards.
+- **Nothing is sampled in the background.** The angle recorded is the one the encoder reports on the
+  tick after the press — the first reading after the hand stopped moving. Sweeping the axis and
+  keeping the extremes, which is what the SDK's zero-gravity mode does, measures the travel the hand
+  happened to sweep: a gripper released halfway still looks like a calibration, and neither end is
+  named, so the file cannot say which one is 0 mm.
+- **It needs no mounting declaration.** The labels supply the direction, so a gripper assembled
+  either way round records correctly and the mounting is whatever the two angles turn out to be.
+  Both points recorded in the same place is reported, not adopted — a file built from it would put
+  every millimetre of the travel at one angle.
+- **Readings are checked before they are believed.** A value outside the SDK's own plausibility
+  bound, or one that moved further in one tick than the mechanism can, is dropped rather than
+  recorded: a lost frame leaves the SDK's cached position at `0.0`, which is inside that bound and
+  is exactly where a misread would put the *open* limit — the one reading that would quietly invert
+  the whole travel. A drop also cancels a press it lands on, since the angle the operator pressed
+  for is the one that could not be read.
+- **Every wait is bounded** at `TWO_POINT_TIMEOUT_S` (5 minutes per point). The axis is limp for the
+  whole procedure, and a console left holding an enabled, limp motor is a gripper that falls open on
+  whatever is under it. A probe that fails or is cancelled stays limp; only one that ran to the end
+  hands the axis back under position control, at the SDK's exit gains — and with the write broken it
+  is handed back at the *angle the encoder reports*, because a hold in millimetres would have to
+  come from the very limits that are still in doubt.
 
 ---
 
@@ -467,14 +537,15 @@ semantic-release from the commit history, the git tag is the only source of trut
 
 - **Automatic calibration (`calibrate()`) is not offered in this version.** It has no stdin
   dependency, but it cannot be interrupted and drives the motors for about 24 seconds — better to
-  offer only the guided and manual wizards than a 24-second window in which the emergency stop does
-  nothing.
+  offer only the guided and two-point manual wizards than a 24-second window in which the emergency
+  stop does nothing.
 - The factory calibration is a **fallback, not a substitute**: used on another gripper it does not
   crash, it silently makes every millimetre wrong. The calibration page looks at the travel implied
   by the file's own scale, but only warns when it is wrong by orders of magnitude (outside
   `STROKE_MIN_MM` / `STROKE_MAX_MM`). That test **cannot** be tightened into a comparison with the
   measured travel: files written by the SDK and by earlier versions of the console all carry
-  "nominal travel ÷ span", and that nominal is a setting rather than a measurement, so a 60 mm
+  "nominal travel ÷ span", and that nominal is the SDK's own default rather than a measurement of
+  the unit it was recorded on, so a 60 mm
   gripper and a 120 mm gripper write the same number — tightening it would make every file,
   including this machine's own, warn, and an alarm that is always on is no alarm at all.
   Telling which gripper a file belongs to is the job of the measured-angle frame check
@@ -491,11 +562,15 @@ semantic-release from the commit history, the git tag is the only source of trut
   `(measured travel + SPAN_INSET_MM) / span`. On this machine that is
   `(85 + 1) / 1.681925 = 51.13 mm/rad`, so the two recorded limits span 86.00 mm, the slider's
   0…85 covers the whole travel, and the top of the range sits 1 mm inside the recorded open limit.
-- The travel (`constants.DEFAULT_TRAVEL_MM`, 85.0 mm by default) is the **measured value for this
-  gripper** and can be edited on the calibration page. It decides two things: the mm coefficient and
-  the slider's range. The old settings key `calibration/nominal_stroke_mm` meant something else and
-  is no longer read; `calibration/travel_mm` is read instead, so an old value cannot be mistaken
-  for a measured travel. Saving a calibration writes **this derived coefficient** into the file (the
+- The travel (`constants.DEFAULT_TRAVEL_MM`, 85.0 mm) is the **measured value for this gripper** and
+  is a constant, not a setting. It decides two things: the mm coefficient and the slider's range, so
+  a console told the wrong one reports every millimetre wrong while looking healthy. It was editable
+  on the calibration page until 2026-09-28, when 10 mm was typed into it: that derives 8.0 mm/rad,
+  below `RAD_TO_MM_MIN`, so the plausibility check turned a good calibration into a problem and the
+  gate refused motion — a console that could not move and could not say why. There is no flag, no
+  setting and no widget for it now (`--travel-mm` is gone; the retired `calibration/travel_mm` is
+  deleted from an existing ini when the console opens), and moving this console to another unit means
+  editing the constant and re-probing. Saving a calibration writes **this derived coefficient** into the file (the
   SDK writes the file from its own config, and the console pushes the limits into that config
   before saving), which is the number the console actually moves with: reading it back is
   self-consistent, and the cross-check (the coefficient the SDK applied equals the one in the file)

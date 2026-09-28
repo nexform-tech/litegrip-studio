@@ -16,10 +16,13 @@ a GUI cannot answer, and which in a worker thread never receives anything at all
 — and whose motion loop has no abort hook.  The confirmation it waits for is a
 button here, and the button says which limit it is confirming.
 
-*Manual* runs the axis limp and records the extremes the operator pushes it to.
-The SDK's version documents Ctrl+C as the way to stop early; a worker thread can
-never receive that signal, so the stop button is the only version of it that can
-work.
+*Manual* holds the axis limp and records the two extremes the operator moves
+the jaws to, one labelled point each: open first, then closed, which is 0 mm.
+The SDK's version sweeps the axis for a fixed duration with the motor and takes
+the extremes it passed through — an extreme a hand swept past is not a limit
+anyone measured, and with the two points unnamed the result cannot say which end
+is 0 mm.  Here the operator says which point they are recording, so the mounting
+direction comes out of the labels rather than being assumed.
 
 *Automatic* (the SDK's ``calibrate``) is deliberately absent.  It moves the jaws
 for about twenty-four seconds with no way to interrupt it, and a stop button that
@@ -31,7 +34,6 @@ from __future__ import annotations
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QCheckBox,
-    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -49,22 +51,35 @@ from PyQt5.QtWidgets import (
 from .. import calibration, constants
 from ..calibration import CalibrationInfo
 from ..core import commands as cmd
-from ..core.calibration_fsm import GuidedPhase, ManualPhase
+from ..core.calibration_fsm import GuidedPhase, TwoPointPhase
 from ..core.worker import GateState
 from ..settings import Settings
 from ..telemetry import TelemetryFrame
 from . import theme
 from .widgets import UNKNOWN, Banner
 
-#: Phases that mean no probe is running, so a new one may be started.
+#: Phases that mean no probe of that kind is running, so a new one may be
+#: started.
 GUIDED_IDLE_PHASES = frozenset(
     phase.value for phase in (GuidedPhase.IDLE, GuidedPhase.DONE,
                               GuidedPhase.FAILED, GuidedPhase.CANCELLED)
 )
 MANUAL_IDLE_PHASES = frozenset(
-    phase.value for phase in (ManualPhase.IDLE, ManualPhase.DONE,
-                              ManualPhase.FAILED, ManualPhase.CANCELLED)
+    phase.value for phase in (TwoPointPhase.IDLE, TwoPointPhase.DONE,
+                              TwoPointPhase.FAILED, TwoPointPhase.CANCELLED)
 )
+
+#: The phases each probe owns while it runs.  Both report through one progress
+#: signal and their idle phases are spelled the same, so "some probe is running"
+#: is never the question a widget is asking — "is *this* probe running" is, and
+#: only the phase *name* can answer it.  Testing against the idle set instead
+#: would call every one of the other probe's phases active.
+GUIDED_ACTIVE_PHASES = frozenset(
+    phase.value for phase in GuidedPhase
+) - GUIDED_IDLE_PHASES
+MANUAL_ACTIVE_PHASES = frozenset(
+    phase.value for phase in TwoPointPhase
+) - MANUAL_IDLE_PHASES
 
 #: What the confirmation button says while each limit is being probed.  The SDK
 #: waits for the Enter key, which tells the operator nothing about what they are
@@ -82,9 +97,8 @@ PHASE_LABELS = {
     GuidedPhase.DONE.value: "完成",
     GuidedPhase.FAILED.value: "失败",
     GuidedPhase.CANCELLED.value: "已取消",
-    ManualPhase.RECORDING.value: "正在记录（用手把夹爪推拉到两个极限）",
-    ManualPhase.SETTLE.value: "正在沉降",
-    ManualPhase.RECOVER.value: "正在恢复控制",
+    TwoPointPhase.RECORD_OPEN.value: "等待记录张开极限",
+    TwoPointPhase.RECORD_CLOSE.value: "等待记录闭合极限",
 }
 
 #: The severity to paint each provenance with.  The factory case is a warning
@@ -99,11 +113,13 @@ PROVENANCE_SEVERITY = {
 
 
 def guided_active(phase: str) -> bool:
-    return phase not in GUIDED_IDLE_PHASES
+    """Whether this phase belongs to a guided probe that is still running."""
+    return phase in GUIDED_ACTIVE_PHASES
 
 
 def manual_active(phase: str) -> bool:
-    return phase not in MANUAL_IDLE_PHASES
+    """Whether this phase belongs to a manual probe that is still running."""
+    return phase in MANUAL_ACTIVE_PHASES
 
 
 class CalibrationPage(QWidget):
@@ -153,20 +169,9 @@ class CalibrationPage(QWidget):
         )
         self._allow.toggled.connect(self._on_allow_toggled)
 
-        self._travel = QDoubleSpinBox()
-        self._travel.setToolTip(
-            "本机夹爪上用卡尺量到的全行程，从完全闭合到完全张开。\n"
-            "一个值，两个用途：\n"
-            "· 毫米换算系数 —— 由标定文件里的两个角度和本值推导，不读文件自带的 "
-            "rad_to_mm（那一项是「标称行程 ÷ 跨度」，哪台夹爪写出来都一样）；\n"
-            "· 滑块量程 —— 0 是标定的闭合零点，本值是量程顶端，比记录到的张开极限"
-            "内缩 1 mm。\n"
-            "改了这个值，界面上所有毫米读数会立刻按新比例尺重算。"
-        )
-        self._travel_apply = QPushButton("应用")
         self._reload = QPushButton("重新读取")
         self._load = QPushButton("载入文件…")
-        self._save = QPushButton("保存标定…")
+        self._save = QPushButton("重新保存标定…")
 
         self._progress = QProgressBar()
         self._phase_label = QLabel()
@@ -180,10 +185,11 @@ class CalibrationPage(QWidget):
         self._guided_start = QPushButton("开始引导式标定")
         self._guided_confirm = QPushButton(CONFIRM_LABELS[GuidedPhase.OPEN_PROBE.value])
         self._guided_cancel = QPushButton("取消标定")
-        self._manual_start = QPushButton("开始零重力标定")
-        self._manual_stop = QPushButton("结束记录（保留样本）")
+        self._guided_reversed = QCheckBox("反向装配（张开时角度更大）")
+        self._manual_start = QPushButton("开始手动标定")
+        self._manual_open = QPushButton("记录张开极限")
+        self._manual_close = QPushButton("记录闭合极限")
         self._manual_cancel = QPushButton("取消标定")
-        self._manual_duration = QDoubleSpinBox()
 
         self._build()
         self._wire()
@@ -269,12 +275,9 @@ class CalibrationPage(QWidget):
         """Where that calibration came from, and how to change it."""
         files = QGridLayout()
         files.setSpacing(6)
-        files.addWidget(QLabel("全行程"), 0, 0)
-        files.addWidget(self._travel, 0, 1)
-        files.addWidget(self._travel_apply, 0, 2)
-        files.addWidget(self._reload, 1, 0)
-        files.addWidget(self._load, 1, 1)
-        files.addWidget(self._save, 1, 2)
+        files.addWidget(self._reload, 0, 0)
+        files.addWidget(self._load, 0, 1)
+        files.addWidget(self._save, 0, 2)
 
         box = QGroupBox("标定文件")
         layout = QVBoxLayout(box)
@@ -293,6 +296,15 @@ class CalibrationPage(QWidget):
         buttons.addWidget(self._guided_confirm)
         buttons.addWidget(self._guided_cancel)
 
+        self._guided_reversed.setToolTip(
+            "这台夹爪的编码器角度是张开时变大还是变小。\n"
+            "怎么判断：失能（或零重力）后用手把两片手指分开，看下面「实测位置」"
+            "里的角度 —— 变大就是反向装配。\n"
+            "必须先确认再开始：探针只能朝一个方向顶，顶错方向就会把闭合极限记成"
+            "张开极限，而这样的结果照样能通过校验、照样能保存，却会把整台夹爪的方向"
+            "反过来。开始后会先朝张开极限移动，此时若看到夹爪在闭合，请点「取消标定」。"
+        )
+
         text = QLabel(
             "分别顶向张开与闭合两个硬限位，记录停住的位置。"
             "每一步都会重新锚定在实测位置，因此顶住时的力矩有上限；"
@@ -303,42 +315,59 @@ class CalibrationPage(QWidget):
         box = QGroupBox("引导式标定（需要电机已使能）")
         layout = QVBoxLayout(box)
         layout.addWidget(text)
+        layout.addWidget(self._guided_reversed)
         layout.addLayout(buttons)
         return box
 
     def _build_manual_box(self) -> QGroupBox:
         """The probe where the operator moves the jaws by hand.
 
-        Its buttons are in two rows rather than one.  Start sits with the
-        duration it starts, and the two ways to end a recording sit together
-        below — and the four of them on a single row made this the widest thing
-        on the page, which in a two-column layout would have pushed the window's
-        minimum width wider than the content above it needs.
+        Its buttons are in two rows rather than one.  Start has a row to itself,
+        and the two record buttons sit together under it with the cancel — the
+        four of them on a single row made this the widest thing on the page,
+        which in a two-column layout would have pushed the window's minimum
+        width wider than the content above it needs.
+
+        The two record buttons are separate and each is live only in its own
+        step, rather than one button meaning "record whatever is due".  Which
+        end is being recorded is what decides the gripper's direction: the point
+        recorded as closed is 0 mm, and a flow where the label can be got wrong
+        is one that can save an inverted calibration that looks perfect.
         """
         start_row = QHBoxLayout()
         start_row.setSpacing(6)
-        start_row.addWidget(QLabel("时长"))
-        start_row.addWidget(self._manual_duration)
         start_row.addWidget(self._manual_start)
+        start_row.addWidget(self._manual_cancel)
         start_row.addStretch(1)
 
-        stop_row = QHBoxLayout()
-        stop_row.setSpacing(6)
-        stop_row.addWidget(self._manual_stop)
-        stop_row.addWidget(self._manual_cancel)
-        stop_row.addStretch(1)
+        record_row = QHBoxLayout()
+        record_row.setSpacing(6)
+        record_row.addWidget(self._manual_open)
+        record_row.addWidget(self._manual_close)
+        record_row.addStretch(1)
+
+        self._manual_open.setToolTip(
+            "把两片手指推到张得最大的位置，停住，再按这里。"
+            "按下之后取下一控制周期的角度读数作为张开极限。"
+        )
+        self._manual_close.setToolTip(
+            "把两片手指合到最小的位置，停住，再按这里。"
+            "这一端记为 0 mm，张开那一端记为设定的行程。"
+        )
 
         text = QLabel(
-            "标定期间电机零力矩，用手把夹爪推拉到两个极限，然后结束记录。"
-            "记录的是这段时间里位置的最小值与最大值。"
+            "标定期间电机零力矩，用手把夹爪分别摆到两个极限，每到一个按一次对应的"
+            "「记录」：先记张开极限，再记闭合极限（闭合记为 0 mm）。"
+            "两个极限都记到之后标定自动完成并写入文件，不需要再按保存；"
+            "写入失败时可以用「重新保存标定…」重试。"
         )
         text.setWordWrap(True)
 
-        box = QGroupBox("零重力手动标定（可用手掰动）")
+        box = QGroupBox("手动两点标定（零重力，可用手掰动）")
         layout = QVBoxLayout(box)
         layout.addWidget(text)
         layout.addLayout(start_row)
-        layout.addLayout(stop_row)
+        layout.addLayout(record_row)
         return box
 
     def _build_progress_strip(self) -> QWidget:
@@ -368,42 +397,24 @@ class CalibrationPage(QWidget):
         return strip
 
     def _wire(self) -> None:
-        self._guided_start.clicked.connect(
-            lambda: self._submit(cmd.StartGuidedCalibration())
-        )
+        self._guided_start.clicked.connect(self._on_guided_start)
         self._guided_confirm.clicked.connect(
             lambda: self._submit(cmd.ConfirmProbeLimit())
         )
         self._guided_cancel.clicked.connect(self._on_cancel)
         self._manual_start.clicked.connect(self._on_manual_start)
-        self._manual_stop.clicked.connect(
-            lambda: self._submit(cmd.StopManualRecording())
+        self._manual_open.clicked.connect(
+            lambda: self._submit(cmd.RecordOpenLimit())
+        )
+        self._manual_close.clicked.connect(
+            lambda: self._submit(cmd.RecordCloseLimit())
         )
         self._manual_cancel.clicked.connect(self._on_cancel)
         self._reload.clicked.connect(lambda: self._submit(cmd.LoadCalibration()))
         self._load.clicked.connect(self._on_load_clicked)
         self._save.clicked.connect(lambda: self._submit(cmd.SaveCalibration()))
-        self._travel_apply.clicked.connect(
-            lambda: self._submit(cmd.SetTravel(max_stroke_mm=self._travel.value()))
-        )
 
     def _load_settings(self) -> None:
-        travel = (
-            constants.DEFAULT_TRAVEL_MM if self._settings is None
-            else self._settings.travel_mm
-        )
-        self._travel.setRange(constants.STROKE_MIN_MM, constants.STROKE_MAX_MM)
-        self._travel.setDecimals(1)
-        self._travel.setSingleStep(10.0)
-        self._travel.setSuffix(" mm")
-        self._travel.setValue(travel)
-
-        self._manual_duration.setRange(5.0, 120.0)
-        self._manual_duration.setDecimals(0)
-        self._manual_duration.setSingleStep(5.0)
-        self._manual_duration.setSuffix(" s")
-        self._manual_duration.setValue(constants.MANUAL_DURATION_DEFAULT_S)
-
         allowed = (
             False if self._settings is None
             else self._settings.allow_factory_calibration
@@ -440,8 +451,22 @@ class CalibrationPage(QWidget):
         self._refresh()
 
     def update_frame(self, frame: TelemetryFrame) -> None:
+        """The live reading, in millimetres *and* in radians.
+
+        The radians are normally the number nobody needs, and they are here for
+        one question the millimetres cannot answer: which way the encoder runs.
+        The mounting direction has to be declared before a guided probe, and the
+        only way to find out is to move the jaws by hand and watch this number —
+        which cannot be the mm one, since that is computed with the very
+        calibration under suspicion.
+        """
         measured = UNKNOWN if frame.position_mm is None else f"{frame.position_mm:>7.2f} mm"
-        self._position.setText(f"实测位置 {measured}")
+        angle = (
+            UNKNOWN
+            if frame.position_rad is None
+            else f"{frame.position_rad:>8.4f} rad"
+        )
+        self._position.setText(f"实测位置 {measured} / {angle}")
         # Whether the motor is enabled comes from the frame rather than from a
         # flag of its own: the two would drift apart the moment an enable
         # request failed, and this is a page that lets the operator drive the
@@ -456,9 +481,9 @@ class CalibrationPage(QWidget):
         label = PHASE_LABELS.get(phase, phase)
         colour = {
             GuidedPhase.DONE.value: theme.OK,
-            ManualPhase.DONE.value: theme.OK,
+            TwoPointPhase.DONE.value: theme.OK,
             GuidedPhase.FAILED.value: theme.ERROR,
-            ManualPhase.FAILED.value: theme.ERROR,
+            TwoPointPhase.FAILED.value: theme.ERROR,
         }.get(phase, theme.TEXT)
         self._phase_label.setText(
             f'<span style="color:{colour}">{label}</span>'
@@ -545,21 +570,37 @@ class CalibrationPage(QWidget):
         any_running = guided_running or manual_running
 
         self._guided_start.setEnabled(ready and not any_running)
+        # Locked while a probe is running: a direction that changes halfway
+        # through a probe is two directions in one file.
+        self._guided_reversed.setEnabled(not any_running)
         self._guided_cancel.setEnabled(guided_running)
         self._guided_confirm.setEnabled(guided_running and self._phase in CONFIRM_LABELS)
         self._guided_confirm.setText(
             CONFIRM_LABELS.get(self._phase, "✔ 已到极限，确认")
         )
         self._manual_start.setEnabled(ready and not any_running)
-        self._manual_stop.setEnabled(manual_running)
         self._manual_cancel.setEnabled(manual_running)
+        # One record button live at a time, and only in its own step: the label
+        # on the button is the operator's whole answer to "which end is 0 mm",
+        # so a button that could be pressed out of turn would let the answer be
+        # given to the wrong question.
+        self._manual_open.setEnabled(self._phase == TwoPointPhase.RECORD_OPEN.value)
+        self._manual_close.setEnabled(self._phase == TwoPointPhase.RECORD_CLOSE.value)
 
         self._reload.setEnabled(not any_running)
         self._load.setEnabled(not any_running)
-        self._travel_apply.setEnabled(not any_running)
-        # Only a calibration whose numbers are self-consistent is worth writing
-        # out; saving a file the console has just called unusable would launder
-        # it into one that looks like a user calibration next launch.
+        # Still only a calibration whose numbers are self-consistent, and still
+        # never the factory one.  The probe writes its own result out now, so
+        # this button is normally a retry for a write that failed on something
+        # outside the numbers (a read-only directory, a full disk, the SDK
+        # refusing) — and a usable in-memory result is exactly what a retry
+        # needs.  Two things are not for retrying.  Numbers the console has just
+        # called unusable come back with no limits, so writing them would save a
+        # file that only looks like a calibration.  The factory numbers are the
+        # one case the backend's own guard cannot catch: they can arrive with no
+        # path at all (the SDK's bundled fallback), and then the target is the
+        # *user* file, which is how they would be laundered into this gripper's
+        # own calibration on the next launch.
         self._save.setEnabled(
             not any_running
             and info is not None
@@ -577,8 +618,13 @@ class CalibrationPage(QWidget):
     def _on_cancel(self) -> None:
         self._submit(cmd.CancelCalibration())
 
+    def _on_guided_start(self) -> None:
+        self._submit(
+            cmd.StartGuidedCalibration(reversed_mount=self.reversed_mount)
+        )
+
     def _on_manual_start(self) -> None:
-        self._submit(cmd.StartManualCalibration(duration_s=self._manual_duration.value()))
+        self._submit(cmd.StartManualCalibration())
 
     def _on_allow_toggled(self, allowed: bool) -> None:
         if self._settings is not None:
@@ -605,9 +651,6 @@ class CalibrationPage(QWidget):
         return self._allow.isChecked()
 
     @property
-    def travel_mm(self) -> float:
-        return float(self._travel.value())
-
-    def persist(self) -> None:
-        if self._settings is not None:
-            self._settings.travel_mm = self.travel_mm
+    def reversed_mount(self) -> bool:
+        """The mounting, as the operator declared it for the guided probe."""
+        return self._guided_reversed.isChecked()

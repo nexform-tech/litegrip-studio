@@ -12,6 +12,8 @@ that logs what it was asked to do.
 
 from __future__ import annotations
 
+import json
+import logging
 import threading
 import time
 from typing import Callable
@@ -26,7 +28,6 @@ from litegrip_studio.core import commands as cmd
 from litegrip_studio.core.calibration_fsm import (
     MANUAL_MAX_JUMP_RAD_PER_TICK,
     GuidedPhase,
-    ManualPhase,
 )
 from litegrip_studio.core.commands import AnyCommand
 from litegrip_studio.core.motion import MotionState
@@ -195,9 +196,9 @@ class RecordingBackend(GripperBackend):
         self.error_code = constants.ERROR_ENABLED if self.enabled else constants.ERROR_DISABLED
 
     # ── control-rate primitives ─────────────────────────────────────────────
-    def stream_frame(self, q_rad, kp, kd, dq_rad_s=0.0, tau_nm=0.0, *, probe_frame=False):
+    def stream_frame(self, q_rad, kp, kd, dq_rad_s=0.0, tau_nm=0.0, *, ungated=False):
         self._claim()
-        self._record("stream_frame", q_rad, kp, kd, dq_rad_s, tau_nm, probe_frame)
+        self._record("stream_frame", q_rad, kp, kd, dq_rad_s, tau_nm, ungated)
         return self.enabled
 
     def poll(self) -> bool:
@@ -232,7 +233,38 @@ class RecordingBackend(GripperBackend):
     def save_calibration(self, path: str | None = None) -> str:
         self._claim()
         self._record("save_calibration", path)
-        return path or "/tmp/cal.json"
+        written = path or self.info.path or "/tmp/cal.json"
+        # The write is followed by a re-read in the real backend, and the re-read
+        # is the whole point of it: it is what turns an in-memory probe result
+        # into a saved one, promoting the provenance and opening the gate
+        # (real.py::RealBackend.save_calibration).  A fake that only recorded the
+        # call would leave every finished probe looking unsaved — which is not a
+        # harmless simplification now that a finished probe writes itself out.
+        #
+        # The re-validation below is what resolve() does to a file it reads back,
+        # minus the file: same raw evidence, same checks, and the "not saved yet"
+        # warning no longer applies.
+        if self.info is not None and self.info.provenance == calibration.PROVENANCE_MEMORY:
+            raw = dict(self.info.raw)
+            stroke = self.info.max_stroke_mm
+            limits = calibration.limits_from_raw(raw, stroke)
+            hard, soft = calibration.validate_limits(
+                limits, stroke, calibration.file_scale(raw)
+            )
+            self.info = CalibrationInfo(
+                provenance=(
+                    calibration.PROVENANCE_USER if not hard else calibration.PROVENANCE_INVALID
+                ),
+                limits=limits if not hard else None,
+                path=written,
+                raw=raw,
+                problems=tuple(hard),
+                warnings=tuple(soft),
+                max_stroke_mm=stroke,
+            )
+            if self.info.limits is not None:
+                self._limits = self.info.limits
+        return written
 
     def limits(self) -> Limits:
         return self._limits
@@ -273,9 +305,9 @@ class RecordingSim(SimBackend):
         self.frames: list[tuple] = []
         self.zeroes = 0
 
-    def stream_frame(self, q_rad, kp, kd, dq_rad_s=0.0, tau_nm=0.0, *, probe_frame=False):
-        self.frames.append((q_rad, kp, kd, dq_rad_s, tau_nm, probe_frame))
-        return super().stream_frame(q_rad, kp, kd, dq_rad_s, tau_nm, probe_frame=probe_frame)
+    def stream_frame(self, q_rad, kp, kd, dq_rad_s=0.0, tau_nm=0.0, *, ungated=False):
+        self.frames.append((q_rad, kp, kd, dq_rad_s, tau_nm, ungated))
+        return super().stream_frame(q_rad, kp, kd, dq_rad_s, tau_nm, ungated=ungated)
 
     def zero_torque(self) -> None:
         self.zeroes += 1
@@ -1252,7 +1284,7 @@ class TestCalibrationCommands:
         assert bench.loop.probe is None
         assert "使能" in bench.signals.alerts()[-1]
 
-    def test_the_probe_drives_the_axis_with_probe_frame(self) -> None:
+    def test_the_probe_drives_the_axis_with_an_ungated_frame(self) -> None:
         """The one motion in the application allowed before a calibration
         exists — it is what produces one."""
         bench = Bench()
@@ -1304,6 +1336,20 @@ class TestCalibrationCommands:
         bench.send(cmd.StartGuidedCalibration())
         assert bench.loop.probe is first
 
+    def test_the_declared_mounting_reaches_the_probe(self) -> None:
+        """The page asks the operator which way the jaws open, and the answer
+        has to arrive at the probe: a worker that dropped it would run every
+        probe in the SDK's direction, which on a reverse-mounted gripper is the
+        inverted one — and the result it produces still validates and saves."""
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.StartGuidedCalibration(reversed_mount=True))
+        bench.tick()
+
+        assert bench.loop.probe is not None
+        assert bench.loop.probe.reversed_mount
+        assert bench.loop.probe.direction == 1.0
+
     def test_confirm_reaches_the_guided_probe(self) -> None:
         bench = Bench()
         bench.bring_up()
@@ -1312,10 +1358,11 @@ class TestCalibrationCommands:
         bench.send(cmd.ConfirmProbeLimit())
         assert bench.loop.probe.open_rad is not None
 
-    def test_the_manual_probe_runs_limp_and_stops_on_command(self) -> None:
+    def test_the_manual_probe_runs_limp(self) -> None:
+        """Zero torque is the whole mechanism: the operator drives the jaws."""
         bench = Bench()
         bench.bring_up()
-        bench.send(cmd.StartManualCalibration(60.0))
+        bench.send(cmd.StartManualCalibration())
         bench.tick()
         assert bench.loop.probe is not None
         _q, kp, kd, _dq, tau, _u = [
@@ -1323,44 +1370,195 @@ class TestCalibrationCommands:
         ][-1]
         assert (kp, kd, tau) == (0.0, 0.0, 0.0)
 
-        bench.send(cmd.StopManualRecording())
-        assert bench.loop.probe.phase is ManualPhase.SETTLE
-        assert "提前结束" in bench.signals.of("log")[-1][1]
-
-    def test_stop_manual_is_refused_without_a_manual_probe(self) -> None:
+    def test_starting_a_manual_probe_enters_zero_gravity(self) -> None:
+        """The wizard asks the operator to push the jaws, so the axis has to be
+        free *and say so*: a 记录 button that works while the page looks like it
+        is holding a position is a wizard nobody trusts."""
         bench = Bench()
         bench.bring_up()
-        bench.send(cmd.StopManualRecording())
-        assert "没有正在进行的手动记录" in bench.signals.alerts()[-1]
+        bench.send(cmd.StartManualCalibration())
+        bench.tick()
 
-    def test_a_finished_probe_is_adopted_but_still_gated(self) -> None:
-        """An in-memory result is usable — the UI should show its numbers — but
-        unsaved, so nothing about it survives a restart."""
+        assert bench.loop.motion.state is MotionState.ZERO_G
+        assert bench.loop.motion.source == "开始手动标定"
+
+    def test_starting_a_guided_probe_does_not_enter_zero_gravity(self) -> None:
+        """A guided probe drives the jaws into the stops itself.  Freeing the
+        axis would take away the only thing doing the driving."""
         bench = Bench()
         bench.bring_up()
-        bench.send(cmd.StartManualCalibration(1.0))
+        bench.send(cmd.StartGuidedCalibration())
+        bench.tick()
+
+        assert bench.loop.motion.state is not MotionState.ZERO_G
+
+    def test_finishing_a_manual_probe_leaves_zero_gravity_and_holds_the_angle(
+        self,
+    ) -> None:
+        """The operator is holding the jaws for the whole probe, so the console
+        has to take them back at the end — and with the write broken, the only
+        thing it can name is the angle the encoder reports."""
+        bench = Bench(RecordingBackend(fail=("save_calibration",)))
+        bench.bring_up()
+        bench.send(cmd.StartManualCalibration())
+        bench.tick()
+        assert bench.loop.motion.state is MotionState.ZERO_G
+
+        bench.drive_to(120.0)
+        bench.send(cmd.RecordOpenLimit())
+        bench.drive_to(0.0)
+        bench.send(cmd.RecordCloseLimit())
+
+        assert bench.loop.motion.state is MotionState.HOLD_RAD
+        logged = [text for _level, text in bench.signals.of("log")]
+        assert any("已退出零重力" in text for text in logged)
+
+    def test_a_cancelled_manual_probe_also_leaves_zero_gravity(self) -> None:
+        """Cancelling is the way out an operator reaches for when something is
+        wrong, which makes it the worst possible time to leave the axis free."""
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.StartManualCalibration())
+        bench.tick()
+        assert bench.loop.motion.state is MotionState.ZERO_G
+
+        bench.send(cmd.CancelCalibration())
+        bench.run_until_probe_finishes()
+
+        assert bench.loop.probe is None
+        assert bench.loop.motion.state is not MotionState.ZERO_G
+        bench.backend.calls.clear()
+        bench.tick(3)
+        assert len([c for c in bench.backend.calls if c[0] == "stream_frame"]) == 3
+
+    def test_the_two_labelled_points_finish_the_probe(self) -> None:
+        """The reported flow end to end, at the worker's own level: the
+        operator works the jaws to the open extreme, records it, works them back
+        to the closed one, records that — and the result is written out.
+
+        The write is the operator's second press doing double duty: the two
+        rams of a 记录 button *are* the request for a calibration, so the file
+        appears without a third press and without the axis staying locked while
+        the operator works out that one is needed."""
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.StartManualCalibration())
         bench.tick()
         assert bench.loop.probe is not None
 
-        bench.drive_to(0.0)
         bench.drive_to(120.0)
-        bench.run_until_probe_finishes()
+        bench.send(cmd.RecordOpenLimit())
+        assert bench.loop.probe is not None, "one point is not a calibration"
 
+        bench.drive_to(0.0)
+        bench.send(cmd.RecordCloseLimit())
+
+        assert bench.loop.probe is None, "the second point should finish it"
         assert "set_calibration_memory" in bench.backend.names()
-        assert bench.loop.info.provenance == calibration.PROVENANCE_MEMORY
-        assert bench.loop.gate is GateState.BLOCKED
-        # Gated, and held all the same: an unsaved result is not a set of limits
-        # anyone has vetted, so no command in *millimetres* is derived from it —
-        # but the axis is not abandoned either.  The hold is at the angle the
-        # encoder reported, which needs no limits at all.  See
-        # ``test_the_axis_is_handed_back_after_a_probe``.
-        assert bench.loop.motion.state is MotionState.HOLD_RAD
-        assert "尚未保存" in bench.signals.alerts()[-1]
+        assert "save_calibration" in bench.backend.names()
+        assert bench.loop.info.provenance == calibration.PROVENANCE_USER
+        # Open, and held in millimetres: the file now carries the result, so the
+        # numbers are the ones the console will run on and a command derived
+        # from them is exactly what the axis should be given.
+        assert bench.loop.gate is GateState.READY
+        assert bench.loop.motion.state is MotionState.HOLD
+        assert "标定已保存到" in bench.signals.alerts()[-1]
 
-    def test_a_probe_that_captured_no_range_is_reported_not_adopted(self) -> None:
+    def test_finishing_a_manual_probe_writes_the_probed_angles(self) -> None:
+        """What lands on disk is what the probe just measured.
+
+        The bug this pins down is a re-parse of the default user file at the
+        moment the probe finished, which quietly replaced the angles the
+        operator had just worked the jaws through with the ones already on disk
+        — and the save then wrote that older file back, so pressing 保存 looked
+        like it had done nothing at all.  Two things say it cannot come back:
+        the limits in force after the probe are the probed angles, and the write
+        is handed no path, so nothing in the loop is in a position to reload a
+        file over the result on the way to the disk.
+        """
         bench = Bench()
         bench.bring_up()
-        bench.send(cmd.StartManualCalibration(0.2))
+        bench.send(cmd.StartManualCalibration())
+        bench.tick()
+        bench.drive_to(120.0)
+        bench.send(cmd.RecordOpenLimit())
+        bench.drive_to(0.0)
+        bench.send(cmd.RecordCloseLimit())
+
+        recorded = [
+            c[1] for c in bench.backend.calls if c[0] == "set_calibration_memory"
+        ][-1]
+        close_rad, open_rad = recorded[0], recorded[1]
+        limits = bench.loop.info.limits
+        assert limits is not None
+        assert limits.closed_rad == pytest.approx(close_rad)
+        assert limits.open_rad == pytest.approx(open_rad)
+        assert ("save_calibration", (None,)) in bench.backend.calls
+        assert bench.loop.info.provenance == calibration.PROVENANCE_USER
+
+    def test_a_probe_result_that_fails_validation_is_left_unsaved(self) -> None:
+        """A result the console has just called unusable must not be written.
+
+        The probe's own check only catches a degenerate travel, so a pair of
+        readings that produces an absurd scale gets as far as the file — and the
+        file the result would replace is a working calibration.  Refusing to
+        write preserves it, and the operator is told why rather than being left
+        with a console that saved something and still will not move.
+        """
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.StartManualCalibration())
+        bench.tick()
+        bench.drive_to(60.0)
+        bench.send(cmd.RecordOpenLimit())
+        bench.drive_to(60.2)
+        bench.send(cmd.RecordCloseLimit())
+
+        assert bench.loop.probe is None, "the two points were still taken"
+        assert "set_calibration_memory" in bench.backend.names()
+        assert "save_calibration" not in bench.backend.names()
+        assert bench.loop.info.provenance == calibration.PROVENANCE_MEMORY
+        assert bench.loop.gate is GateState.BLOCKED
+        alert = bench.signals.alerts()[-1]
+        assert "未自动保存" in alert
+        assert "合理范围" in alert
+
+    def test_a_record_without_a_manual_probe_is_refused(self) -> None:
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.RecordOpenLimit())
+        assert "没有正在进行的手动标定" in bench.signals.alerts()[-1]
+
+    def test_a_record_out_of_turn_is_refused_rather_than_relabelled(self) -> None:
+        """The press carries the label, and the label is what decides which end
+        is 0 mm — so a press that arrives during the other step must not be
+        taken as the point that happens to be due.  A calibration built from the
+        two angles swapped passes every check the console makes and drives the
+        gripper backwards."""
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.StartManualCalibration())
+        bench.tick()
+
+        bench.drive_to(120.0)
+        bench.send(cmd.RecordCloseLimit())
+
+        probe = bench.loop.probe
+        assert probe is not None
+        assert probe.close_rad is None and probe.open_rad is None
+        assert "已忽略这次按键" in bench.signals.of("log")[-1][1]
+
+    def test_a_probe_that_captured_no_range_is_reported_not_adopted(self) -> None:
+        """Both buttons pressed in the same place: a "calibration" whose every
+        millimetre is one angle.  It must be reported, not adopted."""
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.StartManualCalibration())
+        bench.tick()
+
+        bench.drive_to(60.0)
+        bench.send(cmd.RecordOpenLimit())
+        bench.send(cmd.RecordCloseLimit())
         bench.run_until_probe_finishes()
 
         assert "set_calibration_memory" not in bench.backend.names()
@@ -1389,20 +1587,36 @@ class TestTheAxisIsHandedBackAfterAProbe:
     it was last given and the fingers free to go wherever the mechanism's springs
     push them.  On the real gripper that is a pop open and a fault light, right
     as the operator is looking at the wizard that just said 标定完成.
+
+    These are the runs where the probe's result did not make it into the file,
+    so the console is still gated and the hand-back has to be honest about it.
+    The runs that *do* save are held in millimetres instead — see
+    ``TestCalibrationCommands::test_the_two_labelled_points_finish_the_probe``.
     """
 
-    def _finished_manual_probe(self) -> Bench:
-        bench = Bench()
+    def _finished_manual_probe(self, fail: tuple[str, ...] = ()) -> Bench:
+        """A manual probe run to the end, with the write optionally broken.
+
+        The saved case ends up holding in millimetres like any other ready
+        console (``test_the_two_labelled_points_finish_the_probe``), so what is
+        left for this class is the case where the file does *not* end up
+        carrying the result: the numbers did not pass validation, or the write
+        itself failed.  That is when the console stays gated, and it is exactly
+        when the axis must not be dropped.
+        """
+        bench = Bench(RecordingBackend(fail=fail))
         bench.bring_up()
-        bench.send(cmd.StartManualCalibration(1.0))
+        bench.send(cmd.StartManualCalibration())
         bench.tick()
-        bench.drive_to(0.0)
         bench.drive_to(120.0)
-        bench.run_until_probe_finishes()
+        bench.send(cmd.RecordOpenLimit())
+        bench.drive_to(0.0)
+        bench.send(cmd.RecordCloseLimit())
+        assert bench.loop.probe is None
         return bench
 
     def test_it_holds_the_pose_the_probe_ended_on(self) -> None:
-        bench = self._finished_manual_probe()
+        bench = self._finished_manual_probe(fail=("save_calibration",))
         assert bench.loop.motion.state is MotionState.HOLD_RAD
 
         # Commanded, not abandoned: one frame per tick, all of them at the angle
@@ -1418,7 +1632,7 @@ class TestTheAxisIsHandedBackAfterAProbe:
 
     def test_it_does_not_zero_torque_the_axis_on_the_way_out(self) -> None:
         """The withdrawal this replaced: zero torque once, then silence."""
-        bench = self._finished_manual_probe()
+        bench = self._finished_manual_probe(fail=("save_calibration",))
         bench.backend.calls.clear()
         bench.tick(20)
 
@@ -1426,11 +1640,23 @@ class TestTheAxisIsHandedBackAfterAProbe:
         assert bench.loop.motion.state is MotionState.HOLD_RAD
 
     def test_the_hold_is_not_a_millimetre_command(self) -> None:
-        """Nothing about it is derived from the unsaved limits, which is what
-        makes it safe to hold through a shut gate.  Published as no command at
-        all, so the UI does not claim a target the operator never set."""
-        bench = self._finished_manual_probe()
+        """Nothing about it is derived from the limits that are still in doubt,
+        which is what makes it safe to hold through a shut gate.  Published as
+        no command at all, so the UI does not claim a target the operator never
+        set."""
+        bench = self._finished_manual_probe(fail=("save_calibration",))
         assert bench.frame().cmd_mm is None
+
+    def test_a_write_that_fails_says_the_result_is_still_unsaved(self) -> None:
+        """The retry has to be worth pressing, which means the operator has to
+        be told the file did not take the result — otherwise the console looks
+        like it saved and the gate staying shut looks like a fault."""
+        bench = self._finished_manual_probe(fail=("save_calibration",))
+
+        alerts = bench.signals.alerts()
+        assert "保存标定失败" in alerts[-2]
+        assert "尚未保存" in alerts[-1]
+        assert bench.loop.gate is GateState.BLOCKED
 
     def test_a_probe_that_never_saw_a_reading_hands_back_a_free_axis(self) -> None:
         """With no reading there is no pose to hold to, and guessing one is
@@ -1454,7 +1680,9 @@ class TestTheAxisIsHandedBackAfterAProbe:
 
     def test_a_guided_probe_against_the_plant_also_ends_held(self) -> None:
         """The reported flow, end to end: a real guided probe against the
-        simulated mechanism, which presses both stops and stops on one."""
+        simulated mechanism, which presses both stops and stops on one — and
+        then writes its own result out and holds the axis on the file's own
+        numbers rather than on the angle alone."""
         clock = FakeClock()
         bench = Bench(RecordingSim(clock=clock), clock=clock)
         bench.send(cmd.Connect())
@@ -1463,9 +1691,9 @@ class TestTheAxisIsHandedBackAfterAProbe:
         bench.send(cmd.StartGuidedCalibration())
         bench.run_until_probe_finishes(timeout_s=40.0)
 
-        assert bench.loop.info.provenance == calibration.PROVENANCE_MEMORY
-        assert bench.loop.gate is GateState.BLOCKED
-        assert bench.loop.motion.state is MotionState.HOLD_RAD
+        assert bench.loop.info.provenance == calibration.PROVENANCE_USER
+        assert bench.loop.gate is GateState.READY
+        assert bench.loop.motion.state is MotionState.HOLD
 
         backend = bench.backend
         backend.frames.clear()
@@ -1473,7 +1701,7 @@ class TestTheAxisIsHandedBackAfterAProbe:
         bench.tick(20)
         assert len(backend.frames) == 20
         # One angle, held: the closed limit the probe just recorded, which is
-        # where the guided probe ends.
+        # where the guided probe ends and what the file now says 0 mm is.
         ended = backend.frames[0][0]
         assert all(f[0] == ended for f in backend.frames)
         assert ended == pytest.approx(bench.loop.info.limits.rad_high, abs=1e-4)
@@ -1714,3 +1942,76 @@ class TestAReadingThatHasGoneStale:
 
         assert "堵转" not in bench.loop.motion.note
         assert bench.loop.motion.state is MotionState.SERVO
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Alerts: what the operator is told, and what survives the window
+# ═══════════════════════════════════════════════════════════════════════════
+class TestAlertsReachTheLogFile:
+    """An alert is a widget message; the log file is the record.
+
+    The alerts worth having are the ones explaining a refusal, and until these
+    existed the only account of one was on screen — so it went away with the
+    window, and an operator reporting 「标定不可用」 had nothing to attach to
+    the report.  The messages were reaching the file only by accident, through
+    whichever of them happened to also be written as a log line at a level the
+    file keeps.
+    """
+
+    def test_an_error_alert_is_written_as_an_error(self, caplog) -> None:
+        bench = Bench()
+
+        with caplog.at_level(logging.ERROR, logger="litegrip_studio.core.worker"):
+            bench.loop._alert("error", "标定不可用：推导出的rad超出合理范围")
+
+        records = [r for r in caplog.records if "超出合理范围" in r.getMessage()]
+        assert [r.levelname for r in records] == ["ERROR"]
+
+    def test_a_warning_alert_is_written_as_a_warning(self, caplog) -> None:
+        bench = Bench()
+
+        with caplog.at_level(logging.WARNING, logger="litegrip_studio.core.worker"):
+            bench.loop._alert("warn", "结果未自动保存")
+
+        records = [r for r in caplog.records if "未自动保存" in r.getMessage()]
+        assert [r.levelname for r in records] == ["WARNING"]
+
+    def test_an_info_alert_is_not_demoted_to_debug(self, caplog) -> None:
+        """The one level where this deliberately departs from ``_log``: an
+        alert the operator was shown is a record, not running commentary."""
+        bench = Bench()
+
+        with caplog.at_level(logging.INFO, logger="litegrip_studio.core.worker"):
+            bench.loop._alert("info", "标定已保存到 /tmp/cal.json")
+
+        records = [r for r in caplog.records if "标定已保存到" in r.getMessage()]
+        assert [r.levelname for r in records] == ["INFO"]
+
+    def test_an_unusable_calibration_says_so_in_the_log(self, caplog, tmp_path) -> None:
+        """The reported symptom, end to end: the console refuses to move, and
+        the reason has to be findable afterwards.
+
+        The file is the shape of the one that did it — a recorded span too short
+        for the travel it claims — and it goes through ``resolve``, so the text
+        asserted here is the text ``validate_limits`` produces rather than one
+        written into the test.
+        """
+        broken = tmp_path / "tiny.json"
+        broken.write_text(
+            json.dumps(
+                {
+                    "zero_position_rad": 1.0,
+                    "max_position_rad": 0.996,
+                    "rad_to_mm": 21500.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        bench = Bench()
+        bench.backend.info = calibration.resolve(str(broken))
+
+        with caplog.at_level(logging.ERROR, logger="litegrip_studio.core.worker"):
+            bench.send(cmd.LoadCalibration())
+
+        assert bench.loop.gate is GateState.BLOCKED
+        assert any("超出合理范围" in r.getMessage() for r in caplog.records)

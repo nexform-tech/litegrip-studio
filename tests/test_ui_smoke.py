@@ -19,7 +19,7 @@ from PyQt5.QtWidgets import QPushButton
 from litegrip_studio import calibration, constants
 from litegrip_studio.calibration import CalibrationInfo
 from litegrip_studio.core import commands as cmd
-from litegrip_studio.core.calibration_fsm import GuidedPhase, ManualPhase
+from litegrip_studio.core.calibration_fsm import GuidedPhase, TwoPointPhase
 from litegrip_studio.core.worker import (
     CONN_CONNECTED,
     CONN_CONNECTING,
@@ -287,10 +287,10 @@ class TestTheWiring:
         reading."""
         window.tabs.setCurrentIndex(0)
 
-        worker.calib_progress.emit(ManualPhase.RECORDING.value, 0.1, "")
+        worker.calib_progress.emit(TwoPointPhase.RECORD_OPEN.value, 0.1, "")
 
         assert window.tabs.currentWidget() is window.calibration_page
-        assert window.calibration_page.phase == ManualPhase.RECORDING.value
+        assert window.calibration_page.phase == TwoPointPhase.RECORD_OPEN.value
 
     def test_the_dock_is_not_forced_open_by_a_probe(self, window, worker) -> None:
         window.tabs.setCurrentIndex(1)
@@ -433,18 +433,18 @@ class TestWhatIsRemembered:
         assert store.value("view/window_state") is not None
 
     def test_the_page_preferences_are_written_on_close(self, qapp, worker) -> None:
-        """The speed is written on release and the travel on apply; the close is
-        the last chance for whatever the operator changed but never confirmed."""
+        """The speed is written on release; the close is the last chance for
+        whatever the operator changed but never confirmed.  The travel was the
+        other one of these until it stopped being a preference."""
         store = _Store()
         window = MainWindow(worker, Settings(store))
         window._heartbeat.stop()
         window.control_page._speed.setValue(77)
-        window.calibration_page._travel.setValue(130.0)
 
         window.close()
 
         assert store.value("motion/speed_mm_s") == 77
-        assert float(store.value("calibration/travel_mm")) == pytest.approx(130.0)
+        assert store.value("calibration/travel_mm") is None
 
 
 class TestClosing:

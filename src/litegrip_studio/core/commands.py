@@ -177,21 +177,6 @@ class SetForce(Command):
         return f"夹持力设为 {self.force_n:.1f} N"
 
 
-@dataclass(frozen=True)
-class SetTravel(Command):
-    """The measured travel of this gripper, in millimetres.
-
-    Carried on ``max_stroke_mm`` because that is the field it fills in
-    ``Limits``, and it is what the slider spans and what the mm scale is derived
-    from — see :func:`litegrip_studio.units.derive_scale`.
-    """
-
-    max_stroke_mm: float
-
-    def describe(self) -> str:
-        return f"行程设为 {self.max_stroke_mm:.1f} mm"
-
-
 # ── calibration ─────────────────────────────────────────────────────────────
 @dataclass(frozen=True)
 class LoadCalibration(Command):
@@ -215,12 +200,20 @@ class StartGuidedCalibration(Command):
 
     The only command in the set that authorises movement without a valid
     calibration, because it is the thing that produces one.
+
+    ``reversed_mount`` says which way the jaws open, and it has to come from the
+    operator: the probe is producing a calibration precisely because there is no
+    file to read it from, and a probe that steps the wrong way records the closed
+    stop as the open one — a result that validates, saves, and drives the gripper
+    inverted.
     """
 
+    reversed_mount: bool = False
     source: str = "guided"
 
     def describe(self) -> str:
-        return "开始引导式标定"
+        mounting = "（反向装配）" if self.reversed_mount else ""
+        return f"开始引导式标定{mounting}"
 
 
 @dataclass(frozen=True)
@@ -240,31 +233,39 @@ class ConfirmProbeLimit(Command):
 
 @dataclass(frozen=True)
 class StartManualCalibration(Command):
-    """Track the travel by hand in zero gravity and record min/max."""
+    """Hold the axis limp so the operator can work the jaws to each extreme."""
 
-    duration_s: float | None = None
     source: str = "manual"
 
     def describe(self) -> str:
-        span = "直到手动停止" if self.duration_s is None else f"{self.duration_s:.0f} s"
-        return f"开始零重力手动标定（{span}）"
+        return "开始手动两点标定（零重力）"
 
 
 @dataclass(frozen=True)
-class StopManualRecording(Command):
-    """The operator has finished working the jaws by hand.
+class RecordOpenLimit(Command):
+    """The jaws are at the open extreme, and the operator says so.
 
-    Distinct from :class:`CancelCalibration` because the samples are worth
-    keeping: the SDK documents "press Ctrl+C to stop early" (gripper.py:404) and
-    then goes on to settle and validate what it recorded.  A worker thread can
-    never receive that signal — Python delivers them to the main thread only —
-    so the button is the only form of it that can work.
+    Two commands rather than one carrying a label, because the label is the
+    whole content of the command and the console's mounting direction comes out
+    of it: whichever point is recorded as the closed one is 0 mm.  A flow that
+    could carry the label as a string could carry it wrong, and the result would
+    be a complete, plausible, inverted calibration.
     """
 
     source: str = "manual"
 
     def describe(self) -> str:
-        return "结束手动记录（保留样本）"
+        return "记录张开极限"
+
+
+@dataclass(frozen=True)
+class RecordCloseLimit(Command):
+    """The jaws are at the closed extreme — the end that is 0 mm."""
+
+    source: str = "manual"
+
+    def describe(self) -> str:
+        return "记录闭合极限"
 
 
 @dataclass(frozen=True)
@@ -326,13 +327,13 @@ AnyCommand = Union[
     SetZeroGravity,
     SetSpeed,
     SetForce,
-    SetTravel,
     LoadCalibration,
     SaveCalibration,
     StartGuidedCalibration,
     ConfirmProbeLimit,
     StartManualCalibration,
-    StopManualRecording,
+    RecordOpenLimit,
+    RecordCloseLimit,
     CancelCalibration,
     Heartbeat,
     Inject,
@@ -342,7 +343,7 @@ AnyCommand = Union[
 #: Commands of which only the last in a run can matter.  Everything else — a
 #: connect, a fault clear, a calibration step — has an effect that a later
 #: command of the same kind does not supersede.
-COALESCABLE = (MoveToMm, SetSpeed, SetForce, SetTravel, Heartbeat)
+COALESCABLE = (MoveToMm, SetSpeed, SetForce, Heartbeat)
 
 
 def coalesce(commands: list[AnyCommand]) -> list[AnyCommand]:

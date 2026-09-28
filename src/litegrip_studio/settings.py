@@ -43,12 +43,22 @@ KEY_SPEED = "motion/speed_mm_s"
 KEY_FORCE = "motion/force_n"
 KEY_LIVE_FOLLOW = "motion/live_follow"
 KEY_CALIBRATION_PATH = "calibration/path"
+#: The measured travel used to be a preference here.  It is a property of the
+#: bench unit rather than a choice, so it is :data:`constants.DEFAULT_TRAVEL_MM`
+#: now — and this key is retired.  Only :data:`RETIRED_KEYS` reads it.
 KEY_TRAVEL_MM = "calibration/travel_mm"
 KEY_GEOMETRY = "view/geometry"
 KEY_WINDOW_STATE = "view/window_state"
 KEY_TAB = "view/tab"
 KEY_SHOW_DEBUG = "view/show_debug_log"
 KEY_LOG_LEVEL = "logging/level"
+
+#: Keys a console older than this one may have written and nothing reads any
+#: more.  They are deleted on open rather than left alone, because the file is
+#: what an operator (or a support engineer) reads when something is wrong: a
+#: ``travel_mm=10`` sitting in it would look like the console's own belief about
+#: the bench, and there is no way to tell from the file that it is inert.
+RETIRED_KEYS = (KEY_TRAVEL_MM,)
 
 _TRUE = frozenset({"1", "true", "yes", "on", "y", "t"})
 _FALSE = frozenset({"0", "false", "no", "off", "n", "f", ""})
@@ -69,6 +79,7 @@ class Settings:
 
             store = QSettings(str(self.path), QSettings.IniFormat)
         self._store = store
+        self._drop_retired_keys()
 
     # ── motion ──────────────────────────────────────────────────────────────
     @property
@@ -131,17 +142,6 @@ class Settings:
             self._store.remove(KEY_CALIBRATION_PATH)
             self._sync()
 
-    @property
-    def travel_mm(self) -> float:
-        return self._float(KEY_TRAVEL_MM, constants.DEFAULT_TRAVEL_MM,
-                           constants.STROKE_MIN_MM, constants.STROKE_MAX_MM)
-
-    @travel_mm.setter
-    def travel_mm(self, value: float) -> None:
-        self._write(KEY_TRAVEL_MM, self._clamp(value, constants.STROKE_MIN_MM,
-                                                    constants.STROKE_MAX_MM,
-                                                    constants.DEFAULT_TRAVEL_MM))
-
     # ── view ────────────────────────────────────────────────────────────────
     @property
     def geometry(self) -> Any:
@@ -182,6 +182,26 @@ class Settings:
         self._write(KEY_SHOW_DEBUG, bool(value))
 
     # ── internals ───────────────────────────────────────────────────────────
+    def _drop_retired_keys(self) -> None:
+        """Delete keys this console no longer reads, if any are present.
+
+        Only writes when there is something to remove: opening the console must
+        not rewrite a file nothing has changed.  A store that cannot be cleaned
+        is not fatal — the values are inert either way.
+        """
+        for key in RETIRED_KEYS:
+            try:
+                present = self._store.value(key, None) is not None
+            except Exception:  # noqa: BLE001 - an unreadable store is not fatal
+                continue
+            if not present:
+                continue
+            try:
+                self._store.remove(key)
+            except Exception:  # noqa: BLE001
+                continue
+            self._sync()
+
     def _read(self, key: str, default: Any) -> Any:
         try:
             value = self._store.value(key, default)

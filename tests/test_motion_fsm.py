@@ -38,6 +38,10 @@ class Frame(NamedTuple):
     kd: float
     dq_rad_s: float
     tau_nm: float
+    #: Whether the frame was sent with the calibration gate relaxed.  Recorded
+    #: rather than ignored because it is the difference between a frame that
+    #: reaches the motor on a console with an unusable file and one that does not.
+    ungated: bool = False
 
 
 class IdealPlant:
@@ -55,8 +59,8 @@ class IdealPlant:
         self.velocity_rad_s = 0.0
         self.torque_nm = 0.0
 
-    def stream_frame(self, q_rad, kp, kd, dq_rad_s=0.0, tau_nm=0.0) -> bool:
-        self.frames.append(Frame(q_rad, kp, kd, dq_rad_s, tau_nm))
+    def stream_frame(self, q_rad, kp, kd, dq_rad_s=0.0, tau_nm=0.0, *, ungated=False) -> bool:
+        self.frames.append(Frame(q_rad, kp, kd, dq_rad_s, tau_nm, ungated))
         if not self.accept:
             return False
         self.mm = self.limits.clamp_mm(self.limits.to_mm(q_rad))
@@ -350,6 +354,38 @@ class TestFreeStates:
         assert fsm.state is MotionState.FAULT
         assert not any(o.sent for o in outs)
 
+    @pytest.mark.parametrize(
+        "enter", [lambda f: f.release(), lambda f: f.zero_gravity(True, 60.0)]
+    )
+    def test_a_free_state_is_marked_ungated_so_a_shut_gate_cannot_refuse_it(
+        self, enter
+    ) -> None:
+        """Zero stiffness has nothing to gate, and on real hardware an ungated
+        flag is the difference between 松力 working and doing nothing.
+
+        松力 on a console whose file is unusable is how the operator gets the
+        jaws into their hands to re-calibrate, which is exactly the console that
+        has a shut gate.
+        """
+        fsm, backend = servo(start_mm=60.0)
+        enter(fsm)
+
+        run_ticks(fsm, backend, 3)
+
+        assert backend.frames, "expected frames"
+        assert all(f.ungated for f in backend.frames)
+
+    def test_a_servo_frame_is_not_ungated(self) -> None:
+        """The other half of the rule: a frame that names a position derived
+        from the limits must still be refusable."""
+        fsm, backend = servo(start_mm=0.0)
+        fsm.move_to_mm(60.0, "slider")
+
+        run_ticks(fsm, backend, 20)
+
+        assert backend.frames
+        assert not any(f.ungated for f in backend.frames)
+
 
 class TestHoldAtAnAngle:
     """A hold that never goes near the calibration.
@@ -406,6 +442,23 @@ class TestHoldAtAnAngle:
         run_ticks(fsm, backend, 1)
         assert fsm.state is MotionState.HOLD_RAD
         assert backend.frames[-1].kp == constants.KP_MOVE
+
+    def test_the_hold_reaches_a_motor_the_travel_check_would_refuse(self) -> None:
+        """``BEYOND`` is outside BENCH by more than the clamp allows, which is
+        where a probe leaves the axis — and behind a shut gate it is also where
+        the travel check sits.
+
+        Sent gated, this frame is refused and the axis is left free while the
+        console reports it held: the one lie the operator cannot see, because
+        the fingers only answer to the springs when nothing is commanding them.
+        """
+        fsm, backend = servo(start_mm=0.0)
+        fsm.hold_rad(self.BEYOND)
+
+        run_ticks(fsm, backend, 3)
+
+        assert all(f.ungated for f in backend.frames)
+        assert [f.q_rad for f in backend.frames] == [pytest.approx(self.BEYOND)] * 3
 
 
 class TestFrameAssembly:
@@ -493,8 +546,8 @@ class Laggard(IdealPlant):
         super().__init__(limits, start_mm)
         self.ratio = ratio
 
-    def stream_frame(self, q_rad, kp, kd, dq_rad_s=0.0, tau_nm=0.0) -> bool:
-        self.frames.append(Frame(q_rad, kp, kd, dq_rad_s, tau_nm))
+    def stream_frame(self, q_rad, kp, kd, dq_rad_s=0.0, tau_nm=0.0, *, ungated=False) -> bool:
+        self.frames.append(Frame(q_rad, kp, kd, dq_rad_s, tau_nm, ungated))
         target = self.limits.clamp_mm(self.limits.to_mm(q_rad))
         self.mm += (target - self.mm) * self.ratio
         self.velocity_rad_s = dq_rad_s * self.ratio
@@ -513,7 +566,8 @@ class StickyPlant:
         self.plant = Plant(config)
         self.limits = self.plant.limits
 
-    def stream_frame(self, q_rad, kp, kd, dq_rad_s=0.0, tau_nm=0.0) -> bool:
+    def stream_frame(self, q_rad, kp, kd, dq_rad_s=0.0, tau_nm=0.0, *, ungated=False) -> bool:
+        del ungated  # the plant underneath has no gate
         self.plant.stream(q_rad, kp, kd, dq_rad_s, tau_nm)
         return True
 

@@ -16,10 +16,10 @@ from pathlib import Path
 import pytest
 from PyQt5.QtWidgets import QLabel, QScrollArea
 
-from litegrip_studio import calibration, constants
+from litegrip_studio import calibration
 from litegrip_studio.calibration import CalibrationInfo
 from litegrip_studio.core import commands as cmd
-from litegrip_studio.core.calibration_fsm import GuidedPhase, ManualPhase
+from litegrip_studio.core.calibration_fsm import GuidedPhase, TwoPointPhase
 from litegrip_studio.core.worker import (
     CONN_CONNECTED,
     CONN_DISCONNECTED,
@@ -53,17 +53,41 @@ FACTORY_CAL = CalibrationInfo(
     limits=FACTORY_LIMITS,
     path=str(SDK_ROOT / "litegrip" / "factory_calibration.json"),
 )
-REVERSED_CAL = CalibrationInfo(
+INVALID_CAL = CalibrationInfo(
     provenance=calibration.PROVENANCE_INVALID,
     limits=None,
     path="/tmp/broken.json",
-    problems=("闭合角 0.000000 rad 不大于张开角 1.140000 rad：方向相反，疑似未标定",),
+    problems=(
+        "行程 (travel_range_rad) 必须为正",
+        "由行程 0.000000 rad 与设定行程 120.0 mm 推出的 mm/rad 无效；请检查标定页上的行程设定",
+    ),
+)
+#: A good calibration for a gripper whose angle grows as the jaws open.  The
+#: banner has to say so: it is the one fact, besides the stroke, that decides
+#: whether the operator's idea of 闭合 is the gripper's.
+REVERSE_MOUNTED_LIMITS = Limits(-0.300793, 1.421569, 49.93, 85.0)
+REVERSE_MOUNTED_CAL = CalibrationInfo(
+    provenance=calibration.PROVENANCE_USER,
+    limits=REVERSE_MOUNTED_LIMITS,
+    path=str(Path.home() / ".litegrip" / "litegrip_calibration.json"),
+    warnings=(
+        "闭合角 (-0.300793 rad) 小于张开角 (1.421569 rad)：按反向装配解释 —— 张开时角度变大",
+    ),
 )
 MEMORY_CAL = CalibrationInfo(
     provenance=calibration.PROVENANCE_MEMORY,
     limits=USER_LIMITS,
     path=None,
     warnings=("结果尚未保存",),
+)
+#: A probe result whose numbers did not survive validation.  ``in_memory``
+#: drops the limits when a hard check fails, so this is what a result that
+#: cannot be saved actually looks like — not merely one that is unsaved.
+BROKEN_MEMORY_CAL = CalibrationInfo(
+    provenance=calibration.PROVENANCE_MEMORY,
+    limits=None,
+    path=None,
+    problems=("由行程 0.003824 rad 与设定行程 85.0 mm 推出的 mm/rad 超出合理范围",),
 )
 
 
@@ -130,11 +154,20 @@ class TestTheProvenanceIsShown:
         assert page._banner.severity == "warn"
         assert page._allow.isVisibleTo(page)
 
-    def test_a_reversed_calibration_is_an_error_naming_the_problem(self, page) -> None:
-        page.set_calibration(REVERSED_CAL)
+    def test_an_unusable_calibration_is_an_error_naming_the_problem(self, page) -> None:
+        page.set_calibration(INVALID_CAL)
 
         assert page._banner.severity == "error"
-        assert "方向相反" in page._banner.detail
+        assert "行程" in page._banner.detail
+
+    def test_a_reverse_mounted_calibration_is_shown_as_one(self, page) -> None:
+        """Not an error, and not silent either: it is a good calibration, and
+        the one fact about it that decides what 闭合 means for this operator."""
+        page.set_calibration(REVERSE_MOUNTED_CAL)
+
+        assert page._banner.severity == "info"
+        assert "反向装配" in page._banner.headline
+        assert "反向装配" in page._banner.detail
 
     def test_the_acknowledgement_is_hidden_when_it_is_moot(self, page) -> None:
         page.set_calibration(FACTORY_CAL)
@@ -157,7 +190,7 @@ class TestTheProvenanceIsShown:
         the stroke and the provenance and nothing else."""
         page.set_calibration(USER_CAL)
 
-        assert page._banner.headline == "用户标定：行程 120.0 mm"
+        assert page._banner.headline == "用户标定：行程 120.0 mm · 正向装配（闭合角更大）"
 
     def test_the_expert_numbers_are_not_on_screen_by_default(self, page) -> None:
         page.set_calibration(USER_CAL)
@@ -229,7 +262,7 @@ class TestTheGateIsExplained:
 
 class TestTheProbeButtons:
     def test_a_probe_needs_a_connected_enabled_motor(self, page) -> None:
-        page.set_calibration(REVERSED_CAL)
+        page.set_calibration(INVALID_CAL)
         page.set_gate(GateState.BLOCKED, "缺少标定文件")
 
         assert page._guided_start.isEnabled()
@@ -263,10 +296,15 @@ class TestTheProbeButtons:
         assert page._guided_cancel.isEnabled()
 
     def test_the_manual_probe_withdraws_the_guided_one_too(self, page) -> None:
-        page.set_progress(ManualPhase.RECORDING.value, 0.3)
+        page.set_progress(TwoPointPhase.RECORD_OPEN.value, 0.0)
 
         assert not page._guided_start.isEnabled()
-        assert page._manual_stop.isEnabled()
+        assert page._manual_open.isEnabled()
+        # Including the guided probe's own controls: a cancel button that is
+        # live during the *other* probe cancels nothing, and the operator finds
+        # that out at the moment they most need it to work.
+        assert not page._guided_cancel.isEnabled()
+        assert not page._guided_confirm.isEnabled()
 
     def test_a_finished_probe_offers_a_new_one(self, page) -> None:
         page.set_progress(GuidedPhase.DONE.value, 1.0)
@@ -307,6 +345,56 @@ class TestTheConfirmation:
         assert isinstance(page.recorder.last(), cmd.ConfirmProbeLimit)
 
 
+class TestTheMountingQuestion:
+    """The one thing about a guided probe the operator has to supply.
+
+    The probe is being run because no usable file exists, so there is nothing to
+    read the direction from — and a probe that goes the wrong way records the
+    closed stop as the open one and produces a calibration that validates, saves
+    and moves the gripper inverted.  Hence a checkbox, and hence it is locked
+    once the probe has started: a direction that changed halfway through would
+    be two directions in one file.
+    """
+
+    def test_it_is_sent_with_the_probe(self, page) -> None:
+        page._guided_reversed.setChecked(True)
+        page.recorder.commands.clear()
+
+        page._guided_start.click()
+
+        sent = page.recorder.of(cmd.StartGuidedCalibration)[-1]
+        assert sent.reversed_mount  # type: ignore[attr-defined]
+
+    def test_the_classic_mounting_is_the_default(self, page) -> None:
+        page.recorder.commands.clear()
+
+        page._guided_start.click()
+
+        assert not page.reversed_mount
+        assert not page.recorder.of(cmd.StartGuidedCalibration)[-1].reversed_mount  # type: ignore[attr-defined]
+
+    def test_it_is_locked_while_a_probe_runs(self, page) -> None:
+        assert page._guided_reversed.isEnabled()
+
+        page.set_progress(GuidedPhase.OPEN_PROBE.value, 0.1)
+        assert not page._guided_reversed.isEnabled()
+
+        page.set_progress(GuidedPhase.DONE.value, 1.0)
+        assert page._guided_reversed.isEnabled()
+
+    def test_the_question_is_explained_where_it_is_asked(self, page) -> None:
+        """Nothing on this page can answer it: the millimetre reading is
+        computed *through* the calibration under suspicion.  The tooltip has to
+        say so, and say how to read the answer off the live angle instead."""
+        tip = page._guided_reversed.toolTip()
+
+        assert "实测位置" in tip, "没说去哪里看角度"
+        assert "角度" in tip and "反向装配" in tip
+        # And the reason it is a question rather than a checkbox to tick
+        # casually: the wrong answer is not rejected anywhere downstream.
+        assert "保存" in tip
+
+
 class TestTheCommandsItSends:
     def test_each_probe_button_sends_its_command(self, page) -> None:
         page._guided_start.click()
@@ -316,24 +404,30 @@ class TestTheCommandsItSends:
         page._guided_cancel.click()
         assert isinstance(page.recorder.last(), cmd.CancelCalibration)
 
-    def test_the_manual_probe_carries_the_duration(self, page) -> None:
-        page._manual_duration.setValue(45.0)
+    def test_starting_the_manual_probe_carries_nothing_else(self, page) -> None:
+        """There is no duration to send any more: the operator decides when each
+        point is recorded, so the probe has nothing to be told in advance."""
         page.recorder.commands.clear()
 
         page._manual_start.click()
 
-        assert page.recorder.of(cmd.StartManualCalibration)[-1].duration_s == 45.0
+        assert page.recorder.of(cmd.StartManualCalibration)[-1] == (
+            cmd.StartManualCalibration()
+        )
 
-    def test_stopping_the_recording_keeps_the_samples(self, page) -> None:
-        """Distinct from cancelling: the SDK's Ctrl+C equivalent settles and
-        validates what it captured, and a worker thread can never receive the
-        signal itself."""
-        page.set_progress(ManualPhase.RECORDING.value, 0.5)
+    def test_each_record_button_sends_its_own_label(self, page) -> None:
+        """The command carries the label rather than the point being inferred
+        from the step the probe is in — the label is the operator's whole answer
+        to which end is 0 mm, and the two must not be able to disagree."""
+        page.set_progress(TwoPointPhase.RECORD_OPEN.value, 0.0)
         page.recorder.commands.clear()
+        page._manual_open.click()
+        assert isinstance(page.recorder.last(), cmd.RecordOpenLimit)
 
-        page._manual_stop.click()
-
-        assert isinstance(page.recorder.last(), cmd.StopManualRecording)
+        page.set_progress(TwoPointPhase.RECORD_CLOSE.value, 0.5)
+        page.recorder.commands.clear()
+        page._manual_close.click()
+        assert isinstance(page.recorder.last(), cmd.RecordCloseLimit)
 
     def test_reloading_and_saving_are_commands(self, page) -> None:
         page.recorder.commands.clear()
@@ -349,13 +443,13 @@ class TestTheCommandsItSends:
 
         assert page.recorder.of(cmd.LoadCalibration)[-1].path == "/tmp/other.json"
 
-    def test_the_travel_mm_travels_as_a_command(self, page) -> None:
-        page._travel.setValue(140.0)
-        page.recorder.commands.clear()
-
-        page._travel_apply.click()
-
-        assert page.recorder.of(cmd.SetTravel)[-1].max_stroke_mm == 140.0
+    def test_there_is_no_travel_widget_to_set(self, page) -> None:
+        """The travel was editable here until 2026-09-28, when 10 mm was typed
+        into it and the derived scale fell below the plausible band — the console
+        then refused every move and the page could not explain why.  A
+        measurement of the bench is not a preference, so the control is gone."""
+        assert not hasattr(page, "_travel")
+        assert not hasattr(page, "travel_mm")
 
 
 class TestSaving:
@@ -365,22 +459,44 @@ class TestSaving:
         assert page._save.isEnabled()
 
     def test_an_unsaved_result_can_be_saved(self, page) -> None:
+        """An in-memory result blocks motion, and that is precisely why the
+        button has to stay live: a finished probe writes itself out, so what is
+        left for the button is the retry after that write failed — and a retry
+        on a result that is merely unsaved is the whole case it exists for."""
         page.set_calibration(MEMORY_CAL)
 
+        assert not MEMORY_CAL.motion_allowed, "still gated, and still savable"
         assert page._save.isEnabled()
+
+    def test_a_broken_memory_result_offers_nothing_to_save(self, page) -> None:
+        """A result that failed validation comes back with no limits, and a
+        file written from it would only look like a calibration — the next
+        launch would load it as this gripper's own and refuse to move."""
+        page.set_calibration(BROKEN_MEMORY_CAL)
+
+        assert not page._save.isEnabled()
 
     def test_the_factory_file_is_not_the_operator_s_to_overwrite(self, page) -> None:
         """Saving the factory numbers into the user path would launder them into
         a user calibration, and the next launch would show them as this
-        gripper's own."""
+        gripper's own.
+
+        The backend refuses the factory path by name as well, but that guard
+        cannot see this case: a factory calibration the SDK fell back to has no
+        path of its own, so the target would be the *user* file."""
         page.set_calibration(FACTORY_CAL)
 
         assert not page._save.isEnabled()
 
     def test_an_unusable_file_is_not_worth_writing_out(self, page) -> None:
-        page.set_calibration(REVERSED_CAL)
+        page.set_calibration(INVALID_CAL)
 
         assert not page._save.isEnabled()
+
+    def test_the_button_says_it_is_a_retry(self, page) -> None:
+        """No probe ever needs it pressed, so it must not read like a step of
+        the procedure."""
+        assert page._save.text() == "重新保存标定…"
 
     def test_nothing_is_offered_while_a_probe_runs(self, page) -> None:
         page.set_calibration(USER_CAL)
@@ -435,23 +551,36 @@ class TestThePhaseHelpers:
     @pytest.mark.parametrize(
         "phase, active",
         [
-            (ManualPhase.RECORDING.value, True),
-            (ManualPhase.SETTLE.value, True),
-            (ManualPhase.RECOVER.value, True),
-            (ManualPhase.IDLE.value, False),
-            (ManualPhase.DONE.value, False),
-            (ManualPhase.FAILED.value, False),
-            (ManualPhase.CANCELLED.value, False),
+            (TwoPointPhase.RECORD_OPEN.value, True),
+            (TwoPointPhase.RECORD_CLOSE.value, True),
+            (TwoPointPhase.IDLE.value, False),
+            (TwoPointPhase.DONE.value, False),
+            (TwoPointPhase.FAILED.value, False),
+            (TwoPointPhase.CANCELLED.value, False),
         ],
     )
     def test_a_manual_phase_is_active_or_not(self, phase: str, active: bool) -> None:
         assert manual_active(phase) is active
 
+    def test_neither_probe_claims_the_other_probes_phases(self) -> None:
+        """The two probes report through one progress signal and spell their
+        idle phases the same way, so "is a probe running" is never the question
+        a widget is asking — "is *this* probe running" is.  A predicate that
+        answered with "not idle in my set" would say yes to every phase of the
+        other probe; the phase *name* is the only thing that tells them apart.
+        """
+        idle = {"IDLE", "DONE", "FAILED", "CANCELLED"}
+        for phase in (*GuidedPhase, *TwoPointPhase):
+            guided = phase in GuidedPhase
+            live = phase.value not in idle
+            assert guided_active(phase.value) is (guided and live)
+            assert manual_active(phase.value) is (not guided and live)
+
     def test_the_two_phase_sets_share_the_idle_names(self) -> None:
         """The worker emits one signal for both probes, so "no probe running"
         has to be recognisable whichever one the phase came from."""
         for phase in GuidedPhase:
-            assert (phase.value in {p.value for p in ManualPhase}) == (
+            assert (phase.value in {p.value for p in TwoPointPhase}) == (
                 phase.value in {"IDLE", "DONE", "FAILED", "CANCELLED"}
             )
 
@@ -468,7 +597,7 @@ class TestTheProgress:
         assert "闭合" in page._phase_label.text()
 
     def test_the_note_is_shown(self, page) -> None:
-        page.set_progress(ManualPhase.RECORDING.value, 0.3, "剩余 20 s")
+        page.set_progress(TwoPointPhase.RECORD_OPEN.value, 0.3, "剩余 20 s")
 
         assert page._note.text() == "剩余 20 s"
 
@@ -478,6 +607,24 @@ class TestTheProgress:
         page.update_frame(frame(position_mm=12.5, enabled=True))
 
         assert "12.50" in page._position.text()
+
+    def test_the_angle_is_shown_beside_the_millimetres(self, page) -> None:
+        """The millimetres are computed through the calibration under suspicion,
+        so they cannot answer the one question the page has to ask the operator
+        — which way the jaws open.  The angle can: it is what the encoder
+        reports, and it is the same number whichever calibration is loaded."""
+        page.update_frame(frame(position_mm=12.5, position_rad=-0.300793, enabled=True))
+
+        text = page._position.text()
+        assert "12.50" in text
+        assert "-0.3008" in text
+
+    def test_a_frame_without_an_angle_still_reads(self, page) -> None:
+        """``position_rad`` is newer than any frame a test may have been built
+        from, and a missing reading must not print as a number."""
+        page.update_frame(frame(position_mm=None, position_rad=None, enabled=True))
+
+        assert "—" in page._position.text()
 
     def test_out_of_range_progress_cannot_break_the_bar(self, page) -> None:
         page.set_progress(GuidedPhase.OPEN_PROBE.value, 1.7)
@@ -490,27 +637,24 @@ class TestTheProgress:
         assert "SOMETHING_NEW" in page._phase_label.text()
 
 
-class TestTheTravel:
-    """The one number on this page that is a measurement rather than a file's.
+class TestTheTravelIsNotOnThisPage:
+    """The travel used to be a spinbox here.  It is
+    :data:`constants.DEFAULT_TRAVEL_MM` now, and the page must not offer a way to
+    move it: the console derives every millimetre from it, and one that can be
+    told the wrong number reports every reading wrong while looking healthy."""
 
-    It is what the millimetres per rad is derived from and what the slider tops
-    out at, so it is editable — but only inside a band, because a mistyped travel
-    scales every reading on the console.
-    """
-
-    def test_it_defaults_to_the_measured_travel(self, page) -> None:
-        assert page.travel_mm == pytest.approx(constants.DEFAULT_TRAVEL_MM)
-
-    def test_it_is_restored_from_the_settings(self, qapp) -> None:
+    def test_the_page_does_not_read_a_stored_travel(self, qapp) -> None:
+        """An older console's value must not leak in through the settings."""
         store = _Store(**{"calibration/travel_mm": "140.0"})
         page = CalibrationPage(Recorder(), None, Settings(store))
 
-        assert page.travel_mm == pytest.approx(140.0)
+        assert not hasattr(page, "travel_mm")
 
-    def test_it_cannot_be_set_outside_the_plausible_range(self, page) -> None:
-        page._travel.setValue(9999.0)
+    def test_the_retired_key_is_dropped_from_the_store(self, qapp) -> None:
+        store = _Store(**{"calibration/travel_mm": "10.0"})
+        Settings(store)
 
-        assert page.travel_mm == pytest.approx(constants.STROKE_MAX_MM)
+        assert "calibration/travel_mm" not in store.data
 
 
 @pytest.fixture

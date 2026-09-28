@@ -18,24 +18,36 @@ from litegrip_studio.units import (
     clamp_force,
     clamp_force_torque,
     force_from_torque,
+    frame_mismatch,
     mm_to_rad_per_s,
     rad_per_s_to_mm,
     torque_from_force,
 )
 
-# The three calibrations the SDK ships or produces on this bench.
-UNCALIBRATED = Limits(0.0, 1.14, 104.6)  # GripperConfig defaults — reversed
+# The three calibrations the SDK ships or produces on this bench.  The third is
+# ``GripperConfig``'s untouched default pair, which the ordering alone used to
+# disqualify; here it is kept as what it looks like from the numbers — a
+# reverse-mounted unit, valid in its own right, and one whose range the real
+# bench's encoder readings fall outside of.
+REVERSED = Limits(0.0, 1.14, 104.6)  # GripperConfig defaults
 FACTORY = Limits(0.114, -1.491, 74.8)  # litegrip/factory_calibration.json
 BENCH = Limits(1.775959, -0.064279, 65.21)  # example user calibration
 
+#: What the real bench's encoder reports, closed and fully open — the two
+#: numbers a calibration of that unit is taken from.  They are here because the
+#: check that has to tell a file from the gripper in front of it needs a pair of
+#: readings that a given file either contains or does not.
+MEASURED_CLOSED_RAD = 1.421569
+MEASURED_OPEN_RAD = -0.300793
+
 
 class TestRoundTrip:
-    @pytest.mark.parametrize("lim", [FACTORY, BENCH])
+    @pytest.mark.parametrize("lim", [FACTORY, BENCH, REVERSED])
     @pytest.mark.parametrize("mm", [0.0, 0.001, 1.0, 37.5, 119.9, 120.0])
     def test_mm_rad_round_trip(self, lim: Limits, mm: float) -> None:
         assert lim.to_mm(lim.to_rad(mm)) == pytest.approx(mm, abs=1e-9)
 
-    @pytest.mark.parametrize("lim", [FACTORY, BENCH])
+    @pytest.mark.parametrize("lim", [FACTORY, BENCH, REVERSED])
     def test_rad_mm_round_trip(self, lim: Limits, ) -> None:
         for rad in (lim.closed_rad, lim.open_rad, (lim.closed_rad + lim.open_rad) / 2):
             assert lim.to_rad(lim.to_mm(rad)) == pytest.approx(rad, abs=1e-12)
@@ -49,6 +61,11 @@ class TestRoundTrip:
     def test_angle_decreases_as_the_jaws_open(self) -> None:
         """The sign of this slope is the whole reason mm_to_rad_per_s negates."""
         assert BENCH.to_rad(10.0) < BENCH.to_rad(0.0)
+
+    def test_angle_increases_as_the_jaws_open_on_a_reverse_mounting(self) -> None:
+        """Same mapping, opposite slope — and the formulas above are its
+        ``direction == -1`` case, not the only case they can describe."""
+        assert REVERSED.to_rad(10.0) > REVERSED.to_rad(0.0)
 
 
 class TestStroke:
@@ -91,23 +108,60 @@ class TestFromConfig:
 
 
 class TestDirectionCheck:
-    """``is_reversed`` separates the dangerous default from real calibrations.
+    """``direction`` is read from the recorded angles rather than assumed.
 
-    It is the one check with no tolerance to tune, and the gate hard-blocks on
-    it, so it is worth pinning against all three datasets.
+    The SDK's two formulas pin "the angle shrinks as the jaws open", which is how
+    the units it was written for are assembled — an assembly detail, not a
+    property of a calibration.  A gripper whose fingers are mounted the other way
+    round has the closed stop at the *smaller* angle and is entirely valid; what
+    refuses a file that does not belong to the hardware is
+    :func:`frame_mismatch`, which reads the encoder and never looks at the
+    ordering at all.
     """
 
-    def test_uncalibrated_defaults_are_reversed(self) -> None:
-        assert UNCALIBRATED.is_reversed
+    def test_the_classic_mounting_has_the_closed_stop_at_the_larger_angle(self) -> None:
+        for lim in (FACTORY, BENCH):
+            assert lim.direction == -1.0
+            assert not lim.reversed_mount
 
-    def test_factory_calibration_is_not_reversed(self) -> None:
-        assert not FACTORY.is_reversed
+    def test_the_defaults_read_as_a_reverse_mounted_gripper(self) -> None:
+        assert REVERSED.direction == 1.0
+        assert REVERSED.reversed_mount
 
-    def test_bench_calibration_is_not_reversed(self) -> None:
-        assert not BENCH.is_reversed
+    def test_equal_angles_are_degenerate_and_fall_back_to_the_classic_case(self) -> None:
+        equal = Limits(0.5, 0.5, 65.0)
+        assert equal.travel_rad == 0.0
+        assert equal.direction == -1.0
+        assert equal.reversed_mount, "no travel means no ordering to trust"
+        assert not frame_mismatch(equal, 0.5), "0.5 is inside the collapsed range"
 
-    def test_reversed_detected_even_when_angles_are_equal(self) -> None:
-        assert Limits(0.5, 0.5, 65.0).is_reversed
+    def test_the_direction_is_the_sign_of_the_conversion_slope(self) -> None:
+        """Both orientations agree with their own recorded angles, which is the
+        only thing that makes the reversed branch safe to drive."""
+        for lim in (FACTORY, BENCH, REVERSED):
+            assert lim.to_rad(0.0) == pytest.approx(lim.closed_rad)
+            step = lim.to_rad(10.0) - lim.to_rad(0.0)
+            assert math.copysign(1.0, step) == lim.direction
+            assert math.copysign(1.0, lim.to_mm(lim.open_rad)) == 1.0
+
+    def test_the_range_check_is_blind_to_the_mounting(self) -> None:
+        """Which is what lets it be the guard.  The same two angles, recorded
+        either way round, both contain the readings they were taken from — and
+        only the encoder knows which of the two this gripper has."""
+        classic = Limits(MEASURED_CLOSED_RAD, MEASURED_OPEN_RAD, 49.93)
+        flipped = Limits(MEASURED_OPEN_RAD, MEASURED_CLOSED_RAD, 49.93)
+        for lim in (classic, flipped):
+            for measured in (MEASURED_CLOSED_RAD, MEASURED_OPEN_RAD):
+                assert not frame_mismatch(lim, measured)
+        assert classic.direction == -1.0 and not classic.reversed_mount
+        assert flipped.direction == 1.0 and flipped.reversed_mount
+
+    def test_a_file_that_does_not_match_the_encoder_is_caught_by_its_range(self) -> None:
+        """The check that replaced the refusal.  Whatever the ordering, readings
+        from a gripper whose zero is not this file's land outside it."""
+        for measured in (MEASURED_CLOSED_RAD, MEASURED_OPEN_RAD):
+            assert frame_mismatch(REVERSED, measured)
+        assert not frame_mismatch(REVERSED, 0.5), "and it is not simply always on"
 
 
 class TestClamping:
@@ -134,36 +188,54 @@ class TestClamping:
 class TestVelocityFeedForward:
     def test_opening_gives_a_negative_angular_velocity(self) -> None:
         """q = closed − mm/rad_to_mm, so dq/dmm < 0 and the sign must flip."""
-        assert mm_to_rad_per_s(50.0, 65.21) < 0.0
+        assert mm_to_rad_per_s(50.0, 65.21, direction=-1.0) < 0.0
 
     def test_closing_gives_a_positive_angular_velocity(self) -> None:
-        assert mm_to_rad_per_s(-50.0, 65.21) > 0.0
+        assert mm_to_rad_per_s(-50.0, 65.21, direction=-1.0) > 0.0
+
+    def test_opening_gives_a_positive_angular_velocity_on_a_reverse_mounting(self) -> None:
+        assert mm_to_rad_per_s(50.0, 65.21, direction=1.0) > 0.0
+        assert mm_to_rad_per_s(-50.0, 65.21, direction=1.0) < 0.0
 
     def test_magnitude_matches_the_conversion_rate(self) -> None:
-        assert abs(mm_to_rad_per_s(65.21, 65.21)) == pytest.approx(1.0)
+        assert abs(mm_to_rad_per_s(65.21, 65.21, direction=-1.0)) == pytest.approx(1.0)
+        assert abs(mm_to_rad_per_s(65.21, 65.21, direction=1.0)) == pytest.approx(1.0)
 
-    def test_negative_of_the_position_derivative(self) -> None:
-        """Cross-check the sign against the position mapping numerically."""
-        lim = BENCH
+    @pytest.mark.parametrize("lim", [FACTORY, BENCH, REVERSED])
+    def test_the_derivative_of_the_position_mapping(self, lim: Limits) -> None:
+        """Cross-check the sign against the position mapping numerically.
+
+        This is the check that matters: the velocity term and the position term
+        are two branches of one mapping, and a sign error between them pins the
+        jaws against a stop at full speed.  Both mountings, or the reversed
+        branch is only ever tested by a formula that shares its mistake.
+        """
         mm0, mm1, dt = 40.0, 40.1, 0.005
         dq_measured = (lim.to_rad(mm1) - lim.to_rad(mm0)) / dt
         speed_mm_s = (mm1 - mm0) / dt
-        assert mm_to_rad_per_s(speed_mm_s, lim.rad_to_mm) == pytest.approx(dq_measured, rel=1e-9)
+        assert mm_to_rad_per_s(
+            speed_mm_s, lim.rad_to_mm, direction=lim.direction
+        ) == pytest.approx(dq_measured, rel=1e-9)
 
     def test_round_trips(self) -> None:
-        for v in (-150.0, -1.0, 0.0, 1.0, 150.0):
-            assert rad_per_s_to_mm(mm_to_rad_per_s(v, 65.21), 65.21) == pytest.approx(v)
+        for direction in (-1.0, 1.0):
+            for v in (-150.0, -1.0, 0.0, 1.0, 150.0):
+                assert rad_per_s_to_mm(
+                    mm_to_rad_per_s(v, 65.21, direction=direction),
+                    65.21,
+                    direction=direction,
+                ) == pytest.approx(v)
 
     def test_zero_scale_does_not_divide_by_zero(self) -> None:
-        assert mm_to_rad_per_s(50.0, 0.0) == 0.0
-        assert rad_per_s_to_mm(1.0, 0.0) == 0.0
+        assert mm_to_rad_per_s(50.0, 0.0, direction=-1.0) == 0.0
+        assert rad_per_s_to_mm(1.0, 0.0, direction=-1.0) == 0.0
 
     def test_a_nan_speed_does_not_become_a_nan_velocity_reference(self) -> None:
         """This output goes into the MIT velocity term with no clamp after it."""
-        assert mm_to_rad_per_s(math.nan, 65.21) == 0.0
-        assert mm_to_rad_per_s(math.inf, 65.21) == 0.0
-        assert rad_per_s_to_mm(math.nan, 65.21) == 0.0
-        assert rad_per_s_to_mm(math.inf, 65.21) == 0.0
+        assert mm_to_rad_per_s(math.nan, 65.21, direction=-1.0) == 0.0
+        assert mm_to_rad_per_s(math.inf, 65.21, direction=-1.0) == 0.0
+        assert rad_per_s_to_mm(math.nan, 65.21, direction=-1.0) == 0.0
+        assert rad_per_s_to_mm(math.inf, 65.21, direction=-1.0) == 0.0
 
 
 class TestForceScaling:

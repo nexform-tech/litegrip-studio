@@ -61,7 +61,6 @@ import threading
 import time
 from collections import deque
 from enum import Enum
-from pathlib import Path
 from typing import Any, Callable
 
 from PyQt5.QtCore import QThread, pyqtSignal
@@ -76,7 +75,7 @@ from ..calibration import (
 from ..telemetry import Telemetry, TelemetryFrame
 from ..units import frame_mismatch, rad_per_s_to_mm
 from . import commands as cmd
-from .calibration_fsm import GuidedCalibFSM, ManualCalibFSM
+from .calibration_fsm import GuidedCalibFSM, TwoPointCalibFSM
 from .commands import AnyCommand
 from .motion import FrameOut, MotionFSM, MotionParams, MotionState
 
@@ -166,7 +165,7 @@ def evaluate_gate(
 #: pressure loses nothing that will not be re-issued a moment later.  Everything
 #: else — a connect, a fault clear, a calibration step, a shutdown — has an
 #: effect a later command of the same kind does not supersede.
-DROPPABLE = (cmd.MoveToMm, cmd.SetSpeed, cmd.SetForce, cmd.SetTravel)
+DROPPABLE = (cmd.MoveToMm, cmd.SetSpeed, cmd.SetForce)
 
 
 class CommandQueue:
@@ -290,7 +289,7 @@ class WorkerLoop:
         self._gate_reason = ""
         self._allow_factory = False
 
-        self._probe: GuidedCalibFSM | ManualCalibFSM | None = None
+        self._probe: GuidedCalibFSM | TwoPointCalibFSM | None = None
         self._tele = Telemetry()
         self._last_frame = _idle_frame(self)
 
@@ -495,7 +494,10 @@ class WorkerLoop:
         frame = TelemetryFrame(
             t=tele.t,
             position_mm=self._measured_mm(),
-            velocity_mm_s=rad_per_s_to_mm(tele.velocity_rad_s, limits.rad_to_mm),
+            position_rad=self._measured_rad(),
+            velocity_mm_s=rad_per_s_to_mm(
+                tele.velocity_rad_s, limits.rad_to_mm, direction=limits.direction
+            ),
             force_n=tele.force_n,
             torque_nm=tele.torque_nm,
             temperature_mos=tele.temperature_mos,
@@ -857,8 +859,6 @@ class WorkerLoop:
             self._motion.set_speed(command.speed_mm_s)
         elif isinstance(command, cmd.SetForce):
             self._motion.set_force(command.force_n)
-        elif isinstance(command, cmd.SetTravel):
-            self._set_travel_mm(command.max_stroke_mm)
 
         # ── calibration ─────────────────────────────────────────────────────
         elif isinstance(command, cmd.LoadCalibration):
@@ -866,20 +866,16 @@ class WorkerLoop:
         elif isinstance(command, cmd.SaveCalibration):
             self._save_calibration(command.path)
         elif isinstance(command, cmd.StartGuidedCalibration):
-            self._start_probe(guided=True)
+            self._start_probe(guided=True, reversed_mount=command.reversed_mount)
         elif isinstance(command, cmd.StartManualCalibration):
-            self._start_probe(guided=False, duration_s=command.duration_s)
+            self._start_probe(guided=False)
         elif isinstance(command, cmd.ConfirmProbeLimit):
             if isinstance(self._probe, GuidedCalibFSM):
                 self._probe.confirm()
             else:
                 self._alert("warn", "当前没有正在进行的引导式探测")
-        elif isinstance(command, cmd.StopManualRecording):
-            if isinstance(self._probe, ManualCalibFSM):
-                self._probe.stop()
-                self._log("info", "手动记录已提前结束，正在沉降")
-            else:
-                self._alert("warn", "当前没有正在进行的手动记录")
+        elif isinstance(command, (cmd.RecordOpenLimit, cmd.RecordCloseLimit)):
+            self._record_manual_limit(isinstance(command, cmd.RecordOpenLimit))
         elif isinstance(command, cmd.CancelCalibration):
             self._cancel_probe()
 
@@ -1054,22 +1050,6 @@ class WorkerLoop:
         return True
 
     # ── parameters ──────────────────────────────────────────────────────────
-    def _set_travel_mm(self, max_stroke_mm: float) -> None:
-        info = self.backend.calibration_info()
-        self.backend.set_travel_mm(max_stroke_mm)
-        # Re-resolve, because the travel is what the mm scale is derived from and
-        # what the plausibility check compares a file's own scale against — a
-        # change to it changes every millimetre the console reports, so the
-        # calibration in force has to be rebuilt rather than patched.  Only a
-        # path that is really there is handed over: an explicit path that does
-        # not exist would send the resolver down its factory branch and silently
-        # change the provenance.
-        path = None
-        if info is not None and info.path and Path(info.path).is_file():
-            path = info.path
-        self.backend.load_calibration(path)
-        self._refresh_calibration()
-        self._log("info", f"行程已设为 {max_stroke_mm:.1f} mm")
 
     # ── calibration ─────────────────────────────────────────────────────────
     def _load_calibration(self, path: str | None) -> None:
@@ -1084,17 +1064,82 @@ class WorkerLoop:
             reason = "；".join(info.problems) if info is not None else "未知原因"
             self._alert("error", f"标定不可用：{reason}")
 
-    def _save_calibration(self, path: str | None) -> None:
+    def _save_calibration(self, path: str | None) -> str | None:
+        """Write the calibration out, returning where it landed or ``None``.
+
+        The return value exists for the one caller that has to *decide*
+        something on the answer — a finished probe, whose hand-back depends on
+        whether the file now carries the result (see :meth:`_save_probe_result`).
+        Everything else reports the outcome through the alerts below, which are
+        the record as well as the message (see :meth:`_alert`).
+        """
         try:
             written = self.backend.save_calibration(path)
         except Exception as exc:
             self._alert("error", f"保存标定失败: {exc}")
-            return
+            return None
         self._refresh_calibration()
         self._alert("info", f"标定已保存到 {written}")
-        self._log("info", f"标定已保存: {written}")
+        return written
 
-    def _start_probe(self, *, guided: bool, duration_s: float | None = None) -> None:
+    def _save_probe_result(self, probe: Any, info: CalibrationInfo) -> bool:
+        """Write a finished probe out, and say whether the file now carries it.
+
+        The operator used to have to press 保存 for this, and that press was the
+        only thing between a finished probe and a console that would not move: a
+        result in memory is *usable* but not *saved*, and an unsaved calibration
+        holds the gate shut.  A probe is a calibration the operator asked for by
+        hand, step by step, so it is written without being asked for once more.
+        The button survives as the retry for the case where the write itself
+        fails — a read-only directory, a full disk, the SDK refusing.
+
+        A result that does not pass validation is deliberately *not* written.
+        The file on disk is a working calibration, and replacing it with numbers
+        the console has just called unusable would destroy it; the operator is
+        better served by a console that keeps refusing to move than by one that
+        moves on bad numbers.  The check has to live here because saving is
+        automatic now: the probe itself refuses only a degenerate travel
+        (calibration_fsm.summarise), so this is the first place the rest of
+        ``validate_limits`` gets a say.
+        """
+        if not info.usable:
+            reason = "；".join(info.problems) or "未通过校验"
+            self._alert(
+                "warn",
+                f"{probe.note}。结果未自动保存：{reason}。"
+                "运动限制未解除，请重新标定或手工修好文件",
+            )
+            return False
+        if self._save_calibration(None) is None:
+            self._alert(
+                "warn",
+                f"{probe.note}。结果尚未保存，保存之前不会解除运动限制。"
+                "排除原因后可按「重新保存标定…」重试",
+            )
+            return False
+        return True
+
+    def _record_manual_limit(self, opening: bool) -> None:
+        """Take the labelled point the operator has just pressed for.
+
+        A press that arrives out of step is refused and logged rather than
+        taken as whichever point is due.  The two readings are the whole content
+        of the calibration — the closed one is 0 mm — so a press accepted as the
+        other point is not a small error: it inverts the travel, and the file it
+        produces passes every check the console makes.
+        """
+        probe = self._probe
+        if not isinstance(probe, TwoPointCalibFSM):
+            self._alert("warn", "当前没有正在进行的手动标定")
+            return
+        wanted = "张开" if opening else "闭合"
+        taken = probe.record_open() if opening else probe.record_close()
+        if taken:
+            self._log("info", f"已记录{wanted}极限，下一控制周期取得角度读数")
+        else:
+            self._log("warn", f"当前步骤不在记录{wanted}极限，已忽略这次按键")
+
+    def _start_probe(self, *, guided: bool, reversed_mount: bool = False) -> None:
         # The E-stop is checked first because it is the reason that explains the
         # others: the E-stop latches and disables the motor, so a probe attempted
         # while it is latched would otherwise be refused with "enable the motor
@@ -1113,12 +1158,16 @@ class WorkerLoop:
             self._alert("warn", "已有标定正在进行")
             return
 
-        stroke = self._motion.limits.max_stroke_mm
-        probe: GuidedCalibFSM | ManualCalibFSM
+        # The measured travel, written down here rather than read off the limits
+        # in force: the probe records the angles either side of it, and those two
+        # angles are the whole of the calibration.  Reading it from the limits
+        # would make the result depend on whatever file is being replaced.
+        stroke = constants.DEFAULT_TRAVEL_MM
+        probe: GuidedCalibFSM | TwoPointCalibFSM
         if guided:
-            probe = GuidedCalibFSM(stroke)
+            probe = GuidedCalibFSM(stroke, reversed_mount=reversed_mount)
         else:
-            probe = ManualCalibFSM(stroke, duration_s=duration_s)
+            probe = TwoPointCalibFSM(stroke)
 
         # The probe owns the axis from here: the motion FSM must not be holding a
         # position at the same time, or the two would send frames alternately.
@@ -1129,7 +1178,33 @@ class WorkerLoop:
         self._probe = probe
         self._probe_pub_t = 0.0
         self._probe_unsent_s = 0.0
-        kind = "引导式" if guided else "零重力手动"
+        if not guided:
+            # A manual probe is the operator's hands on the jaws, so the axis has
+            # to be free for the whole of it and the console has to say so — a
+            # 记录 button that works while the page still looks like it is
+            # holding a position is a wizard nobody trusts.
+            #
+            # After ``probe.start``, not before: a probe that refuses to start
+            # returns above, and it must not leave a zero-gravity state behind it
+            # for a wizard that never opened.  ``None`` for the measurement
+            # because entering needs none — zero stiffness commands no pose.
+            #
+            # The frames do not change, and there are not two things driving the
+            # axis.  The probe's own frames are zero-gain and ungated — the same
+            # ones ZERO_G sends, from TwoPointCalibFSM.tick through FREE_FRAME —
+            # and the motion FSM is not ticked while a probe is active
+            # (tick_once branches on the probe first).  So this is the label the
+            # operator reads, not a second owner of the axis.
+            #
+            # The guided probe is left exactly as it was: it drives the jaws into
+            # the stops itself and needs the axis to itself to do it.
+            self._motion.zero_gravity(True, None, "开始手动标定")
+            self._log(
+                "warn",
+                "已进入零重力：用手把两片手指分别推到张开和闭合极限，"
+                "每到一个按一次对应的「记录」；标定结束时自动退出零重力并驻留",
+            )
+        kind = "引导式" if guided else "手动两点"
         self._log("warn", f"开始{kind}标定，入口位置 {self._tele.position_rad:.6f} rad")
 
     def _tick_probe(self, tele: Telemetry, dt: float) -> FrameOut:
@@ -1139,13 +1214,13 @@ class WorkerLoop:
 
         sent = False
         if out.q_rad is not None:
-            # ``probe_frame`` is the whole point of the probe: it is the one
-            # motion that must happen before a calibration exists, and it is
-            # allowed outside the travel the calibration describes, because the
+            # ``ungated`` is the whole point of the probe: it is the one motion
+            # that must happen before a calibration exists, and it is allowed
+            # outside the travel the calibration describes, because the
             # mechanical stops it is looking for are outside it by design.
             sent = bool(
                 self.backend.stream_frame(
-                    out.q_rad, out.kp, out.kd, 0.0, out.tau_nm, probe_frame=True
+                    out.q_rad, out.kp, out.kd, 0.0, out.tau_nm, ungated=True
                 )
             )
             self._watch_probe_frames(sent, dt, probe)
@@ -1164,7 +1239,7 @@ class WorkerLoop:
         stops changing — so a probe whose frames never reach the motor, or whose
         feedback has gone silent, records *both* limits wherever the jaws happen
         to be.  That is not a theoretical worry: it is what a real run did, and
-        the operator got "行程异常: 闭合 -1.370650 rad 未大于张开 -1.370650 rad"
+        the operator got "行程异常: 两个极限落在同一个位置 (-1.370650 rad)"
         from a probe that had not moved the axis at all, on a console that had
         been sending fine a minute earlier.  Nothing in that message could have
         told anyone which of the two had happened.
@@ -1219,7 +1294,7 @@ class WorkerLoop:
             return
         self._probe_pub_t = 0.0
         note = probe.note
-        if isinstance(probe, ManualCalibFSM) and probe.remaining_s > 0.0:
+        if isinstance(probe, TwoPointCalibFSM) and probe.remaining_s > 0.0:
             note = f"{note}（剩余 {probe.remaining_s:.0f} s）"
         self._signals.calib_progress.emit(probe.phase.value, probe.progress, note)
 
@@ -1233,10 +1308,7 @@ class WorkerLoop:
             self._refresh_calibration(info)
             for line in result.notes:
                 self._log("info", f"标定记录：{line}")
-            self._alert(
-                "info",
-                f"{probe.note}。结果尚未保存，保存之前不会解除运动限制",
-            )
+            saved = self._save_probe_result(probe, info)
         else:
             # What the probe did get to see, logged *before* the verdict: on a
             # failed probe these lines are the whole account of it — which limit
@@ -1246,17 +1318,46 @@ class WorkerLoop:
                 self._log("info", f"标定记录：{line}")
             self._refresh_calibration()
             self._alert("warn", f"标定未完成：{probe.note}")
+            saved = False
         self._signals.calib_progress.emit(probe.phase.value, 1.0, probe.note)
+        self._hand_back_after_probe(probe, saved=saved)
 
-        # Hand the axis back — which, for an enabled motor, cannot mean dropping
-        # to IDLE: that state sends no frame at all, and a drive with no frame
-        # to act on is a drive whose jaws are free.  What it was holding is a
-        # press against a hard stop, and what it is left holding is nothing, so
-        # the fingers answer with whatever the mechanism's own springs want —
-        # which is the pop the operator sees, at the one moment the console
-        # stops telling the motor anything.
+    def _hand_back_after_probe(self, probe: Any, *, saved: bool) -> None:
+        """Close a probe out: leave zero gravity and put the axis somewhere.
+
+        Reached by every way a probe can end — finished, cancelled, failed —
+        and it is the last of those that makes it matter: the operator's hands
+        are on the jaws for the whole of a manual probe, so a console that
+        quietly stays free is a console they are still holding up, at the moment
+        the wizard has just said the calibration is over.
+
+        Leaving zero gravity goes through ``hold_rad`` rather than
+        ``zero_gravity(False, measured_mm)``, which holds a *clamped* millimetre
+        — derived from the very limits that are in doubt on this path, and the
+        one thing a shut gate must not command.  What is held instead is a
+        measurement: the pose the encoder has just reported, which needs no
+        limits at all.
+
+        For an enabled motor this cannot mean dropping to IDLE: that state sends
+        no frame at all, and a drive with no frame to act on is a drive whose
+        jaws are free.  What it was holding is a press against a hard stop, and
+        what it is left holding is nothing, so the fingers answer with whatever
+        the mechanism's own springs want — which is the pop the operator sees, at
+        the one moment the console stops telling the motor anything.
+        """
+        if not isinstance(probe, GuidedCalibFSM):
+            # Only a manual probe put the axis in zero gravity, so only a manual
+            # probe has one to leave.
+            self._log("info", "标定结束，已退出零重力")
         if not self._enabled:
             self._motion.idle()
+        elif saved:
+            # Nothing left to hand back: writing the result is what opened the
+            # gate, and the re-read that follows the write saw a READY gate and
+            # held the measured pose there and then (see _refresh_calibration).
+            # Sending the hold a second time would repeat the same frame, so the
+            # hand-back is over before it starts.
+            return
         elif self._gate is GateState.READY:
             self._hold_measured("标定结束，但尚未读到位置，先松力")
         else:
@@ -1368,7 +1469,28 @@ class WorkerLoop:
             log.debug(text)
 
     def _alert(self, level: str, text: str) -> None:
+        """Show the operator something, and write it to the log file as well.
+
+        The two channels answer different questions.  The alert is what the
+        operator sees now; the file is all anyone reading afterwards has, and
+        for the alerts that matter — a calibration the console refused to move
+        on, a save that failed, an E-stop — the alert is the only place the
+        reason exists at all.  Written nowhere but the widget, it is gone the
+        moment the window is.
+
+        The level mapping is written out rather than shared with :meth:`_log`,
+        because the two disagree on purpose: an ``info`` line in the log is a
+        running commentary and belongs at DEBUG, while an ``info`` alert is
+        something the operator was shown and belongs in the file at the level it
+        was shown at.
+        """
         self._signals.alert.emit(level, text)
+        if level in ("error", "fatal"):
+            log.error(text)
+        elif level == "warn":
+            log.warning(text)
+        else:
+            log.info(text)
 
     # ── introspection, for the UI's first paint and for tests ───────────────
     @property
@@ -1420,6 +1542,7 @@ def _idle_frame(_loop: WorkerLoop) -> TelemetryFrame:
         # No connection, so no frame has ever arrived and the position is
         # unknown rather than zero — a zero here is the closed stop.
         position_mm=None,
+        position_rad=None,
         velocity_mm_s=0.0,
         force_n=0.0,
         torque_nm=0.0,

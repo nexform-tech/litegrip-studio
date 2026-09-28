@@ -41,9 +41,8 @@ class Recorder:
 
 
 class FakeSettings:
-    def __init__(self, calibration_path=None, travel_mm=120.0) -> None:
+    def __init__(self, calibration_path=None) -> None:
         self.calibration_path = calibration_path
-        self.travel_mm = travel_mm
 
 
 @pytest.fixture
@@ -100,13 +99,11 @@ class TestTheArguments:
         with pytest.raises(SystemExit):
             parse("--backend", "hardware")
 
-    def test_the_travel_mm_defaults_to_whatever_the_page_remembers(self) -> None:
-        """None and not 120: the flag is an override, and the value stored by the
-        calibration page is the one that should win when the flag is absent."""
-        assert parse().travel_mm is None
-
-    def test_help_names_the_default_stroke(self) -> None:
-        assert f"{constants.DEFAULT_TRAVEL_MM:.0f}" in cli.build_parser().format_help()
+    def test_the_help_offers_no_way_to_change_the_travel(self) -> None:
+        """The travel is a property of the bench, not a command-line choice: a
+        console told the wrong one reports every millimetre wrong, so the hole is
+        closed here rather than bounded."""
+        assert "--travel-mm" not in cli.build_parser().format_help()
 
 
 class TestBuildingTheBackend:
@@ -130,16 +127,9 @@ class TestBuildingTheBackend:
         with pytest.raises(SystemExit):
             cli.make_backend(parse())
 
-    def test_the_stroke_is_applied_to_whichever_backend_was_chosen(
-        self, sim_backend
-    ) -> None:
-        backend = cli.make_backend(parse("--backend", "sim", "--travel-mm", "130"))
-
-        assert backend.strokes == [130.0]
-
-    def test_no_stroke_flag_leaves_the_backend_alone(self, sim_backend) -> None:
-        """Because the calibration page has already set it, and re-applying the
-        default here would undo that on every launch."""
+    def test_the_backend_is_left_at_the_measured_travel(self, sim_backend) -> None:
+        """Nothing on the command line can move it, so the backend keeps whatever
+        the stack gave it — which is :data:`constants.DEFAULT_TRAVEL_MM`."""
         backend = cli.make_backend(parse("--backend", "sim"))
 
         assert backend.strokes == []

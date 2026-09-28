@@ -26,11 +26,11 @@ from litegrip_studio.core.calibration_fsm import (
     CalibResult,
     GuidedCalibFSM,
     GuidedPhase,
-    ManualCalibFSM,
-    ManualPhase,
+    TwoPointCalibFSM,
+    TwoPointPhase,
     summarise,
 )
-from litegrip_studio.units import torque_from_force
+from litegrip_studio.units import Limits, torque_from_force
 
 DT = constants.CTRL_DT
 HZ = constants.CTRL_HZ
@@ -39,6 +39,13 @@ HZ = constants.CTRL_HZ
 #: tests/test_calibration.py: closed is the larger angle, open the smaller.
 CLOSED_RAD = 1.775959
 OPEN_RAD = -0.064279
+
+#: The same two stops on a gripper whose fingers are mounted the other way up,
+#: so the angle *grows* as the jaws open.  These are the two readings the bench
+#: unit this console was debugged against stands at, and on that unit the file in
+#: force had them the other way round — which is why commanding 闭合 opened it.
+REVERSED_CLOSED_RAD = -0.300793
+REVERSED_OPEN_RAD = 1.421569
 
 
 class Plant:
@@ -75,7 +82,14 @@ class Plant:
             return
         error = out.q_rad - self.pos
         step = max(-self.rate * DT, min(self.rate * DT, error))
-        self.pos = min(self.closed_rad, max(self.open_rad, self.pos + step))
+        # Order-free, because the two stops are named by role here rather than
+        # by their position in the angle: a reverse-mounted plant has its closed
+        # stop at the smaller angle, and a clamp written as ``min(closed, ...)``
+        # would put that gripper's travel between its two stops the wrong way up
+        # — the mirrors of each other, and the difference a sign test cannot see.
+        low = min(self.open_rad, self.closed_rad)
+        high = max(self.open_rad, self.closed_rad)
+        self.pos = min(high, max(low, self.pos + step))
 
     def tick(self, fsm, dt: float = DT):
         """One control tick: send the probe's frame, then report where we are."""
@@ -156,12 +170,29 @@ class TestSummarise:
         # and the commanded range ends at the measured travel".
         assert result.as_raw()["rad_to_mm"] > 120.0 / result.travel_rad
 
-    def test_an_inverted_range_is_refused_with_the_sdk_wording(self) -> None:
-        """The one failure that must never be saved: it is the state the whole
-        console exists to keep off the hardware."""
-        out = summarise(OPEN_RAD, CLOSED_RAD, 120.0, ())
-        assert isinstance(out, str)
-        assert "行程异常" in out
+    def test_a_reversed_pair_is_recorded_as_given(self) -> None:
+        """The other mounting, and the one the two-point capture produces on it.
+
+        Nothing here may normalise the two angles into the SDK's ordering: the
+        file is the record of where the jaws stopped, and swapping them to look
+        familiar is how a correct calibration becomes an inverted one.
+        """
+        result = summarise(OPEN_RAD, CLOSED_RAD, 120.0, ())
+        assert isinstance(result, CalibResult)
+        assert result.zero_rad == round(OPEN_RAD, 6), "the closed stop is the one given"
+        assert result.open_rad == round(CLOSED_RAD, 6)
+        assert result.travel_rad == result.open_rad - result.zero_rad
+        assert result.travel_rad > 0.0
+        assert Limits(OPEN_RAD, CLOSED_RAD, result.rad_to_mm).reversed_mount
+
+    def test_the_same_two_angles_either_way_round_differ_only_in_order(self) -> None:
+        """So the ordering carries no information the numbers do not already have,
+        which is why refusing one of the two orderings refused a real gripper."""
+        classic = summarise(CLOSED_RAD, OPEN_RAD, 120.0, ())
+        flipped = summarise(OPEN_RAD, CLOSED_RAD, 120.0, ())
+        assert isinstance(classic, CalibResult) and isinstance(flipped, CalibResult)
+        assert classic.travel_rad == flipped.travel_rad
+        assert classic.rad_to_mm == flipped.rad_to_mm
 
     def test_a_zero_range_is_refused(self) -> None:
         out = summarise(0.5, 0.5, 120.0, ())
@@ -555,6 +586,74 @@ class TestGuidedProbe:
         assert out.q_rad is None or math.isfinite(out.q_rad)
 
 
+class TestTheDeclaredMounting:
+    """Which way the jaws open is the operator's to state, and it is the one
+    input the probe cannot read.
+
+    It has nothing to read it from: the probe exists because there is no usable
+    file, and the stops it is walking toward are indistinguishable from each
+    other until it has pressed one.  So the flag is not a hint the probe may
+    second-guess — it is the sign every step is taken in, and a probe that
+    assumed the SDK's direction instead would walk a reverse-mounted gripper
+    into the stop it is not looking for, record the closed end as the open one,
+    and produce a result that validates, saves, and drives the gripper inverted.
+    """
+
+    def test_the_open_probe_steps_the_way_the_declared_mounting_opens(self) -> None:
+        """Both directions, from the same starting reading, or the test would
+        pass on a probe that stepped one way regardless."""
+        classic = GuidedCalibFSM()
+        classic.start(0.5)
+        reversed_ = GuidedCalibFSM(reversed_mount=True)
+        reversed_.start(0.5)
+
+        toward_classic = classic.tick(0.5, DT).q_rad
+        toward_reversed = reversed_.tick(0.5, DT).q_rad
+
+        assert toward_classic is not None and toward_reversed is not None
+        assert toward_classic < 0.5 < toward_reversed, (
+            "两个声明下第一步都朝同一个方向，说明方向没有真的被采用"
+        )
+
+    def test_the_flag_is_the_direction_it_says_it_is(self) -> None:
+        """``+1`` means the angle grows toward open, which is the convention the
+        rest of the console names ``Limits.reversed_mount``."""
+        assert GuidedCalibFSM(reversed_mount=True).direction == 1.0
+        assert GuidedCalibFSM().direction == -1.0
+        # Defaults to the classic mounting, so every caller that has nothing to
+        # say about it gets the SDK's own direction rather than an error.
+        assert not GuidedCalibFSM().reversed_mount
+
+    def test_the_status_line_names_the_mounting(self) -> None:
+        """The operator has to be able to see, while it runs, which way the
+        probe believes it is going — it is the one input they supplied."""
+        fsm = GuidedCalibFSM(reversed_mount=True)
+        fsm.start(0.0)
+
+        assert "反向" in fsm.note
+
+    def test_a_wrong_declaration_is_not_something_the_probe_can_notice(self) -> None:
+        """Pinned as a limitation rather than left implied, because it is what
+        the mounting question on the page is for: declared reversed on a
+        classic gripper, the probe walks to the *closed* stop first, records it
+        as the open one, and finishes with a complete, self-consistent,
+        inverted result.  Nothing in the angles gives it away."""
+        fsm = GuidedCalibFSM(reversed_mount=True)
+        assert fsm.start(0.9)
+        plant = Plant(0.9)  # the classic mounting: closed at the larger angle
+        run_to_terminal(fsm, plant, seconds=120.0)
+
+        assert fsm.phase is GuidedPhase.DONE, fsm.note
+        result = fsm.result
+        assert result is not None
+        # "Open" is the closed stop and "closed" is the open one — the mirror
+        # image of the right answer, and indistinguishable from it by inspection.
+        assert result.open_rad > result.zero_rad
+        assert Limits(
+            result.zero_rad, result.open_rad, result.rad_to_mm
+        ).reversed_mount, "错的方向应当产出一份反向标定，这正是它危险的地方"
+
+
 class TestGuidedAgainstTheSimulatedStops:
     """The probe against the plant's real hard stops, both directions."""
 
@@ -569,6 +668,40 @@ class TestGuidedAgainstTheSimulatedStops:
         assert result is not None
         assert result.travel_rad > 1.5
         assert OPEN_RAD <= result.open_rad < result.zero_rad <= CLOSED_RAD
+
+    @pytest.mark.parametrize("start_rad", [1.0, 0.5, 0.0, -0.2])
+    def test_a_reverse_mounted_gripper_is_probed_the_other_way_up(
+        self, start_rad: float
+    ) -> None:
+        """The whole point of the flag: on a gripper whose angle grows as the
+        jaws open, the probe has to record the *larger* angle as the open one,
+        and that is the same probe with one sign flipped."""
+        fsm = GuidedCalibFSM(reversed_mount=True)
+        assert fsm.start(start_rad)
+        plant = Plant(
+            start_rad, open_rad=REVERSED_OPEN_RAD, closed_rad=REVERSED_CLOSED_RAD
+        )
+        run_to_terminal(fsm, plant, seconds=120.0)
+
+        assert fsm.phase is GuidedPhase.DONE, fsm.note
+        result = fsm.result
+        assert result is not None
+        assert result.travel_rad > 1.5
+        # Both stops were found, and each on the right side of the other.
+        assert result.zero_rad <= REVERSED_CLOSED_RAD + 0.05
+        assert result.open_rad >= REVERSED_OPEN_RAD - 0.05
+        # And the result is a reverse-mounted calibration, which is what the
+        # console has to be able to save and move by.
+        limits = Limits(result.zero_rad, result.open_rad, result.rad_to_mm)
+        assert limits.reversed_mount
+        assert limits.to_rad(0.0) == pytest.approx(result.zero_rad)
+        assert limits.rad_to_mm > 0.0
+        assert limits.stroke_mm == pytest.approx(
+            fsm.max_stroke_mm + constants.SPAN_INSET_MM, abs=0.5
+        )
+        # Commanding the top of the range drives *up* in angle here, and the
+        # jaws end up open — the check that the saved file is not inverted.
+        assert limits.to_rad(limits.max_stroke_mm) > result.zero_rad
 
     @pytest.mark.parametrize("travel_mm", [85.0, 120.0, 200.0, 60.0])
     def test_the_coefficient_follows_the_configured_travel(self, travel_mm: float) -> None:
@@ -589,108 +722,178 @@ class TestGuidedAgainstTheSimulatedStops:
         assert result.stroke_mm == pytest.approx(travel_mm + constants.SPAN_INSET_MM, abs=0.5)
 
 
+
+
 # ═══════════════════════════════════════════════════════════════════════════
-# Manual (zero-gravity) probe
+# Two-point manual probe
 # ═══════════════════════════════════════════════════════════════════════════
-class TestManualProbe:
-    def test_it_is_limp_while_recording(self) -> None:
+def press_open(fsm, at_rad: float) -> None:
+    """Record the open point where the jaws are, the way the page does."""
+    assert fsm.record_open(), "the probe was not waiting for the open point"
+    fsm.tick(at_rad, DT)
+
+
+def press_close(fsm, at_rad: float) -> None:
+    """Record the closed point — the end that becomes 0 mm."""
+    assert fsm.record_close(), "the probe was not waiting for the closed point"
+    fsm.tick(at_rad, DT)
+
+
+class TestTheTwoPointProbe:
+    """The flow the operator drives by hand: two labelled points, no clock.
+
+    Every test here presses the buttons the page presses, in the order the page
+    offers them, and feeds the FSM a hand-move between them — because the two
+    things that can go wrong are both about the order: a point recorded in the
+    wrong place, and a point recorded under the wrong label.
+    """
+
+    def test_it_is_limp_throughout(self) -> None:
         """Zero torque is the whole mechanism: the operator drives the jaws."""
-        fsm = ManualCalibFSM()
+        fsm = TwoPointCalibFSM()
         fsm.start(0.5)
         for _ in range(200):
             out = fsm.tick(0.5, DT)
             assert out.kp == 0.0 and out.kd == 0.0 and out.tau_nm == 0.0
 
-    def test_it_tracks_the_extremes_the_operator_reaches(self) -> None:
-        fsm = ManualCalibFSM(duration_s=600.0)
-        fsm.start(0.5)
-        pos = 0.5
-        for target in (0.9, 1.7, 0.3, -0.05, 0.5):
-            pos = walk(fsm, pos, target)
-        assert fsm.close_rad == pytest.approx(1.7, abs=0.01)
-        assert fsm.open_rad == pytest.approx(-0.05, abs=0.01)
-
-    def test_the_extremes_follow_the_hand_not_the_clock(self) -> None:
-        """A probe where the operator only ever pushes toward open must not
-        invent a closed limit it never saw."""
-        fsm = ManualCalibFSM(duration_s=600.0)
-        fsm.start(1.0)
-        walk(fsm, 1.0, 0.0)
-        assert fsm.close_rad == pytest.approx(1.0, abs=0.01)
-        assert fsm.open_rad == pytest.approx(0.0, abs=0.01)
-
-    def test_it_finishes_after_the_duration_and_produces_a_result(self) -> None:
-        """Long enough a duration that the whole hand-move fits inside it —
-        otherwise this would be testing the settle phase, which records what it
-        sees but is not the recording."""
-        fsm = ManualCalibFSM(duration_s=3.0, settle_s=0.2, recover_s=0.1)
-        fsm.start(CLOSED_RAD)
+    def test_it_records_the_two_points_under_their_labels(self) -> None:
+        fsm = TwoPointCalibFSM()
+        assert fsm.start(CLOSED_RAD)
         walk(fsm, CLOSED_RAD, OPEN_RAD)
-        assert fsm.phase is ManualPhase.RECORDING
-        run(fsm, Plant(OPEN_RAD), seconds=4.0, until=lambda f: f.is_terminal)
-        assert fsm.phase is ManualPhase.DONE, fsm.note
+        assert fsm.record_open()
+        fsm.tick(OPEN_RAD, DT)
+        walk(fsm, OPEN_RAD, CLOSED_RAD)
+        assert fsm.record_close()
+        fsm.tick(CLOSED_RAD, DT)
+
+        assert fsm.phase is TwoPointPhase.DONE, fsm.note
+        assert fsm.open_rad == pytest.approx(OPEN_RAD)
+        assert fsm.close_rad == pytest.approx(CLOSED_RAD)
         result = fsm.result
         assert result is not None
-        assert result.travel_rad == pytest.approx(CLOSED_RAD - OPEN_RAD, abs=0.03)
+        assert result.travel_rad == pytest.approx(CLOSED_RAD - OPEN_RAD)
         assert result.stroke_mm == pytest.approx(
-            fsm.max_stroke_mm + constants.SPAN_INSET_MM, abs=0.5
+            fsm.max_stroke_mm + constants.SPAN_INSET_MM, abs=0.01
         )
+        # And 0 mm is the end that was labelled closed, which is the whole
+        # content of the operator's answer.
+        assert result.zero_rad == pytest.approx(CLOSED_RAD)
+        assert not Limits(result.zero_rad, result.open_rad, result.rad_to_mm).reversed_mount
 
-    def test_an_out_of_range_reading_is_never_adopted_as_a_limit(self) -> None:
-        """The SDK's own guard.  A lost frame leaves the cached position at 0,
-        and adopting that would put the closed stop mid-stroke.
+    def test_a_reverse_mounted_gripper_needs_no_declaration(self) -> None:
+        """The property the guided probe cannot have, and the reason this flow
+        survives a gripper the SDK's formulas do not describe.
 
-        The jump guard is disabled here so that this test is about the range
-        guard alone; ``test_a_reading_that_jumps_to_zero_is_not_adopted`` is
-        about the other one.
+        Nothing here is told which way the jaws open.  The operator labels the
+        two points as they record them, so the direction is not an assumption
+        that has to be checked afterwards — it is the answer, and a gripper
+        assembled either way round records correctly through the same buttons.
         """
-        fsm = ManualCalibFSM(duration_s=10.0, max_jump_rad=1e9)
+        fsm = TwoPointCalibFSM()
+        assert fsm.start(REVERSED_CLOSED_RAD)
+        walk(fsm, REVERSED_CLOSED_RAD, REVERSED_OPEN_RAD)
+        assert fsm.record_open()
+        fsm.tick(REVERSED_OPEN_RAD, DT)
+        walk(fsm, REVERSED_OPEN_RAD, REVERSED_CLOSED_RAD)
+        assert fsm.record_close()
+        fsm.tick(REVERSED_CLOSED_RAD, DT)
+
+        assert fsm.phase is TwoPointPhase.DONE, fsm.note
+        result = fsm.result
+        assert result is not None
+        limits = Limits(result.zero_rad, result.open_rad, result.rad_to_mm)
+        assert limits.reversed_mount
+        assert limits.to_rad(0.0) == pytest.approx(REVERSED_CLOSED_RAD)
+        # The angle grows toward open on this one, and the travel is a magnitude
+        # either way: the two mountings differ in the sign of the conversion,
+        # not in the numbers the operator recorded.
+        assert result.travel_rad == pytest.approx(REVERSED_OPEN_RAD - REVERSED_CLOSED_RAD)
+        assert limits.to_rad(limits.max_stroke_mm) > limits.to_rad(0.0)
+
+    def test_the_label_is_what_decides_the_direction(self) -> None:
+        """The failure the two buttons exist to prevent, pinned rather than
+        assumed: swap the labels and the same two angles produce a file whose
+        every millimetre runs the other way, with nothing about it to see."""
+        closed, opened = REVERSED_CLOSED_RAD, REVERSED_OPEN_RAD
+        right = summarise(closed, opened, 85.0, ())
+        wrong = summarise(opened, closed, 85.0, ())
+        assert isinstance(right, CalibResult) and isinstance(wrong, CalibResult)
+        # The same two angles, and the two files disagree about everything that
+        # matters: where 0 mm is, and which way the millimetres run.
+        assert right.zero_rad == wrong.open_rad
+        assert right.open_rad == wrong.zero_rad
+        right_limits = Limits(right.zero_rad, right.open_rad, right.rad_to_mm)
+        wrong_limits = Limits(wrong.zero_rad, wrong.open_rad, wrong.rad_to_mm)
+        assert right_limits.to_rad(0.0) == pytest.approx(closed)
+        assert wrong_limits.to_rad(0.0) == pytest.approx(opened)
+        assert right_limits.reversed_mount is not wrong_limits.reversed_mount
+
+    def test_an_out_of_turn_record_is_refused(self) -> None:
+        """Pressing the wrong button must do nothing at all.  Taking it as
+        whichever point is due is how the labels get swapped, and the two
+        buttons are the only thing standing between the operator and a file
+        that drives the gripper inverted."""
+        fsm = TwoPointCalibFSM()
         fsm.start(0.5)
-        fsm.tick(1.2, DT)
-        fsm.tick(0.1, DT)
-        fsm.tick(constants.MANUAL_POS_GUARD_RAD + 0.1, DT)
-        fsm.tick(-1000.0, DT)
-        fsm.tick(0.9, DT)
-        assert fsm.close_rad == pytest.approx(1.2)
-        assert fsm.open_rad == pytest.approx(0.1)
-        assert fsm.rejected == 2
+        assert not fsm.record_close()
+        assert fsm.phase is TwoPointPhase.RECORD_OPEN
+        assert fsm.close_rad is None
 
-    def test_a_reading_that_jumps_to_zero_is_not_adopted(self) -> None:
-        """The hole the SDK's own guard leaves, and the reason the manual jump
-        guard is set by a hand's speed rather than by the motor's.
+        walk(fsm, 0.5, 1.0)
+        press_open(fsm, 1.0)
+        assert fsm.phase is TwoPointPhase.RECORD_CLOSE
+        assert not fsm.record_open()
+        assert fsm.open_rad == pytest.approx(1.0)
 
-        A dropped frame leaves the SDK's cached position at 0.  From mid-travel
-        that is a few tenths of a rad — inside ``|pos| < 50``, and inside a
-        motor-rate threshold — yet zero is beyond the open stop, so adopting it
-        would overstate the travel and understate every millimetre the console
-        goes on to display.
-        """
-        fsm = ManualCalibFSM(duration_s=600.0)
+    def test_the_reading_taken_is_the_one_after_the_press(self) -> None:
+        """The operator stops moving, then presses; the tick after the press is
+        the first angle taken with the hand off the jaws."""
+        fsm = TwoPointCalibFSM()
+        fsm.start(0.5)
+        walk(fsm, 0.5, 1.0)
+        fsm.record_open()
+        # The hand lets go and the jaws settle that last fraction of a degree.
+        fsm.tick(1.0004, DT)
+        assert fsm.open_rad == pytest.approx(1.0004)
+        assert fsm.open_rad != pytest.approx(1.0)
+
+    def test_a_reading_that_jumps_to_zero_is_not_recorded(self) -> None:
+        """The hole the SDK's own guard leaves.  A dropped frame leaves the
+        cached position at 0.0, which is inside ``|pos| < 50`` and inside a
+        motor-rate threshold — but zero is beyond the open stop, so recording it
+        would overstate the travel and understate every millimetre after it."""
+        fsm = TwoPointCalibFSM()
         fsm.start(CLOSED_RAD)
         walk(fsm, CLOSED_RAD, 0.6)
-        assert fsm.open_rad == pytest.approx(0.6, abs=0.02)
+        fsm.record_open()
         fsm.tick(0.0, DT)  # the feedback went away and came back as zero
-        assert fsm.open_rad == pytest.approx(0.6, abs=0.02), "zero was adopted"
+
+        assert fsm.phase is TwoPointPhase.RECORD_OPEN, "zero was taken as the open stop"
+        assert fsm.open_rad is None
+        assert fsm.rejected == 1
+        # And the operator is told, because the alternative is a button that
+        # silently did nothing.
+        assert "不可信" in fsm.note
+
+        # A second press, with the reading back, records normally.  The hand
+        # works back up to where it was: the return from the glitch is a jump
+        # too, and one reading cannot tell a return from a second glitch.
+        walk(fsm, 0.0, 0.6)
+        press_open(fsm, 0.6)
+        assert fsm.open_rad == pytest.approx(0.6)
+
+    def test_an_out_of_range_reading_is_never_recorded(self) -> None:
+        """The SDK's own guard (gripper.py:427), which is the one it applies to
+        the samples its zero-gravity mode collects."""
+        fsm = TwoPointCalibFSM()
+        fsm.start(1.0)
+        fsm.record_open()
+        fsm.tick(constants.MANUAL_POS_GUARD_RAD + 0.1, DT)
+        assert fsm.open_rad is None
         assert fsm.rejected == 1
 
-    def test_the_manual_guard_is_tighter_than_the_guided_one(self) -> None:
-        """A hand is slower than a motor, and the tighter bound is what catches
-        the lost-frame jump above."""
-        assert MANUAL_MAX_JUMP_RAD_PER_TICK < PROBE_MAX_JUMP_RAD_PER_TICK
-
-    @pytest.mark.parametrize("hand_speed", [100.0, 500.0, 1000.0])
-    def test_a_legitimate_hand_move_is_never_treated_as_a_jump(
-        self, hand_speed: float
-    ) -> None:
-        """Including a hard yank at the speed the guard is derived from."""
-        fsm = ManualCalibFSM(duration_s=600.0)
-        fsm.start(CLOSED_RAD)
-        walk(fsm, CLOSED_RAD, OPEN_RAD, rate_rad_s=hand_speed / 65.0)
-        assert fsm.rejected == 0
-        assert fsm.open_rad == pytest.approx(OPEN_RAD, abs=0.02)
-
     def test_the_guard_is_the_sdk_threshold(self) -> None:
-        fsm = ManualCalibFSM(max_jump_rad=1e9)
+        fsm = TwoPointCalibFSM(max_jump_rad=1e9)
         assert fsm.pos_guard_rad == constants.MANUAL_POS_GUARD_RAD
         fsm.start(0.0)
         fsm.tick(constants.MANUAL_POS_GUARD_RAD - 1e-9, DT)
@@ -698,236 +901,271 @@ class TestManualProbe:
         fsm.tick(constants.MANUAL_POS_GUARD_RAD, DT)
         assert fsm.rejected == 1
 
-    def test_the_settle_phase_keeps_sampling(self) -> None:
-        """The jaws often drift the last millimetre as the hand lets go, which
-        is exactly the sample worth keeping."""
-        fsm = ManualCalibFSM(duration_s=0.1, settle_s=5.0)
-        fsm.start(0.5)
-        run(fsm, Plant(0.5), seconds=0.2, until=lambda f: f.phase is ManualPhase.SETTLE)
-        assert fsm.phase is ManualPhase.SETTLE
-        walk(fsm, 0.5, 1.6)
-        assert fsm.close_rad == pytest.approx(1.6, abs=0.01)
-        assert fsm.phase is ManualPhase.SETTLE
-
-    def test_the_settle_phase_is_still_limp(self) -> None:
-        fsm = ManualCalibFSM(duration_s=0.1, settle_s=5.0)
-        fsm.start(0.5)
-        run(fsm, Plant(0.5), seconds=0.2, until=lambda f: f.phase is ManualPhase.SETTLE)
-        out = fsm.tick(0.5, DT)
-        assert out is FREE_FRAME
-
-    def test_the_recording_freezes_once_recovery_starts(self) -> None:
-        """Otherwise where the servo happened to settle would be folded into the
-        travel the operator measured by hand."""
-        fsm = ManualCalibFSM(duration_s=0.05, settle_s=0.05, recover_s=5.0)
+    @pytest.mark.parametrize("hand_speed", [100.0, 500.0, 1000.0])
+    def test_a_legitimate_hand_move_is_never_treated_as_a_jump(
+        self, hand_speed: float
+    ) -> None:
+        """Including a hard yank at the speed the guard is derived from."""
+        fsm = TwoPointCalibFSM()
         fsm.start(CLOSED_RAD)
-        run(fsm, Plant(CLOSED_RAD), seconds=0.2, until=lambda f: f.phase is ManualPhase.RECOVER)
-        assert fsm.phase is ManualPhase.RECOVER
-        before = (fsm.open_rad, fsm.close_rad)
-        fsm.tick(OPEN_RAD, DT)
-        assert (fsm.open_rad, fsm.close_rad) == before
+        walk(fsm, CLOSED_RAD, OPEN_RAD, rate_rad_s=hand_speed / 65.0)
+        assert fsm.rejected == 0
 
-    def test_the_recovery_holds_the_position_rather_than_going_limp(self) -> None:
-        """The SDK's exit_zero_gravity, at the SDK's own gains."""
-        fsm = ManualCalibFSM(duration_s=0.05, settle_s=0.05, recover_s=5.0)
+    def test_the_manual_guard_is_tighter_than_the_guided_one(self) -> None:
+        """A hand is slower than a motor, and the tighter bound is what catches
+        the lost-frame jump above."""
+        assert MANUAL_MAX_JUMP_RAD_PER_TICK < PROBE_MAX_JUMP_RAD_PER_TICK
+
+    def test_both_points_recorded_in_the_same_place_fails(self) -> None:
+        """Recording the same place twice is not a travel.  Saving it would give
+        a gripper whose every position is one position."""
+        fsm = TwoPointCalibFSM()
         fsm.start(0.5)
-        run(fsm, Plant(0.5), seconds=0.2, until=lambda f: f.phase is ManualPhase.RECOVER)
-        out = fsm.tick(0.5, DT)
-        assert out.q_rad == pytest.approx(0.5)
-        assert out.kp == constants.KP_MOVE
-        assert out.kd == constants.KD_DEFAULT
+        fsm.record_open()
+        fsm.tick(0.5, DT)
+        fsm.record_close()
+        fsm.tick(0.5, DT)
 
-    def test_the_result_is_ready_once_recovery_finishes(self) -> None:
-        fsm = ManualCalibFSM(duration_s=0.05, settle_s=0.05, recover_s=0.05)
-        fsm.start(CLOSED_RAD)
-        plant = Plant(CLOSED_RAD)
-        pos = CLOSED_RAD
-        for _ in range(HZ * 2):
-            if pos > OPEN_RAD:
-                pos -= 0.01
-            plant.pos = pos
-            plant.tick(fsm)
-            if fsm.is_terminal:
-                break
-        assert fsm.phase is ManualPhase.DONE, fsm.note
-        assert fsm.result is not None
-
-    def test_the_operator_can_end_the_recording_early(self) -> None:
-        """The SDK documents Ctrl+C here, which a worker thread can never
-        receive — Python delivers signals to the main thread only."""
-        fsm = ManualCalibFSM(duration_s=600.0)
-        fsm.start(0.5)
-        walk(fsm, 0.5, 1.4)
-        walk(fsm, 1.4, 0.2)
-        fsm.stop()
-        assert fsm.phase is ManualPhase.SETTLE
-        assert fsm.open_rad == pytest.approx(0.2, abs=0.01)
-        assert fsm.close_rad == pytest.approx(1.4, abs=0.01)
-
-    def test_stopping_keeps_the_samples_already_taken(self) -> None:
-        fsm = ManualCalibFSM(duration_s=600.0, settle_s=0.05, recover_s=0.05)
-        fsm.start(CLOSED_RAD)
-        walk(fsm, CLOSED_RAD, OPEN_RAD)
-        fsm.stop()
-        for _ in range(HZ):
-            fsm.tick(OPEN_RAD, DT)
-            if fsm.is_terminal:
-                break
-        assert fsm.phase is ManualPhase.DONE, fsm.note
-        assert fsm.result is not None
-
-    def test_stopping_outside_the_recording_does_nothing(self) -> None:
-        fsm = ManualCalibFSM()
-        fsm.stop()
-        assert fsm.phase is ManualPhase.IDLE
-        fsm.start(0.5)
-        fsm.cancel()
-        fsm.stop()
-        assert fsm.phase is ManualPhase.CANCELLED
-
-    def test_an_empty_range_fails_with_the_sdk_wording(self) -> None:
-        """The operator held the jaws still for the whole probe.  The SDK's own
-        sentence is the right one to show, because it is the same procedure."""
-        fsm = ManualCalibFSM(duration_s=0.05, settle_s=0.05, recover_s=0.05)
-        fsm.start(0.5)
-        for _ in range(HZ * 2):
-            fsm.tick(0.5, DT)
-            if fsm.is_terminal:
-                break
-        assert fsm.phase is ManualPhase.FAILED
-        assert "未能捕获有效的位置范围" in fsm.note
+        assert fsm.phase is TwoPointPhase.FAILED
+        assert "行程异常" in fsm.note
         assert fsm.result is None
 
-    def test_a_probe_with_no_usable_samples_fails(self) -> None:
-        """Every reading guarded away means no range, and no range means no
-        calibration — not a calibration of zero length.  The one sample counted
-        is the entry position ``start`` takes; it is a single point, so the range
-        it implies is empty."""
-        fsm = ManualCalibFSM(duration_s=0.05, settle_s=0.05, recover_s=0.05)
-        fsm.start(1.0)
-        for _ in range(HZ * 2):
-            fsm.tick(constants.MANUAL_POS_GUARD_RAD + 1.0, DT)
-            if fsm.is_terminal:
-                break
-        assert fsm.phase is ManualPhase.FAILED
-        assert fsm.samples == 1
-        assert fsm.open_rad == fsm.close_rad
-        assert "未能捕获有效的位置范围" in fsm.note
-
-    def test_cancelling_discards_the_result_and_frees_the_axis(self) -> None:
-        fsm = ManualCalibFSM(duration_s=600.0)
-        fsm.start(1.0)
-        fsm.tick(0.0, DT)
-        fsm.cancel()
-        out = fsm.tick(0.0, DT)
-        assert fsm.phase is ManualPhase.CANCELLED
-        assert fsm.result is None
-        assert out is FREE_FRAME
-
-    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
-    def test_a_non_finite_reading_stops_the_probe(self, bad: float) -> None:
-        fsm = ManualCalibFSM()
+    def test_a_point_that_is_never_recorded_fails_on_the_timeout(self) -> None:
+        """The axis is limp for as long as this waits, so the wait has to end on
+        its own — a console left holding an enabled, limp motor is a gripper that
+        falls open on whatever is under it."""
+        fsm = TwoPointCalibFSM(timeout_s=1.0)
         fsm.start(0.5)
-        fsm.tick(bad, DT)
-        assert fsm.phase is ManualPhase.FAILED
-        assert "读数无效" in fsm.note
+        run(fsm, Plant(0.5), seconds=2.0, until=lambda f: f.is_terminal)
 
-    def test_a_probe_that_never_had_a_reading_holds_nothing(self) -> None:
-        """Holding at the ``0.0`` it was constructed with would command a move
-        to zero — the opposite of what a failed probe should do."""
-        fsm = ManualCalibFSM()
-        assert not fsm.start(float("nan"))
-        out = fsm.tick(0.5, DT)
-        assert out is FREE_FRAME
+        assert fsm.phase is TwoPointPhase.FAILED
+        assert "记录超时" in fsm.note and "张开" in fsm.note
+        # Limp, not held: the reading a hold would use is one taken up to the
+        # whole timeout ago, and the hand has been free to move the jaws since.
+        assert fsm.tick(0.5, DT) is FREE_FRAME
 
-    def test_an_idle_probe_sends_nothing(self) -> None:
-        assert ManualCalibFSM().tick(0.5, DT) is NO_FRAME
+    def test_the_timeout_restarts_for_the_second_point(self) -> None:
+        """Otherwise a slow but successful first point would leave no time at
+        all for the second, and the operator would be racing a clock they had
+        already spent."""
+        fsm = TwoPointCalibFSM(timeout_s=1.0)
+        fsm.start(0.5)
+        run(fsm, Plant(0.5), seconds=0.9, until=lambda f: f.is_terminal)
+        assert fsm.phase is TwoPointPhase.RECORD_OPEN
+        press_open(fsm, 0.5)
 
-    def test_it_does_not_move_the_jaws_before_it_is_started(self) -> None:
-        fsm = ManualCalibFSM()
-        plant = Plant(0.5)
-        for _ in range(100):
-            plant.tick(fsm)
-        assert plant.pos == 0.5
+        assert fsm.remaining_s == pytest.approx(1.0)
+        run(fsm, Plant(0.5), seconds=0.9, until=lambda f: f.is_terminal)
+        assert fsm.phase is TwoPointPhase.RECORD_CLOSE
 
-    def test_the_remaining_time_counts_down_while_recording(self) -> None:
-        fsm = ManualCalibFSM(duration_s=10.0)
+    def test_the_remaining_time_counts_down_and_stops_between_points(self) -> None:
+        fsm = TwoPointCalibFSM(timeout_s=10.0)
+        assert fsm.remaining_s == 0.0, "nothing is being waited for before the start"
         fsm.start(0.5)
         assert fsm.remaining_s == pytest.approx(10.0)
         for _ in range(HZ * 2):  # two seconds
             fsm.tick(0.5, DT)
         assert fsm.remaining_s == pytest.approx(8.0, abs=0.01)
-        fsm.stop()
+        fsm.cancel()
         assert fsm.remaining_s == 0.0
 
-    def test_progress_only_ever_advances_while_the_probe_is_running(self) -> None:
-        """A bar that goes backwards reads as a fault.  Once the probe ends it
-        reports what it produced: 1.0 if it produced a calibration, 0.0 if it
-        did not, which the page turns into an error banner anyway."""
-        fsm = ManualCalibFSM(duration_s=0.5, settle_s=0.1, recover_s=0.1)
-        fsm.start(CLOSED_RAD)
-        walk(fsm, CLOSED_RAD, OPEN_RAD)
-        last = -1.0
-        for _ in range(HZ * 2):
-            if not fsm.is_terminal:
-                assert fsm.progress >= last
-                last = fsm.progress
-            fsm.tick(OPEN_RAD, DT)
-            if fsm.is_terminal:
-                break
-        assert fsm.phase is ManualPhase.DONE, fsm.note
+    def test_progress_steps_at_the_record_rather_than_on_a_clock(self) -> None:
+        """There is no clock to creep along: the operator decides when a point
+        is recorded, so the bar counts the points."""
+        fsm = TwoPointCalibFSM()
+        fsm.start(0.5)
+        assert fsm.progress == 0.0
+        walk(fsm, 0.5, 1.5)
+        press_open(fsm, 1.5)
+        assert fsm.progress == 0.5
+        walk(fsm, 1.5, 0.5)
+        press_close(fsm, 0.5)
+        assert fsm.phase is TwoPointPhase.DONE
         assert fsm.progress == 1.0
 
-    def test_the_phase_order_is_recording_settle_recover(self) -> None:
-        fsm = ManualCalibFSM(duration_s=0.05, settle_s=0.05, recover_s=0.05)
-        fsm.start(1.0)
-        seen: list[ManualPhase] = []
-        for _ in range(HZ * 2):
-            fsm.tick(0.5, DT)
+    def test_a_failed_probe_does_not_report_a_finished_bar(self) -> None:
+        """A bar at 100% next to a failure reads as "done"; the phase label is
+        the only thing saying otherwise."""
+        fsm = TwoPointCalibFSM(timeout_s=1.0)
+        fsm.start(0.5)
+        run_to_terminal(fsm, Plant(0.5), seconds=2.0)
+
+        assert fsm.phase is TwoPointPhase.FAILED
+        assert fsm.progress == 0.0
+
+        fsm.cancel()
+        assert fsm.progress == 0.0
+
+    def test_the_phase_order_is_the_order_the_buttons_are_offered_in(self) -> None:
+        fsm = TwoPointCalibFSM()
+        fsm.start(0.5)
+        seen: list[TwoPointPhase] = []
+
+        def watch() -> None:
             if not seen or seen[-1] is not fsm.phase:
                 seen.append(fsm.phase)
-            if fsm.is_terminal:
-                break
+
+        watch()
+        walk(fsm, 0.5, 1.5)
+        watch()
+        press_open(fsm, 1.5)
+        watch()
+        walk(fsm, 1.5, 0.5)
+        press_close(fsm, 0.5)
+        watch()
+
         assert seen == [
-            ManualPhase.RECORDING,
-            ManualPhase.SETTLE,
-            ManualPhase.RECOVER,
-            ManualPhase.DONE,
+            TwoPointPhase.RECORD_OPEN,
+            TwoPointPhase.RECORD_CLOSE,
+            TwoPointPhase.DONE,
         ]
 
-    def test_the_default_duration_is_the_sdk_default(self) -> None:
-        assert ManualCalibFSM().duration_s == constants.MANUAL_DURATION_DEFAULT_S
-        assert ManualCalibFSM(duration_s=5.0).duration_s == 5.0
-
-    def test_sampling_is_faster_than_the_sdk(self) -> None:
-        """200 Hz against the SDK's 100 Hz: for a min/max, more samples can only
-        ever include more of the travel.  The extra sample is the entry position
-        ``start`` folds in."""
-        fsm = ManualCalibFSM(duration_s=1.0)
-        fsm.start(0.0)
-        assert fsm.samples == 1
-        for _ in range(HZ):
-            fsm.tick(0.0, DT)
-        assert fsm.samples == HZ + 1
-
     def test_a_restart_clears_the_previous_attempt(self) -> None:
-        """A second run must not inherit the first one's result, or the page
-        would offer to save a calibration that the new run never produced."""
-        fsm = ManualCalibFSM(duration_s=0.05, settle_s=0.05, recover_s=0.05)
+        """The page offers "try again"; the second run must not inherit the
+        first one's points, or the page would offer to save a calibration the
+        new run never produced."""
+        fsm = TwoPointCalibFSM()
+        fsm.start(0.5)
+        walk(fsm, 0.5, 1.5)
+        press_open(fsm, 1.5)
+        walk(fsm, 1.5, 0.5)
+        press_close(fsm, 0.5)
+        assert fsm.is_terminal and fsm.result is not None
+
+        assert fsm.start(1.0)
+        assert fsm.phase is TwoPointPhase.RECORD_OPEN
+        assert fsm.open_rad is None and fsm.close_rad is None and fsm.result is None
+        assert fsm.rejected == 0
+
+    def test_cancelling_discards_the_result_and_frees_the_axis(self) -> None:
+        fsm = TwoPointCalibFSM()
+        fsm.start(1.0)
+        fsm.tick(0.0, DT)
+        fsm.cancel()
+        out = fsm.tick(0.0, DT)
+
+        assert fsm.phase is TwoPointPhase.CANCELLED
+        assert fsm.result is None
+        assert out is FREE_FRAME
+
+    def test_the_finished_probe_holds_the_position_it_recorded(self) -> None:
+        """It ends at the closed stop, with the operator's hand just off the
+        jaws — so a hold here holds where they were left, rather than the press
+        against a hard stop a guided probe ends on."""
+        fsm = TwoPointCalibFSM()
         fsm.start(CLOSED_RAD)
         walk(fsm, CLOSED_RAD, OPEN_RAD)
-        for _ in range(HZ * 2):
-            fsm.tick(OPEN_RAD, DT)
-            if fsm.is_terminal:
-                break
-        assert fsm.is_terminal
-        assert fsm.result is not None
-        assert fsm.start(1.0)
+        press_open(fsm, OPEN_RAD)
+        walk(fsm, OPEN_RAD, CLOSED_RAD)
+        press_close(fsm, CLOSED_RAD)
+
+        out = fsm.tick(CLOSED_RAD, DT)
+        assert out.q_rad == pytest.approx(CLOSED_RAD)
+        assert out.kp == constants.KP_MOVE
+        assert out.kd == constants.KD_DEFAULT
+
+    def test_failing_from_outside_stops_it_and_keeps_the_reason(self) -> None:
+        """The worker calls this when the frames stop reaching the motor: the
+        operator can see the jaws move, so a probe that has stopped hearing the
+        drive is recording the extremes of nothing."""
+        fsm = TwoPointCalibFSM()
+        fsm.start(0.5)
+        walk(fsm, 0.5, 1.0)
+        press_open(fsm, 1.0)
+        fsm.fail("标定中止：电机未使能")
+
+        assert fsm.phase is TwoPointPhase.FAILED
+        assert fsm.note == "标定中止：电机未使能"
         assert fsm.result is None
-        assert fsm.samples == 1 and fsm.rejected == 0
-        # Only the entry position is in the new attempt's range.
-        assert fsm.open_rad == pytest.approx(1.0)
-        assert fsm.close_rad == pytest.approx(1.0)
+        # The operator's hand is still on the jaws and they are about to start
+        # again: stiffening at the last reading would push against it.
+        assert fsm.tick(1.0, DT) is FREE_FRAME
+
+    def test_a_failure_after_the_end_does_not_rewrite_the_result(self) -> None:
+        fsm = TwoPointCalibFSM()
+        fsm.start(0.5)
+        walk(fsm, 0.5, 1.5)
+        press_open(fsm, 1.5)
+        walk(fsm, 1.5, 0.5)
+        press_close(fsm, 0.5)
+        note = fsm.note
+        fsm.fail("标定中止：位置帧连续 0.5 s 未能发出")
+
+        assert fsm.phase is TwoPointPhase.DONE
+        assert fsm.note == note
+        assert fsm.result is not None
+
+    def test_the_notes_record_what_was_measured(self) -> None:
+        """The log has to be able to say where the two numbers came from: a
+        calibration is the one result on this console that nothing downstream
+        can check."""
+        fsm = TwoPointCalibFSM()
+        fsm.start(0.5)
+        walk(fsm, 0.5, 1.5)
+        press_open(fsm, 1.5)
+        walk(fsm, 1.5, 0.5)
+        press_close(fsm, 0.5)
+
+        result = fsm.result
+        assert result is not None
+        text = " ".join(result.notes)
+        assert "1.500000" in text and "0.500000" in text
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_a_non_finite_reading_stops_the_probe(self, bad: float) -> None:
+        fsm = TwoPointCalibFSM()
+        fsm.start(0.5)
+        fsm.tick(bad, DT)
+
+        assert fsm.phase is TwoPointPhase.FAILED
+        assert "读数无效" in fsm.note
+
+    def test_a_probe_that_never_had_a_reading_holds_nothing(self) -> None:
+        """Holding at the ``0.0`` it was constructed with would command a move
+        to zero — the opposite of what a failed probe should do."""
+        fsm = TwoPointCalibFSM()
+        assert not fsm.start(float("nan"))
+        out = fsm.tick(0.5, DT)
+        assert out is FREE_FRAME
+
+    def test_an_idle_probe_sends_nothing(self) -> None:
+        assert TwoPointCalibFSM().tick(0.5, DT) is NO_FRAME
+
+    def test_it_does_not_move_the_jaws_before_it_is_started(self) -> None:
+        fsm = TwoPointCalibFSM()
+        plant = Plant(0.5)
+        for _ in range(100):
+            plant.tick(fsm)
+        assert plant.pos == 0.5
+
+    @pytest.mark.parametrize("junk", [0.0, 1e300, -1e300, float("nan"), float("inf")])
+    def test_tick_is_total(self, junk: float) -> None:
+        """The worker calls this every 5 ms inside a ``BaseException`` guard, and
+        an exception escaping ``QThread.run`` aborts the process — so a tick that
+        cannot be reasoned about must still return a frame."""
+        fsm = TwoPointCalibFSM()
+        assert fsm.tick(junk, DT) is NO_FRAME
+        fsm.start(0.5)
+        out = fsm.tick(junk, DT)
+        assert out.q_rad is None or math.isfinite(out.q_rad)
+
+    def test_the_coefficient_follows_the_configured_travel(self) -> None:
+        """The two angles are measured and the millimetres are not: the operator
+        has told the console how far the jaws travel, and that is what the
+        coefficient comes out of."""
+        fsm = TwoPointCalibFSM(max_stroke_mm=60.0)
+        fsm.start(CLOSED_RAD)
+        walk(fsm, CLOSED_RAD, OPEN_RAD)
+        press_open(fsm, OPEN_RAD)
+        walk(fsm, OPEN_RAD, CLOSED_RAD)
+        press_close(fsm, CLOSED_RAD)
+
+        result = fsm.result
+        assert result is not None
+        assert result.max_stroke_mm == 60.0
+        assert result.rad_to_mm == pytest.approx(
+            (60.0 + constants.SPAN_INSET_MM) / result.travel_rad, abs=0.02
+        )
 
 
 def ceil_div(a: float, b: float) -> int:

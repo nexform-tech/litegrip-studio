@@ -33,6 +33,7 @@ import logging
 import math
 import time
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from litegrip import GripperConfig, LiteGrip, LiteGripError, describe_error
@@ -53,6 +54,22 @@ from . import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def _same_file(a: str | Path, b: str | Path) -> bool:
+    """Whether two paths name the same file, spelling and symlinks aside.
+
+    The two sides arrive from opposite directions — the save target is
+    whatever string the console was launched with, the factory path is built
+    from the package location — so a plain string comparison would miss
+    ``~``, ``..`` and a symlinked package directory.  Neither file need exist
+    for the answer to be useful, which is why this resolves rather than
+    statistics.
+    """
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except OSError:  # pragma: no cover - unresolvable path
+        return str(a) == str(b)
 
 
 class RealBackend(GripperBackend):
@@ -163,7 +180,7 @@ class RealBackend(GripperBackend):
         dq_rad_s: float = 0.0,
         tau_nm: float = 0.0,
         *,
-        probe_frame: bool = False,
+        ungated: bool = False,
     ) -> bool:
         """Send one MIT frame, refusing anything that could not be meant.
 
@@ -177,15 +194,17 @@ class RealBackend(GripperBackend):
         reversed converts a wrong command into a wrong command that looks
         deliberate.
 
-        ``probe_frame`` exists for exactly one caller, the calibration probes.
-        A probe is the only motion in the application allowed to happen before a
-        calibration exists — it is what produces one — and, once one exists, the
-        only motion allowed outside the travel it describes: it is looking for
-        the mechanical stops, which by design sit beyond the red lines the
-        calibration records.  The parameter is named for the risk rather than
-        for the caller so that it is greppable, and it relaxes *only* those two
-        checks: a non-finite value or a negative gain is still refused, because
-        those are wrong whatever the calibration says.
+        ``ungated`` is for frames that carry no target this gate has anything to
+        say about: the calibration probes, which look for the mechanical stops
+        beyond the red lines and run before there is a calibration to check
+        against; and 松力, 零重力 and the hold a probe is left in, which command
+        either no stiffness or the angle the encoder has just reported.  The
+        three refusals below exist to stop a *position command derived from a
+        calibration in doubt* from reaching the drive, and none of those frames
+        is one.  The name describes the frame rather than its caller because a
+        caller can be anything; it relaxes *only* those checks — a non-finite
+        value or a negative gain is still refused, because those are wrong
+        whatever the calibration says.
         """
         self._claim()
         if not self._gripper.is_enabled:
@@ -203,13 +222,15 @@ class RealBackend(GripperBackend):
         # and loaded-but-does-not-match-the-file — which is why the policy lives
         # on ``CalibrationInfo`` rather than being spelled out here.
         calibrated = info is not None and info.motion_allowed and limits is not None
-        if not calibrated and not probe_frame:
+        if not calibrated and not ungated:
             return self._refuse("标定未通过校验，拒绝发送位置帧")
-        if calibrated and not probe_frame and abs(limits.clamp_rad(q_rad) - q_rad) > 1e-9:
-            # The probe skips this, and must: the mechanical stops it is looking
-            # for are outside the travel by design, so this check applied to a
-            # probe stops it one step short of the very limit it is measuring.
-            # It steers by bounded steps from the measurement instead.
+        if calibrated and not ungated and abs(limits.clamp_rad(q_rad) - q_rad) > 1e-9:
+            # An ungated frame skips this, and must: the mechanical stops a probe
+            # is looking for are outside the travel by design, so this check
+            # applied to a probe stops it one step short of the very limit it is
+            # measuring — and a hold at the angle the encoder just reported is
+            # outside a stale file's travel for the same reason the file is
+            # stale.  It steers by bounded steps from the measurement instead.
             return self._refuse(
                 f"目标 {q_rad:.6f} rad 超出标定行程 "
                 f"[{limits.rad_low:.6f}, {limits.rad_high:.6f}]"
@@ -359,6 +380,20 @@ class RealBackend(GripperBackend):
         if info is None or info.limits is None:
             raise NotReady("没有可保存的标定")
         target = path or self._calibration_path or str(calibration.default_user_path())
+
+        # The SDK's own file is data, not state: it ships with the package and
+        # describes whichever unit it was taken on.  Overwriting it would
+        # replace the fallback every later install of this console relies on,
+        # and it is reachable without meaning to — the target is the stored
+        # path, which is whatever the console was told to load at launch.  The
+        # UI's own check is about the calibration in hand, not about where the
+        # write is going, and a finished probe writes itself out now, so the
+        # target needs a guard of its own.
+        if _same_file(target, calibration.factory_path()):
+            raise BackendError(
+                f"拒绝覆盖出厂标定文件 {target}：那是 SDK 自带的数据，"
+                "请把结果保存到用户标定路径"
+            )
 
         # The SDK writes the file from its own config, so the config has to
         # carry our numbers first or we would save whatever was there before.

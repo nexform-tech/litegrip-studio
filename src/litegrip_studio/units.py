@@ -3,16 +3,24 @@
 No Qt, no SDK, no I/O — everything here is a function of its arguments, so the
 whole module is unit-testable and can be reasoned about by hand.
 
-The conversion formulas are copied verbatim from the SDK (not invented), because
-getting them subtly wrong is how a gripper drives into a hard stop:
+The conversion formulas are the SDK's (not invented), because getting them
+subtly wrong is how a gripper drives into a hard stop:
 
     mm  = (pos_closed_rad - position_rad) * rad_to_mm      gripper.py:1281
     rad = pos_closed_rad - position_mm / rad_to_mm         gripper.py:925
 
-The formulas are the SDK's; the ``rad_to_mm`` they are fed is not.  That one is
-derived from the calibration's two angles and the operator's measured travel —
-:func:`derive_scale` — because the copy stored in a calibration file describes
-the unit the file was written for, which is not always the unit being driven.
+Both of those hardcode the sign of the mapping, and the SDK has no other form: as
+written it can only describe a gripper whose encoder angle *shrinks* as the jaws
+open, which is how the units it was written for are assembled.  That is an
+assembly detail rather than a property of the calibration, so here it is read
+from the recorded angles — :attr:`Limits.direction` — and the two formulas above
+are the case of it where the closed stop is the larger angle.
+
+The other thing the SDK's formulas are fed is ``rad_to_mm``, and that one is not
+taken from a file at all.  It is derived from the calibration's angles and the
+operator's measured travel — :func:`derive_scale` — because the copy stored in a
+calibration file describes the unit the file was written for, which is not always
+the unit being driven.
 """
 
 from __future__ import annotations
@@ -29,9 +37,11 @@ class Limits:
     """The travel calibration in effect, plus the commanded range.
 
     ``closed_rad`` is the motor angle at 0 mm and ``open_rad`` the angle at full
-    stroke.  On real units ``closed_rad`` is numerically LARGER than
-    ``open_rad``; the SDK's uncalibrated defaults are the other way round, which
-    is the failure this class exists to detect (see :meth:`is_reversed`).
+    stroke.  Which of the two is numerically larger depends on how the linkage
+    was assembled — the units the SDK was written for have the closed stop at the
+    larger angle, a reverse-mounted one has it at the smaller — and both are
+    valid.  :attr:`direction` is that fact, and every conversion below reads it;
+    :attr:`reversed_mount` names the case.
 
     ``rad_to_mm`` is DERIVED rather than read from the file — see
     :func:`derive_scale` — because the file's copy of it is the SDK's nominal
@@ -73,11 +83,36 @@ class Limits:
         return max(self.closed_rad, self.open_rad)
 
     @property
-    def is_reversed(self) -> bool:
-        """True when closed is at or below open — the uncalibrated default state.
+    def direction(self) -> float:
+        """+1 when the angle grows toward open, -1 when it shrinks toward open.
 
-        Under this condition the SDK's own clamp ``max(open, min(closed, x))``
-        collapses to a constant, so every target maps to one angle.
+        A property of the assembly, not a measure of the calibration's quality:
+        the classic mounting has the closed stop at the larger angle (−1), a
+        reverse-mounted one has it at the smaller (+1).  Every conversion that is
+        not symmetric in the two angles reads this instead of assuming either.
+
+        Equal angles are degenerate — :func:`derive_scale` gives them a zero
+        scale and :func:`~litegrip_studio.calibration.validate_limits` reports
+        that as a problem — and are answered here as the classic case.
+        """
+        return 1.0 if self.open_rad > self.closed_rad else -1.0
+
+    @property
+    def reversed_mount(self) -> bool:
+        """True when the closed stop is the numerically smaller angle.
+
+        Reported, never refused.  This used to be the console's whole verdict on
+        a file: ``closed <= open`` was read as the signature of the SDK's
+        uncalibrated defaults ``(0.0, 1.14)`` and blocked motion outright.  It is
+        the same signature in a file that is entirely correct, though, and a
+        gripper whose fingers are mounted the other way round cannot be told
+        apart from it by the angles alone — so a reverse-mounted unit was
+        uncalibratable, which is the deadlock this property replaces.
+
+        What actually guards the axis is not this: it is
+        :func:`frame_mismatch`, which compares the calibration against the angle
+        the encoder is reporting right now, and which cannot be fooled by a
+        mounting direction because it never looks at the ordering at all.
         """
         return self.closed_rad <= self.open_rad
 
@@ -86,11 +121,11 @@ class Limits:
         """mm (0 = closed) → motor angle in rad."""
         if self.rad_to_mm == 0:
             return self.closed_rad
-        return self.closed_rad - mm / self.rad_to_mm
+        return self.closed_rad + self.direction * mm / self.rad_to_mm
 
     def to_mm(self, rad: float) -> float:
         """Motor angle in rad → mm (0 = closed)."""
-        return (self.closed_rad - rad) * self.rad_to_mm
+        return self.direction * (rad - self.closed_rad) * self.rad_to_mm
 
     # ── clamping ────────────────────────────────────────────────────────────
     def clamp_mm(self, mm: float) -> float:
@@ -102,8 +137,9 @@ class Limits:
         """Clamp to the commanded-angle range of this calibration.
 
         Deliberately computed from our own ``closed_rad``/``open_rad`` rather
-        than delegating to ``goto_rad``, which trusts the same possibly-wrong
-        config this class may be reporting as reversed.
+        than delegating to ``goto_rad``, which trusts whatever config the SDK
+        holds — and the SDK's own clamp collapses to a constant instead of
+        refusing when the two angles are ordered the other way round.
         """
         if math.isnan(rad):
             return self.closed_rad
@@ -227,27 +263,30 @@ def clamp_force_torque(force_n: float) -> float:
     return torque_from_force(clamp_force(force_n))
 
 
-def mm_to_rad_per_s(speed_mm_s: float, rad_to_mm: float) -> float:
+def mm_to_rad_per_s(speed_mm_s: float, rad_to_mm: float, *, direction: float) -> float:
     """Speed in mm/s → rad/s, for the MIT velocity feed-forward term.
 
-    NEGATED, and the sign is not cosmetic.  The mapping
-    ``q = closed_rad - mm / rad_to_mm`` has ``dq/dmm = -1/rad_to_mm``, so the
-    motor angle *decreases* as the jaws open.  Feeding the un-negated value as
-    ``dq_target`` makes the ``kd·(dq_target − dq)`` term drive the motor the
-    wrong way — hard enough to pin the jaws against the closed stop while the
-    position term is still small, which is exactly the failure this comment
-    exists to prevent.
+    The sign is not cosmetic, and ``direction`` is not optional.  The mapping is
+    ``q = closed_rad + direction · mm / rad_to_mm``, so ``dq/dmm`` is
+    ``direction / rad_to_mm`` — signed, and on the classic mounting that sign is
+    negative, because the angle *decreases* as the jaws open.  Feeding a
+    velocity of the wrong sign as ``dq_target`` makes the ``kd·(dq_target − dq)``
+    term drive the motor the wrong way — hard enough to pin the jaws against the
+    closed stop while the position term is still small, which is exactly the
+    failure this comment exists to prevent.  That is why there is no default: a
+    caller that does not know which way its gripper opens cannot be given a
+    plausible-looking guess here.
     """
     if rad_to_mm == 0 or not math.isfinite(speed_mm_s):
         # Non-finite is treated like every other guard in this module: a NaN that
         # reaches a frame is a runaway motor, and this output goes straight into
         # the MIT velocity term without passing any clamp on the way.
         return 0.0
-    return -speed_mm_s / rad_to_mm
+    return direction * speed_mm_s / rad_to_mm
 
 
-def rad_per_s_to_mm(velocity_rad_s: float, rad_to_mm: float) -> float:
-    """Motor velocity in rad/s → jaw velocity in mm/s (also negated)."""
+def rad_per_s_to_mm(velocity_rad_s: float, rad_to_mm: float, *, direction: float) -> float:
+    """Motor velocity in rad/s → jaw velocity in mm/s (signed the same way)."""
     if rad_to_mm == 0 or not math.isfinite(velocity_rad_s):
         return 0.0
-    return -velocity_rad_s * rad_to_mm
+    return direction * velocity_rad_s * rad_to_mm
