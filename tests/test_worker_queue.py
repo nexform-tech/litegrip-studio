@@ -1529,13 +1529,17 @@ class TestStopping:
 # ═══════════════════════════════════════════════════════════════════════════
 class TestCalibrationCommands:
     def test_a_probe_needs_an_enabled_motor(self) -> None:
+        """Both start buttons, because this refusal is now the whole answer to
+        a click: the page no longer greys them out on a motor that is off, so
+        the operator gets no other signal that anything was missing."""
         bench = Bench()
         bench.send(cmd.Connect())
         bench.loop.set_allow_factory(True)
         bench.tick()
-        bench.send(cmd.StartGuidedCalibration())
-        assert bench.loop.probe is None
-        assert "使能" in bench.signals.alerts()[-1]
+        for command in (cmd.StartGuidedCalibration(), cmd.StartManualCalibration()):
+            bench.send(command)
+            assert bench.loop.probe is None
+            assert "使能" in bench.signals.alerts()[-1]
 
     def test_the_probe_drives_the_axis_with_an_ungated_frame(self) -> None:
         """The one motion in the application allowed before a calibration
