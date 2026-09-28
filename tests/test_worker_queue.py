@@ -1,0 +1,1716 @@
+"""The worker: the command queue, the tick, the gate, and the stopping.
+
+The loop is driven a tick at a time with an injected clock, so a 200 Hz control
+loop and a three-second watchdog cost microseconds and produce the same result
+on every machine.  The thread is exercised for real in the two tests that are
+*about* the thread — the teardown ordering and the abort path — because those are
+the ones where being wrong leaves a motor energised.
+
+No hardware and no SDK: the backends here are either the simulator or a recorder
+that logs what it was asked to do.
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+from typing import Callable
+
+import pytest
+
+from litegrip_studio import calibration, constants
+from litegrip_studio.backend import GripperBackend
+from litegrip_studio.backend.sim import SimBackend
+from litegrip_studio.calibration import CalibrationInfo
+from litegrip_studio.core import commands as cmd
+from litegrip_studio.core.calibration_fsm import (
+    MANUAL_MAX_JUMP_RAD_PER_TICK,
+    GuidedPhase,
+    ManualPhase,
+)
+from litegrip_studio.core.commands import AnyCommand
+from litegrip_studio.core.motion import MotionState
+from litegrip_studio.can_link import (
+    LINK_CONFIGURED,
+    LINK_DENIED,
+    LINK_FAILED,
+    LINK_FD,
+    LINK_MISSING,
+    LINK_OK,
+    LinkOutcome,
+)
+from litegrip_studio.core.worker import (
+    CommandQueue,
+    GateState,
+    GripperWorker,
+    WorkerLoop,
+    evaluate_gate,
+)
+from litegrip_studio.telemetry import Telemetry, TelemetryFrame
+from litegrip_studio.units import Limits, frame_mismatch
+
+from conftest import FakeClock
+
+# The example user calibration: closed is numerically the LARGER angle.
+CLOSED_RAD = 1.775959
+OPEN_RAD = -0.064279
+LIMITS = Limits(CLOSED_RAD, OPEN_RAD, 65.21, 120.0)
+
+#: Closed is at 0 mm, so this is a bit past the middle of the travel.
+MID_RAD = LIMITS.to_rad(60.0)
+
+USER_CAL = CalibrationInfo(
+    provenance=calibration.PROVENANCE_USER, limits=LIMITS, path="/tmp/cal.json"
+)
+BROKEN = CalibrationInfo(
+    provenance=calibration.PROVENANCE_INVALID,
+    limits=None,
+    problems=("缺少必需字段: rad_to_mm",),
+)
+
+
+def _wait_for(predicate, timeout_s: float = 2.0, interval_s: float = 0.002) -> bool:
+    """Poll ``predicate`` until it is true or the deadline passes.
+
+    Only used by the tests that run the loop on a real thread, where the main
+    thread has to wait for a state the loop reaches on its own — and where
+    touching the backend to ask would be the very cross-thread access the worker
+    exists to prevent.  The predicates handed to it are plain reads of the
+    loop's own attributes.
+    """
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval_s)
+    return bool(predicate())
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Doubles
+# ═══════════════════════════════════════════════════════════════════════════
+class Recorder:
+    """Stands in for the Qt signals, recording instead of emitting them.
+
+    Anything with the emit attributes works — that is the whole reason the loop
+    takes its emitter as an argument — so this doubles as documentation of the
+    signal contract.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple]] = []
+
+    def __getattr__(self, name: str):
+        def emit(*args) -> None:
+            self.calls.append((name, args))
+
+        return type("Signal", (), {"emit": staticmethod(emit)})()
+
+    # ── queries ─────────────────────────────────────────────────────────────
+    def of(self, name: str) -> list[tuple]:
+        return [args for kind, args in self.calls if kind == name]
+
+    def first(self, name: str) -> tuple:
+        found = self.of(name)
+        assert found, f"no {name} signal; got {[k for k, _ in self.calls]}"
+        return found[0]
+
+    def has(self, name: str) -> bool:
+        return bool(self.of(name))
+
+    def alerts(self) -> list[str]:
+        return [text for _level, text in self.of("alert")]
+
+    def logs(self) -> list[str]:
+        """The log lines, level discarded — for asserting that something the
+        operator needs was said at all, not how loudly."""
+        return [text for _level, text in self.of("log")]
+
+
+class RecordingBackend(GripperBackend):
+    """A backend that records every call and can be told to fail.
+
+    Not a mock of the SDK — a mock of *our* interface, which is the thing the
+    worker is written against.  The physics tests use the simulator instead; this
+    exists for the properties that are about ordering and refusal, where a
+    simulated gripper only gets in the way.
+    """
+
+    def __init__(
+        self,
+        *,
+        limits: Limits = LIMITS,
+        info: CalibrationInfo | None = None,
+        fail: tuple[str, ...] = (),
+        fresh: bool = True,
+    ) -> None:
+        super().__init__()
+        self.calls: list[tuple[str, tuple]] = []
+        self._limits = limits
+        self.info = info if info is not None else CalibrationInfo(
+            provenance=calibration.PROVENANCE_USER, limits=limits, path="/tmp/cal.json"
+        )
+        self.fail = set(fail)
+        self.fresh = fresh
+        self.connected = False
+        self.enabled = False
+        self.q_rad = MID_RAD
+        self.error_code = constants.ERROR_DISABLED
+        self.rx_frames = 0
+
+    def _record(self, name: str, *args) -> None:
+        if name in self.fail:
+            raise RuntimeError(f"{name} 故意失败")
+        self.calls.append((name, args))
+
+    def names(self) -> list[str]:
+        return [name for name, _ in self.calls]
+
+    # ── lifecycle ───────────────────────────────────────────────────────────
+    def connect(self) -> None:
+        self._claim()
+        self._record("connect")
+        self.connected = True
+
+    def disconnect(self) -> None:
+        self._claim()
+        self._record("disconnect")
+        self.connected = False
+
+    def enable(self) -> None:
+        self._claim()
+        self._record("enable")
+        self.enabled = True
+        self.error_code = constants.ERROR_ENABLED
+
+    def disable(self) -> None:
+        self._claim()
+        self._record("disable")
+        self.enabled = False
+        self.error_code = constants.ERROR_DISABLED
+
+    def clear_fault(self) -> None:
+        self._claim()
+        self._record("clear_fault")
+        self.error_code = constants.ERROR_ENABLED if self.enabled else constants.ERROR_DISABLED
+
+    # ── control-rate primitives ─────────────────────────────────────────────
+    def stream_frame(self, q_rad, kp, kd, dq_rad_s=0.0, tau_nm=0.0, *, probe_frame=False):
+        self._claim()
+        self._record("stream_frame", q_rad, kp, kd, dq_rad_s, tau_nm, probe_frame)
+        return self.enabled
+
+    def poll(self) -> bool:
+        self._claim()
+        self._record("poll")
+        return self.fresh
+
+    def read(self) -> Telemetry:
+        self._claim()
+        return Telemetry(
+            position_rad=self.q_rad,
+            velocity_rad_s=0.0,
+            torque_nm=0.0,
+            temperature_mos=30,
+            temperature_coil=30,
+            error_code=self.error_code,
+            position_mm=self._limits.to_mm(self.q_rad),
+            force_n=0.0,
+            t=0.0,
+        )
+
+    def zero_torque(self) -> None:
+        self._claim()
+        self._record("zero_torque")
+
+    # ── calibration ─────────────────────────────────────────────────────────
+    def load_calibration(self, path: str | None = None) -> bool:
+        self._claim()
+        self._record("load_calibration", path)
+        return self.info.usable
+
+    def save_calibration(self, path: str | None = None) -> str:
+        self._claim()
+        self._record("save_calibration", path)
+        return path or "/tmp/cal.json"
+
+    def limits(self) -> Limits:
+        return self._limits
+
+    def describe(self) -> str:
+        return "记录型后端"
+
+    def calibration_info(self) -> CalibrationInfo | None:
+        return self.info
+
+    def set_calibration_memory(self, zero_rad, open_rad, rad_to_mm, max_stroke_mm=None):
+        self._claim()
+        self._record("set_calibration_memory", zero_rad, open_rad, rad_to_mm, max_stroke_mm)
+        self.info = calibration.in_memory(
+            zero_rad, open_rad, rad_to_mm, max_stroke_mm or self._limits.max_stroke_mm
+        )
+        if self.info.limits is not None:
+            self._limits = self.info.limits
+        return self.info
+
+    def set_travel_mm(self, max_stroke_mm: float) -> None:
+        self._claim()
+        self._record("set_travel_mm", max_stroke_mm)
+        self._limits = self._limits.with_max_stroke(max_stroke_mm)
+
+
+class RecordingSim(SimBackend):
+    """The simulator, plus the record of what it was told.
+
+    The physics tests want the plant; the few tests that are about which *frames*
+    the loop sends through a real probe want both, and the plant alone cannot
+    answer them — a mechanism with no spring in it sits still whether it is held
+    or abandoned.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.frames: list[tuple] = []
+        self.zeroes = 0
+
+    def stream_frame(self, q_rad, kp, kd, dq_rad_s=0.0, tau_nm=0.0, *, probe_frame=False):
+        self.frames.append((q_rad, kp, kd, dq_rad_s, tau_nm, probe_frame))
+        return super().stream_frame(q_rad, kp, kd, dq_rad_s, tau_nm, probe_frame=probe_frame)
+
+    def zero_torque(self) -> None:
+        self.zeroes += 1
+        super().zero_torque()
+
+
+class FakeLink:
+    """Stands in for the CAN bring-up the worker runs before it connects.
+
+    A double for the same reason as the backend: the loop is written against one
+    method and one attribute — ``ensure()`` and ``channel`` — so this is also
+    the record of that contract.  ``backend`` is set by the tests that care about
+    the interface being raised *before* the bus is opened.
+    """
+
+    channel = "can0"
+
+    def __init__(
+        self,
+        outcome: LinkOutcome | None = None,
+        *,
+        raises: BaseException | None = None,
+        on_ensure: Callable[[], None] | None = None,
+    ) -> None:
+        self.calls = 0
+        self.outcome = outcome if outcome is not None else LinkOutcome(
+            LINK_OK, "can0 已就绪（已 up，经典 CAN，比特率 1000000），未改动"
+        )
+        self.raises = raises
+        self.on_ensure = on_ensure
+        self.backend = None
+        self.connected_when_asked: bool | None = None
+
+    def ensure(self) -> LinkOutcome:
+        self.calls += 1
+        if self.backend is not None:
+            self.connected_when_asked = self.backend.connected
+        if self.on_ensure is not None:
+            self.on_ensure()
+        if self.raises is not None:
+            raise self.raises
+        return self.outcome
+
+
+class Bench:
+    """A loop, its backend and its recorder, ticked by hand."""
+
+    def __init__(self, backend=None, clock=None, **kwargs) -> None:
+        # A backend that integrates its own physics needs the same clock the
+        # loop is ticked by, so a bench against the simulator is handed one
+        # rather than making its own — two clocks would make the plant's dt
+        # whatever the wall did between two lines of a test.
+        self.clock = clock if clock is not None else FakeClock()
+        self.backend = backend if backend is not None else RecordingBackend()
+        self.signals = Recorder()
+        self.loop = WorkerLoop(
+            self.backend,
+            self.signals,
+            clock=self.clock,
+            sleep=lambda seconds: None,
+            watchdog_s=kwargs.pop("watchdog_s", None),
+            **kwargs,
+        )
+
+    def tick(self, count: int = 1, dt: float = constants.CTRL_DT):
+        for _ in range(count):
+            self.loop.tick_once(dt)
+            self.clock.advance(dt)
+        return self.loop.last_frame
+
+    def frame(self, count: int = 1) -> TelemetryFrame:
+        """Tick, then keep ticking until a telemetry frame is published.
+
+        Telemetry is published at 50 Hz from a 200 Hz loop, so a single tick
+        after a command usually has *not* published yet — and the frame the GUI
+        would be showing is the previous one.  Tests that assert on what the
+        operator sees have to wait for the publish, exactly as the GUI does.
+        """
+        self.tick(count)
+        before = len(self.signals.of("telemetry"))
+        for _ in range(8):
+            if len(self.signals.of("telemetry")) > before:
+                break
+            self.tick()
+        return self.loop.last_frame
+
+    def send(self, command: AnyCommand, count: int = 1) -> TelemetryFrame:
+        self.loop.submit(command)
+        return self.frame(count)
+
+    def bring_up(self, allow_factory: bool = True) -> None:
+        """Connected, enabled, gate open — the state most tests start from."""
+        self.send(cmd.Connect())
+        if allow_factory:
+            self.loop.set_allow_factory(True)
+        self.send(cmd.Enable())
+
+    def swap_calibration(self, info: CalibrationInfo | None) -> None:
+        """Change the calibration the way the console discovers one.
+
+        Through :class:`LoadCalibration` and the backend rather than by poking
+        the loop's own field: the refresh path is part of what is being tested,
+        and a test that reached past it would pass with the refresh broken.
+        """
+        self.backend.info = info
+        self.send(cmd.LoadCalibration())
+
+    def drive_to(self, mm: float) -> None:
+        """Walk the reported position to ``mm``, a little per tick.
+
+        A teleport is not a hand-move: the manual probe carries a jump guard, and
+        a test that jumped from one end of the travel to the other in one tick
+        would be testing the guard rather than the probe.  The step is half the
+        guard, so the walk is comfortably inside what the probe accepts.
+        """
+        current = self.backend.q_rad
+        target = self.backend.limits().to_rad(mm)
+        delta = target - current
+        step = MANUAL_MAX_JUMP_RAD_PER_TICK / 2.0
+        ticks = max(2, int(abs(delta) / step) + 1)
+        for _ in range(ticks):
+            current += delta / ticks
+            self.backend.q_rad = current
+            self.tick()
+
+    def run_until_probe_finishes(self, timeout_s: float = 10.0) -> None:
+        for _ in range(int(timeout_s / constants.CTRL_DT)):
+            if self.loop.probe is None:
+                return
+            self.tick()
+        raise AssertionError("探测未在超时内结束")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# The gate
+# ═══════════════════════════════════════════════════════════════════════════
+class TestEvaluateGate:
+    def _info(self, provenance: str, limits: Limits | None = LIMITS, problems=()) -> CalibrationInfo:
+        return CalibrationInfo(
+            provenance=provenance,
+            limits=limits,
+            path="/tmp/cal.json",
+            problems=tuple(problems),
+        )
+
+    def test_a_user_calibration_opens_the_gate(self) -> None:
+        state, why = evaluate_gate(self._info(calibration.PROVENANCE_USER))
+        assert state is GateState.READY
+        assert why
+
+    def test_a_missing_calibration_blocks(self) -> None:
+        state, why = evaluate_gate(self._info(calibration.PROVENANCE_MISSING, limits=None))
+        assert state is GateState.BLOCKED
+        assert why
+
+    def test_a_reversed_calibration_blocks_and_says_why(self) -> None:
+        """The uncalibrated default state.  Never surmountable."""
+        reversed_ = Limits(0.0, 1.14, 74.8, 120.0)
+        info = calibration.CalibrationInfo(
+            provenance=calibration.PROVENANCE_INVALID,
+            limits=None,
+            problems=("闭合角 (0.000000 rad) 不大于张开角 (1.140000 rad)，方向与实机相反",),
+        )
+        state, why = evaluate_gate(info)
+        assert state is GateState.BLOCKED
+        assert GateState.READY != state
+        assert "方向与实机相反" in why
+
+    def test_the_factory_file_is_gated_until_acknowledged(self) -> None:
+        info = self._info(calibration.PROVENANCE_FACTORY)
+        assert evaluate_gate(info)[0] is GateState.FACTORY
+        assert evaluate_gate(info, allow_factory=True)[0] is GateState.READY
+
+    def test_an_unsaved_probe_result_is_gated(self) -> None:
+        """Its numbers are fine and the UI should show them; it is not *saved*,
+        so nothing about it survives a restart and motion cannot be planned on it."""
+        info = calibration.in_memory(CLOSED_RAD, OPEN_RAD, 65.21, 120.0)
+        assert info.usable
+        state, why = evaluate_gate(info, allow_factory=True)
+        assert state is GateState.BLOCKED
+        assert "保存" in why
+
+    def test_the_acknowledgement_never_lifts_a_block(self) -> None:
+        """Only the factory case is surmountable.  A blocked one stays blocked
+        however many risk checkboxes the operator ticks."""
+        for provenance in (
+            calibration.PROVENANCE_MISSING,
+            calibration.PROVENANCE_INVALID,
+            calibration.PROVENANCE_MEMORY,
+        ):
+            info = self._info(provenance, limits=None)
+            assert evaluate_gate(info, allow_factory=True)[0] is GateState.BLOCKED
+
+    def test_an_unknown_backend_blocks(self) -> None:
+        """A backend that does not track its calibration is not a backend to
+        drive: an unknown calibration is an unusable one."""
+        assert evaluate_gate(None)[0] is GateState.BLOCKED
+
+
+class TestFrameMismatch:
+    """The one gate check that reads the hardware instead of the file.
+
+    Every other check asks whether the numbers are self-consistent, and they can
+    all pass while the file describes a completely different gripper.  ``LIMITS``
+    here is that file: closed at +1.775959 rad, which is what the console had
+    been loading while the unit's own travel was [-1.436446, -0.109674].
+    """
+
+    def test_a_calibration_from_another_frame_blocks_with_the_numbers(self) -> None:
+        why = frame_mismatch(LIMITS, -1.0)
+
+        assert why
+        assert "-1.00" in why, "the reading the judgement was made from"
+        assert f"{LIMITS.rad_low:.4f}" in why and f"{LIMITS.rad_high:.4f}" in why
+        assert "重新标定" in why, "the operator needs a way out, not just a refusal"
+
+    def test_an_axis_parked_on_a_hard_stop_is_not_a_mismatch(self) -> None:
+        """Why this check needs a tolerance at all: a calibration that stops
+        short of the boundaries — the safer kind, and the one this console
+        recommends — leaves the gripper legitimately outside its own commanded
+        range whenever it rests on a stop."""
+        red_lines = Limits(-0.170982, -1.403653, 65.0229, 80.16)
+
+        assert frame_mismatch(red_lines, -0.109674) == ""  # closed hard stop
+        assert frame_mismatch(red_lines, -1.436446) == ""  # open hard stop
+
+    def test_the_tolerance_is_where_it_says_it_is(self) -> None:
+        """Pinned from both sides, because the number is a compromise: it must
+        clear how a file was written and still catch a different frame."""
+        slack = constants.CALIB_MISMATCH_RAD
+
+        assert frame_mismatch(LIMITS, LIMITS.rad_low - slack) == ""
+        assert frame_mismatch(LIMITS, LIMITS.rad_high + slack) == ""
+        assert frame_mismatch(LIMITS, LIMITS.rad_low - slack - 1e-6)
+        assert frame_mismatch(LIMITS, LIMITS.rad_high + slack + 1e-6)
+
+    def test_a_travel_larger_than_the_offset_is_still_a_mismatch(self) -> None:
+        """The tolerance is in radians, not a fraction of the travel: a file
+        cannot buy room by claiming a longer one."""
+        generous = Limits(1.775959, -0.064279, 65.21, 300.0)
+
+        assert frame_mismatch(generous, -1.0)
+
+    def test_a_reading_that_is_not_a_number_condemns_nothing(self) -> None:
+        """NaN is what a backend reports when it has no answer; it is not
+        evidence about the calibration."""
+        assert frame_mismatch(LIMITS, float("nan")) == ""
+
+    def test_no_reading_leaves_the_gate_exactly_as_it_was(self) -> None:
+        info = CalibrationInfo(
+            provenance=calibration.PROVENANCE_USER, limits=LIMITS, path="/tmp/cal.json"
+        )
+
+        assert evaluate_gate(info)[0] is GateState.READY
+        assert evaluate_gate(info, measured_rad=MID_RAD)[0] is GateState.READY
+        assert evaluate_gate(info, measured_rad=-1.0)[0] is GateState.BLOCKED
+
+    def test_the_factory_acknowledgement_cannot_lift_it(self) -> None:
+        """Only the factory case is surmountable.  A file from another frame is
+        not a risk to accept — it is a fact about the wrong gripper."""
+        info = CalibrationInfo(
+            provenance=calibration.PROVENANCE_FACTORY, limits=LIMITS, path="/tmp/f.json"
+        )
+
+        assert evaluate_gate(info, allow_factory=True, measured_rad=-1.0)[0] is (
+            GateState.BLOCKED
+        )
+
+
+class TestGateInTheLoop:
+    def test_motion_is_refused_until_the_factory_risk_is_acknowledged(self) -> None:
+        bench = Bench(RecordingBackend(info=CalibrationInfo(
+            provenance=calibration.PROVENANCE_FACTORY, limits=LIMITS, path="/tmp/f.json"
+        )))
+        bench.send(cmd.Connect())
+        assert bench.loop.gate is GateState.FACTORY
+
+        bench.send(cmd.Enable())
+        assert not bench.loop.enabled
+        assert not bench.loop.enabled
+        assert "出厂标定" in bench.signals.alerts()[-1]
+
+        bench.loop.set_allow_factory(True)
+        assert bench.tick().motion_state != "ESTOP"
+        assert bench.loop.gate is GateState.READY
+        bench.send(cmd.Enable())
+        assert bench.loop.enabled
+
+    def test_a_move_is_refused_while_the_gate_is_shut(self) -> None:
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.MoveToMm(30.0), count=10)
+        assert bench.loop.motion.state is MotionState.SERVO
+
+        bench.swap_calibration(BROKEN)
+        bench.tick()
+        assert bench.loop.gate is GateState.BLOCKED
+        assert bench.loop.motion.state is MotionState.BLOCKED
+
+        bench.send(cmd.MoveToMm(30.0))
+        assert bench.loop.motion.state is not MotionState.SERVO
+        assert "被拒绝" in bench.signals.alerts()[-1]
+
+    def test_closing_the_gate_withdraws_the_position_command(self) -> None:
+        """A refused frame is not enough: with the limits in doubt, the motor
+        must not go on executing the last command derived from them."""
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.MoveToMm(30.0), count=20)
+        assert bench.loop.motion.state is MotionState.SERVO
+        bench.backend.calls.clear()
+
+        bench.swap_calibration(BROKEN)
+        assert "zero_torque" in bench.backend.names()
+
+    def test_opening_the_gate_takes_up_the_hold(self) -> None:
+        """An enabled DM motor with no frames sent to it is not a safe resting
+        state, so the axis holds its pose the moment it is allowed to."""
+        bench = Bench()
+        bench.bring_up()
+        bench.swap_calibration(BROKEN)
+        bench.send(cmd.Stop())
+        assert bench.loop.motion.state is MotionState.IDLE
+
+        bench.swap_calibration(USER_CAL)
+        assert bench.loop.gate is GateState.READY
+        assert bench.loop.motion.state is MotionState.HOLD
+
+    def test_a_file_from_another_unit_sends_no_frame_at_all(self) -> None:
+        """The reported failure, reproduced end to end.
+
+        A file putting 0 mm at +1.775959 rad, on a unit whose own range is
+        [-1.436446, -0.109674]: readings came out 123-209 mm, each one clamped to
+        the closed end, and what came out of that clamp was 2.95 mm *past* the
+        closed hard stop.  Enabling drove the gripper into it.
+        """
+        backend = RecordingBackend(limits=LIMITS, fresh=False)
+        backend.q_rad = -1.0  # where this unit actually is
+        bench = Bench(backend)
+
+        bench.send(cmd.Connect())
+        assert bench.loop.gate is GateState.READY, "nothing has answered yet"
+        backend.calls.clear()  # from here on, only the enable and what it causes
+
+        backend.fresh = True  # the motor answers the moment it is enabled
+        bench.send(cmd.Enable())
+        bench.tick(5)
+
+        assert bench.loop.gate is GateState.BLOCKED
+        assert "stream_frame" not in backend.names(), "the frame never goes out"
+        assert "zero_torque" in backend.names(), "withdrawn, not merely refused"
+        assert "不属于这台夹爪" in bench.signals.of("gate_state")[-1][1]
+
+    def test_loading_a_file_for_this_unit_opens_the_gate_again(self) -> None:
+        """A judgement about the file in force, not a latch — and the way out is
+        the correct file, so it has to be reachable from the blocked state."""
+        this_unit = Limits(-0.170982, -1.403653, 65.0229, 80.16)
+        backend = RecordingBackend(limits=LIMITS, fresh=False)
+        backend.q_rad = -1.0
+        bench = Bench(backend)
+        bench.send(cmd.Connect())
+        backend.fresh = True
+        bench.send(cmd.Enable())
+        bench.tick(5)
+        assert bench.loop.gate is GateState.BLOCKED
+
+        backend.info = CalibrationInfo(
+            provenance=calibration.PROVENANCE_USER, limits=this_unit, path="/tmp/ok.json"
+        )
+        # The double converts mm with its own copy of the limits, so it has to be
+        # told as well — otherwise the reading it hands back would still be the
+        # one computed from the file now in doubt.
+        backend._limits = this_unit
+        bench.send(cmd.LoadCalibration())
+        bench.tick(5)
+
+        assert bench.loop.gate is GateState.READY
+        sent = [
+            q for name, args in backend.calls if name == "stream_frame" for q in args[:1]
+        ]
+        assert sent, "the axis takes up its hold again"
+        assert all(this_unit.rad_low <= q <= this_unit.rad_high for q in sent)
+        assert abs(sent[-1] - backend.q_rad) < constants.CALIB_MISMATCH_RAD
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# The command queue
+# ═══════════════════════════════════════════════════════════════════════════
+class TestCommandQueue:
+    def test_it_drains_in_order(self) -> None:
+        queue = CommandQueue()
+        queue.put(cmd.Connect())
+        queue.put(cmd.MoveToMm(10.0))
+        assert queue.drain() == [cmd.Connect(), cmd.MoveToMm(10.0)]
+        assert queue.drain() == []
+
+    def test_an_overflow_drops_the_oldest_repeatable_command(self) -> None:
+        """A dropped slider tick costs nothing: the operator's finger has moved
+        on, and the next tick carries the position it moved to."""
+        queue = CommandQueue(maxlen=3)
+        queue.put(cmd.Connect())
+        queue.put(cmd.MoveToMm(1.0))
+        queue.put(cmd.MoveToMm(2.0))
+        assert queue.put(cmd.MoveToMm(3.0)) == 1
+        assert queue.drain() == [cmd.Connect(), cmd.MoveToMm(2.0), cmd.MoveToMm(3.0)]
+
+    def test_an_overflow_never_drops_a_lifecycle_command(self) -> None:
+        """A connect or a fault clear has an effect a later one of the same kind
+        does not supersede — and it is usually what unblocks the backlog."""
+        queue = CommandQueue(maxlen=2)
+        queue.put(cmd.Connect())
+        queue.put(cmd.ClearFault())
+        assert queue.put(cmd.MoveToMm(1.0)) == 1
+        assert queue.drain() == [cmd.Connect(), cmd.ClearFault()]
+
+    def test_the_cap_is_a_cap(self) -> None:
+        cap = 8
+        queue = CommandQueue(maxlen=cap)
+        for i in range(200):
+            queue.put(cmd.MoveToMm(float(i)))
+        assert len(queue) <= cap
+
+    def test_waiting_wakes_on_a_command(self) -> None:
+        queue = CommandQueue()
+        assert not queue.wait_for_work(0.0)
+        queue.put(cmd.Connect())
+        assert queue.wait_for_work(0.0)
+
+    def test_waiting_wakes_on_close(self) -> None:
+        queue = CommandQueue()
+        queue.close()
+        assert queue.wait_for_work(5.0)
+
+
+class TestCommandBursts:
+    def test_fifty_drag_events_start_one_move_to_the_last_position(self) -> None:
+        """Fifty drag events between two ticks describe one position: where the
+        operator's finger ended up."""
+        bench = Bench()
+        bench.bring_up()
+        bench.backend.calls.clear()
+
+        for mm in range(50):
+            bench.loop.submit(cmd.MoveToMm(float(mm), source="slider"))
+        bench.tick()
+
+        assert bench.loop.motion.last_command_mm == 49.0
+        assert bench.loop.motion.state is MotionState.SERVO
+        sent = [c for c in bench.backend.calls if c[0] == "stream_frame"]
+        assert len(sent) == 1, "the burst should have produced exactly one frame"
+
+    def test_a_burst_does_not_lose_a_stop_queued_behind_it(self) -> None:
+        bench = Bench()
+        bench.bring_up()
+        for mm in range(50):
+            bench.loop.submit(cmd.MoveToMm(float(mm), source="slider"))
+        bench.loop.submit(cmd.Stop())
+        bench.tick()
+        assert bench.loop.motion.state is MotionState.HOLD
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# The tick
+# ═══════════════════════════════════════════════════════════════════════════
+class TestTick:
+    def test_telemetry_is_published_at_the_publish_rate(self) -> None:
+        bench = Bench()
+        bench.bring_up()
+        bench.signals.calls.clear()
+        bench.tick(constants.CTRL_HZ)  # one second of control ticks
+        published = bench.signals.of("telemetry")
+        assert len(published) == pytest.approx(constants.TELEMETRY_HZ, abs=2)
+
+    def test_the_published_position_follows_the_backend(self) -> None:
+        """This is what makes the slider track the jaws while they move: the
+        number the widget draws is the one the backend just reported."""
+        bench = Bench()
+        bench.bring_up()
+        assert bench.frame().position_mm == pytest.approx(60.0, abs=1e-6)
+
+        bench.backend.q_rad = LIMITS.to_rad(12.5)
+        assert bench.frame().position_mm == pytest.approx(12.5, abs=1e-6)
+
+    def test_the_motion_label_names_the_probe_while_one_is_running(self) -> None:
+        """A status line reading IDLE while the jaws are being driven into a
+        hard stop would be worse than useless."""
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.StartGuidedCalibration())
+        assert bench.frame().motion_state == GuidedPhase.OPEN_PROBE.value
+
+    def test_it_starts_disconnected(self) -> None:
+        bench = Bench()
+        frame = bench.tick()
+        assert not bench.loop.connected
+        assert not frame.enabled
+        assert frame.motion_state == MotionState.IDLE.value
+
+    def test_connecting_loads_a_calibration_explicitly(self) -> None:
+        """Nothing may leave the choice to the SDK: its fallback to the factory
+        file is silent, and a silent fallback is how mm readings go wrong."""
+        bench = Bench()
+        bench.send(cmd.Connect())
+        assert ("load_calibration", (None,)) in bench.backend.calls
+        assert bench.loop.gate is GateState.READY
+
+    def test_an_unusable_calibration_is_reported_loudly(self) -> None:
+        bench = Bench(RecordingBackend(info=CalibrationInfo(
+            provenance=calibration.PROVENANCE_INVALID,
+            limits=None,
+            problems=("缺少必需字段: rad_to_mm",),
+        )))
+        bench.send(cmd.Connect())
+        assert bench.loop.gate is GateState.BLOCKED
+        assert "缺少必需字段" in bench.signals.alerts()[-1]
+
+    def test_enabling_holds_where_the_jaws_are(self) -> None:
+        bench = Bench()
+        bench.bring_up()
+        assert bench.loop.motion.state is MotionState.HOLD
+        assert bench.frame().cmd_mm == pytest.approx(60.0, abs=1e-6)
+
+    def test_a_failing_enable_reports_the_fault_it_actually_is(self) -> None:
+        """“欠压” and “使能失败” call for completely different actions, so the
+        code has to survive the trip out."""
+        clock = FakeClock()
+        backend = SimBackend(clock=clock, uv=True)
+        signals = Recorder()
+        loop = WorkerLoop(backend, signals, clock=clock, sleep=lambda s: None, watchdog_s=None)
+        loop.set_allow_factory(True)
+        loop.submit(cmd.Connect())
+        loop.tick_once(constants.CTRL_DT)
+
+        loop.submit(cmd.Enable())
+        loop.tick_once(constants.CTRL_DT)
+
+        code, message, hint = signals.first("fault")
+        assert code == constants.ERROR_UV
+        assert message == constants.describe_error(constants.ERROR_UV)
+        assert hint == constants.FAULT_HINTS[constants.ERROR_UV]
+        assert not loop.enabled
+
+    def test_link_death_refuses_motion(self) -> None:
+        bench = Bench(RecordingBackend(fresh=False))
+        bench.bring_up()
+        bench.send(cmd.MoveToMm(30.0))
+        bench.clock.advance(constants.LINK_STALE_MS / 1000.0 + 0.01)
+        bench.send(cmd.MoveToMm(30.0))
+        assert "链路已断" in bench.signals.alerts()[-1]
+
+    def test_a_quiet_link_while_disabled_is_not_a_fault(self) -> None:
+        """Both backends' poll() returns False whenever the motor is not enabled,
+        so a console that read silence as death would declare the link dead the
+        moment it disabled the motor and refuse to enable it again."""
+        bench = Bench(RecordingBackend(fresh=False))
+        bench.send(cmd.Connect())
+        assert bench.tick().stale_ms == 0.0
+        bench.send(cmd.Enable())
+        assert bench.loop.enabled
+        assert bench.tick().stale_ms < constants.LINK_STALE_MS
+
+    def test_a_motor_fault_stops_the_axis_and_latches_the_gate(self) -> None:
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.MoveToMm(30.0), count=10)
+        bench.backend.calls.clear()
+
+        bench.backend.error_code = constants.ERROR_OC
+        bench.tick()
+
+        assert bench.loop.motion.state is MotionState.FAULT
+        assert "zero_torque" in bench.backend.names()
+        code, _message, hint = bench.signals.first("fault")
+        assert code == constants.ERROR_OC
+        assert hint == constants.FAULT_HINTS[constants.ERROR_OC]
+
+    def test_a_command_that_raises_is_reported_and_not_fatal(self) -> None:
+        bench = Bench(RecordingBackend(fail=("load_calibration",)))
+        bench.send(cmd.Connect())
+        assert "命令失败" in bench.signals.alerts()[-1]
+
+    def test_the_watchdog_stops_the_session_when_the_gui_goes_away(self) -> None:
+        """The console's only protection against a hung GUI, and it fails in the
+        safe direction: no heartbeat means no operator."""
+        bench = Bench(watchdog_s=1.0)
+        bench.bring_up()
+        bench.tick()
+        assert bench.loop.enabled
+
+        bench.clock.advance(1.5)
+        bench.tick()
+        assert not bench.loop.enabled
+        assert bench.loop.stopping
+        assert bench.signals.of("alert")[-1][0] == "fatal"
+        assert "心跳" in bench.signals.alerts()[-1]
+
+    def test_a_slow_command_is_not_mistaken_for_a_dead_gui(self) -> None:
+        """The loop spends the whole of a blocking SDK call inside it — the SDK's
+        own ``enable()`` retries for up to ten seconds — while the GUI keeps
+        queueing heartbeats that have no chance of being read until it returns.
+
+        The GUI is demonstrably alive throughout, which is why the heartbeat is
+        stamped where it arrives and not where it is applied.  Get that wrong and
+        the console answers a slow enable by cutting the motor.
+        """
+        bench = Bench(watchdog_s=1.0)
+        backend = bench.backend
+        enable = backend.enable
+
+        def slow_enable() -> None:
+            bench.clock.advance(5.0)
+            for _ in range(10):  # the GUI's 500 ms timer, still firing
+                bench.loop.submit(cmd.Heartbeat())
+            enable()
+
+        backend.enable = slow_enable  # type: ignore[method-assign]
+
+        bench.send(cmd.Connect())
+        bench.send(cmd.Enable())
+
+        assert bench.loop.enabled
+        assert not bench.loop.stopping
+
+    def test_a_heartbeat_keeps_it_alive(self) -> None:
+        bench = Bench(watchdog_s=1.0)
+        bench.bring_up()
+        for _ in range(20):
+            bench.clock.advance(0.25)
+            bench.send(cmd.Heartbeat())
+        assert bench.loop.enabled
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 使能 before the axis has answered
+# ═══════════════════════════════════════════════════════════════════════════
+class TestEnablingBeforeTheAxisHasAnswered:
+    """按使能 used to drive the jaws to the closed stop.
+
+    ``get_state().position_rad`` is 0.0 until a status frame arrives, and
+    ``to_mm(0.0)`` is a place *inside* the travel, so the console converted an
+    angle the motor had never sent into a plausible-looking position and then
+    held it — on a real gripper, 0 mm after the clamp.  The same number is what
+    every later hold would have been frozen at, so the property is worth
+    pinning in the loop rather than in the widget that drew it.
+    """
+
+    def silent(self) -> Bench:
+        """A bench whose axis answers nothing — no frame ever arrives."""
+        bench = Bench(RecordingBackend(fresh=False))
+        bench.bring_up()
+        return bench
+
+    def sent_gains(self, bench: Bench) -> list[tuple[float, float, float]]:
+        return [
+            (kp, kd, tau)
+            for _q, kp, kd, _dq, tau, _probe in [
+                c[1] for c in bench.backend.calls if c[0] == "stream_frame"
+            ]
+        ]
+
+    def test_it_does_not_hold_a_position_it_cannot_measure(self) -> None:
+        bench = self.silent()
+        assert bench.loop.enabled
+        assert bench.loop.motion.state is MotionState.RELEASE
+
+    def test_no_frame_it_sends_carries_a_stiffness(self) -> None:
+        """Zero gain is the only command that is not derived from a position:
+        with kp and kd both zero a stray q is inert, which is what makes this
+        state safe to sit in while the link wakes up."""
+        bench = self.silent()
+        gains = self.sent_gains(bench)
+        assert gains, "使能后必须继续发帧，电机需要它才保持使能"
+        assert all(kp == 0.0 and kd == 0.0 and tau == 0.0 for kp, kd, tau in gains)
+
+    def test_the_operator_is_told_why_the_jaws_are_limp(self) -> None:
+        bench = self.silent()
+        assert any("尚未读到位置" in text for text in bench.signals.logs())
+
+    def test_the_first_frame_turns_that_into_a_hold_where_the_jaws_are(self) -> None:
+        """The other half: the axis answers, and the console holds *that* —
+        not the target it would have derived a moment earlier."""
+        bench = self.silent()
+        bench.backend.fresh = True
+        bench.backend.q_rad = LIMITS.to_rad(37.5)
+        bench.frame(2)
+        assert bench.loop.motion.state is MotionState.HOLD
+        assert bench.loop.last_frame.position_mm == pytest.approx(37.5, abs=1e-6)
+        assert bench.loop.last_frame.cmd_mm == pytest.approx(37.5, abs=1e-6)
+        assert any("已读到位置 37.5 mm" in text for text in bench.signals.logs())
+
+    def test_motion_is_refused_until_then(self) -> None:
+        bench = self.silent()
+        bench.send(cmd.MoveToMm(30.0))
+        assert "尚未读到位置" in bench.signals.alerts()[-1]
+        assert not [c for c in bench.backend.calls if c[0] == "stream_frame" and c[1][1]]
+
+    def test_a_position_nobody_has_measured_is_not_published(self) -> None:
+        """``None`` and not ``0.0``: zero is the closed stop, and a GUI drawing
+        it would be drawing a place the jaws have never been."""
+        bench = self.silent()
+        assert bench.loop.last_frame.position_mm is None
+        assert bench.loop.last_frame.as_dict()["position_mm"] is None
+
+    def test_the_first_frame_ever_published_claims_no_position(self) -> None:
+        """The frame the GUI is built on, before the loop has even connected —
+        the same rule, at the moment there is nothing to measure at all."""
+        assert Bench().loop.last_frame.position_mm is None
+
+    def test_the_awaiting_state_does_not_outlive_the_enable_it_belonged_to(self) -> None:
+        """Disabling and enabling again re-measures from scratch: a stale flag
+        would hold the *new* session to a position the old one read."""
+        bench = self.silent()
+        assert bench.loop._awaiting_position
+        bench.send(cmd.Disable())
+        assert not bench.loop._awaiting_position
+
+    def test_a_stop_before_a_measurement_does_not_invent_one(self) -> None:
+        bench = self.silent()
+        bench.send(cmd.Stop())
+        assert bench.loop.motion.state is MotionState.RELEASE
+        assert all(kp == 0.0 for kp, _kd, _tau in self.sent_gains(bench))
+
+    def test_leaving_zero_gravity_before_a_measurement_does_not_invent_one(self) -> None:
+        bench = self.silent()
+        bench.send(cmd.SetZeroGravity(True))
+        assert bench.loop.motion.state is MotionState.ZERO_G
+        bench.send(cmd.SetZeroGravity(False))
+        assert bench.loop.motion.state is MotionState.RELEASE
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# The CAN interface, prepared before the bus is opened
+# ═══════════════════════════════════════════════════════════════════════════
+class TestTheInterfaceIsPreparedBeforeConnecting:
+    """连接 does this by itself now, and the property that makes that safe is
+    that it is never the reason a connection fails."""
+
+    def bench(self, link: FakeLink | None = None) -> Bench:
+        bench = Bench(can_link=link if link is not None else FakeLink())
+        bench.loop._can_link.backend = bench.backend
+        return bench
+
+    def test_the_interface_is_raised_before_the_sdk_opens_the_bus(self) -> None:
+        """Order is the whole point: the SDK cannot open an interface that is
+        down, so a bring-up that ran afterwards would be useless."""
+        bench = self.bench()
+        bench.send(cmd.Connect())
+        assert bench.loop._can_link.calls == 1
+        assert bench.loop._can_link.connected_when_asked is False
+        assert "connect" in bench.backend.names()
+
+    def test_a_connection_that_is_refused_asks_again_next_time(self) -> None:
+        """It is per connect and not one-shot: an adapter unplugged at the first
+        press is normally plugged back in for the second."""
+        bench = self.bench()
+        bench.send(cmd.Connect())
+        bench.send(cmd.Disconnect())
+        bench.send(cmd.Connect())
+        assert bench.loop._can_link.calls == 2
+
+    def test_the_operator_is_told_an_authorization_may_be_coming(self) -> None:
+        """A password dialog appearing out of nowhere is alarming; a status line
+        naming the interface first is not."""
+        bench = self.bench()
+        bench.send(cmd.Connect())
+        busy = [text for _flag, text in bench.signals.of("busy")]
+        assert any("can0" in text and "授权" in text for text in busy), busy
+
+    @pytest.mark.parametrize(
+        "problem",
+        [
+            LINK_MISSING,
+            LINK_DENIED,
+            LINK_FAILED,
+        ],
+    )
+    def test_a_problem_with_the_interface_does_not_stop_the_connection(
+        self, problem: str
+    ) -> None:
+        """The interface may legitimately be up already — managed by hand, by a
+        unit file, or a virtual bus — and only the open attempt knows whether
+        the link works.  A refused dialog must not take the console down with
+        it, and it must not go unmentioned either."""
+        link = FakeLink(LinkOutcome(problem, "can0 有点问题：这是给操作员看的说明"))
+        bench = self.bench(link)
+
+        bench.send(cmd.Connect())
+
+        assert bench.loop.connected
+        assert "connect" in bench.backend.names()
+        assert "这是给操作员看的说明" in bench.signals.alerts()[-1]
+
+    @pytest.mark.parametrize("state", [LINK_OK, LINK_FD])
+    def test_nothing_that_might_still_work_interrupts_anybody(self, state: str) -> None:
+        """The common case — the operator raised the interface themselves — and
+        an FD bus, which may connect perfectly well.  Either read as a problem
+        would turn the banner into something to ignore."""
+        link = FakeLink(LinkOutcome(state, f"can0 的状态是「{state}」，未改动"))
+        bench = self.bench(link)
+
+        bench.send(cmd.Connect())
+
+        assert bench.signals.alerts() == []
+        logged = [text for level, text in bench.signals.of("log") if level == "info"]
+        assert any("未改动" in text for text in logged), logged
+
+    def test_the_bring_up_is_logged_at_the_level_it_deserves(self) -> None:
+        """A privileged change that was just made is worth a line in the file
+        even though it worked."""
+        link = FakeLink(LinkOutcome(LINK_CONFIGURED, "can0 原为「未 up」，已配置"))
+        bench = self.bench(link)
+
+        bench.send(cmd.Connect())
+
+        levels = {level for level, text in bench.signals.of("log") if "已配置" in text}
+        assert levels == {"info"}, "working is not a warning"
+
+    def test_an_ensure_that_raises_does_not_reach_the_connection(self) -> None:
+        """Whatever this helper does, a failure of *it* is not a failure of the
+        link.  The bug it is guarding against is a traceback out of a subprocess
+        helper being read as "cannot connect"."""
+        link = FakeLink(raises=RuntimeError("pkexec 不见了"))
+        bench = self.bench(link)
+
+        bench.send(cmd.Connect())
+
+        assert bench.loop.connected
+        assert any("仍会尝试连接" in text for text in bench.signals.alerts())
+
+    def test_the_simulator_asks_for_nothing(self) -> None:
+        """No interface exists behind it, and a password dialog for a bus that
+        is not there would be theatre."""
+        bench = Bench()
+        bench.send(cmd.Connect())
+        busy = [text for _flag, text in bench.signals.of("busy")]
+        assert not any("授权" in text for text in busy), busy
+        assert bench.loop.connected
+
+    def test_a_password_dialog_may_outlast_the_watchdog(self) -> None:
+        """The loop is blocked while the operator reads the dialog, and from
+        inside that looks exactly like a dead GUI.
+
+        What saves it is that the GUI is in fact alive and still queueing its
+        heartbeats; they are drained on the next tick, before the watchdog is
+        serviced again.  The ordering is invisible, so it is pinned here: the
+        cost of getting it wrong is that the console kills the session the
+        moment the operator authorizes it.
+        """
+        clock = FakeClock()
+        signals = Recorder()
+        backend = RecordingBackend()
+        link = FakeLink()
+        loop = WorkerLoop(
+            backend,
+            signals,
+            clock=clock,
+            sleep=lambda seconds: None,
+            can_link=link,
+        )
+
+        def while_the_dialog_is_open() -> None:
+            for _ in range(60):  # 30 s of reading it, at the GUI's 500 ms rate
+                clock.advance(constants.HEARTBEAT_INTERVAL_MS / 1000.0)
+                loop.submit(cmd.Heartbeat())
+
+        link.on_ensure = while_the_dialog_is_open
+        loop.submit(cmd.Connect())
+        loop.tick_once(constants.CTRL_DT)   # the connect, and the dialog
+        clock.advance(constants.CTRL_DT)
+        loop.tick_once(constants.CTRL_DT)   # the heartbeats, then the watchdog
+
+        assert loop.connected
+        assert not loop.stopping
+        assert not any("心跳" in text for text in signals.alerts())
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Stopping
+# ═══════════════════════════════════════════════════════════════════════════
+class TestStopping:
+    def test_stop_holds_with_no_torque(self) -> None:
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.MoveToMm(30.0), count=10)
+        bench.send(cmd.Stop())
+        assert bench.loop.motion.state is MotionState.HOLD
+        _q, _kp, _kd, _dq, tau, _u = [
+            c[1] for c in bench.backend.calls if c[0] == "stream_frame"
+        ][-1]
+        assert tau == 0.0
+
+    def test_release_goes_limp_and_stays_enabled(self) -> None:
+        bench = Bench()
+        bench.bring_up()
+        frame = bench.send(cmd.Release())
+        assert bench.loop.motion.state is MotionState.RELEASE
+        assert bench.loop.enabled
+        assert frame.cmd_mm is not None  # a frame is still being sent
+        _q, kp, kd, _dq, tau, _u = [
+            c[1] for c in bench.backend.calls if c[0] == "stream_frame"
+        ][-1]
+        assert (kp, kd, tau) == (0.0, 0.0, 0.0)
+
+    def test_release_is_allowed_while_the_gate_is_shut(self) -> None:
+        """Making the jaws limp is a safety action, not something to gate."""
+        bench = Bench()
+        bench.bring_up()
+        bench.loop._info = CalibrationInfo(
+            provenance=calibration.PROVENANCE_INVALID, limits=None, problems=("坏了",)
+        )
+        bench.send(cmd.Release())
+        assert bench.loop.motion.state is MotionState.RELEASE
+
+    def test_the_estop_zero_torques_and_disables(self) -> None:
+        bench = Bench()
+        bench.bring_up()
+        bench.backend.calls.clear()
+        bench.loop.estop("测试")
+        bench.tick(2)
+        commands = [name for name in bench.backend.names() if name != "poll"]
+        assert commands[:2] == ["zero_torque", "disable"]
+        assert not bench.loop.enabled
+        assert bench.frame().motion_state == "ESTOP"
+
+    def test_the_estop_latches_against_every_motion_command(self) -> None:
+        """A latch, not a stop: the operator's finger may already be on the way
+        to another button, and the answer to that must not be to move."""
+        bench = Bench()
+        bench.bring_up()
+        bench.loop.estop("测试")
+        bench.tick()
+        bench.backend.calls.clear()
+
+        for command in (cmd.MoveToMm(10.0), cmd.Open(), cmd.Close(), cmd.Grasp()):
+            bench.send(command)
+        assert not [c for c in bench.backend.calls if c[0] == "stream_frame"]
+        assert all("急停" in text for text in bench.signals.alerts()[-4:])
+
+    def test_resetting_the_estop_does_not_re_enable(self) -> None:
+        """Releasing the latch and energising the motor are two different
+        decisions, and the operator has only made the first one."""
+        bench = Bench()
+        bench.bring_up()
+        bench.loop.estop("测试")
+        bench.tick()
+        bench.send(cmd.ResetEStop())
+        assert not bench.loop.estopped
+        assert not bench.loop.enabled
+
+    def test_the_estop_cannot_be_reset_onto_a_shut_gate(self) -> None:
+        """Otherwise releasing the latch would undo the reason it latched."""
+        bench = Bench()
+        bench.bring_up()
+        bench.loop.estop("测试")
+        bench.tick()
+        bench.loop._info = CalibrationInfo(
+            provenance=calibration.PROVENANCE_INVALID, limits=None, problems=("坏了",)
+        )
+        bench.send(cmd.ResetEStop())
+        assert bench.loop.estopped
+        assert "无法复位急停" in bench.signals.alerts()[-1]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Calibration through the worker
+# ═══════════════════════════════════════════════════════════════════════════
+class TestCalibrationCommands:
+    def test_a_probe_needs_an_enabled_motor(self) -> None:
+        bench = Bench()
+        bench.send(cmd.Connect())
+        bench.loop.set_allow_factory(True)
+        bench.tick()
+        bench.send(cmd.StartGuidedCalibration())
+        assert bench.loop.probe is None
+        assert "使能" in bench.signals.alerts()[-1]
+
+    def test_the_probe_drives_the_axis_with_probe_frame(self) -> None:
+        """The one motion in the application allowed before a calibration
+        exists — it is what produces one."""
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.StartGuidedCalibration())
+        bench.backend.calls.clear()
+        bench.tick()
+        frames = [c[1] for c in bench.backend.calls if c[0] == "stream_frame"]
+        assert frames and frames[-1][-1] is True
+
+    def test_it_is_refused_when_the_estop_is_latched(self) -> None:
+        bench = Bench()
+        bench.bring_up()
+        bench.loop.estop("测试")
+        bench.tick()
+        bench.send(cmd.StartGuidedCalibration())
+        assert "急停" in bench.signals.alerts()[-1]
+
+    def test_stop_cancels_an_active_probe(self) -> None:
+        """A probe that goes on pressing a hard stop after the operator has
+        pressed stop is not a behaviour anyone would defend."""
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.StartGuidedCalibration())
+        bench.tick()
+        assert bench.loop.probe is not None
+
+        bench.send(cmd.Stop())
+        assert bench.loop.probe is None
+        assert any("中断了正在进行的标定" in text for _l, text in bench.signals.of("log"))
+        # The samples are discarded, and the operator has to be told: a cancel
+        # that only reached the log would look like a calibration that worked.
+        assert "标定未完成" in bench.signals.alerts()[-1]
+
+    def test_release_also_cancels_an_active_probe(self) -> None:
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.StartGuidedCalibration())
+        bench.tick()
+        bench.send(cmd.Release())
+        assert bench.loop.probe is None
+
+    def test_a_second_probe_is_refused_while_one_runs(self) -> None:
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.StartGuidedCalibration())
+        bench.tick()
+        first = bench.loop.probe
+        bench.send(cmd.StartGuidedCalibration())
+        assert bench.loop.probe is first
+
+    def test_confirm_reaches_the_guided_probe(self) -> None:
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.StartGuidedCalibration())
+        bench.tick()
+        bench.send(cmd.ConfirmProbeLimit())
+        assert bench.loop.probe.open_rad is not None
+
+    def test_the_manual_probe_runs_limp_and_stops_on_command(self) -> None:
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.StartManualCalibration(60.0))
+        bench.tick()
+        assert bench.loop.probe is not None
+        _q, kp, kd, _dq, tau, _u = [
+            c[1] for c in bench.backend.calls if c[0] == "stream_frame"
+        ][-1]
+        assert (kp, kd, tau) == (0.0, 0.0, 0.0)
+
+        bench.send(cmd.StopManualRecording())
+        assert bench.loop.probe.phase is ManualPhase.SETTLE
+        assert "提前结束" in bench.signals.of("log")[-1][1]
+
+    def test_stop_manual_is_refused_without_a_manual_probe(self) -> None:
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.StopManualRecording())
+        assert "没有正在进行的手动记录" in bench.signals.alerts()[-1]
+
+    def test_a_finished_probe_is_adopted_but_still_gated(self) -> None:
+        """An in-memory result is usable — the UI should show its numbers — but
+        unsaved, so nothing about it survives a restart."""
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.StartManualCalibration(1.0))
+        bench.tick()
+        assert bench.loop.probe is not None
+
+        bench.drive_to(0.0)
+        bench.drive_to(120.0)
+        bench.run_until_probe_finishes()
+
+        assert "set_calibration_memory" in bench.backend.names()
+        assert bench.loop.info.provenance == calibration.PROVENANCE_MEMORY
+        assert bench.loop.gate is GateState.BLOCKED
+        # Gated, and held all the same: an unsaved result is not a set of limits
+        # anyone has vetted, so no command in *millimetres* is derived from it —
+        # but the axis is not abandoned either.  The hold is at the angle the
+        # encoder reported, which needs no limits at all.  See
+        # ``test_the_axis_is_handed_back_after_a_probe``.
+        assert bench.loop.motion.state is MotionState.HOLD_RAD
+        assert "尚未保存" in bench.signals.alerts()[-1]
+
+    def test_a_probe_that_captured_no_range_is_reported_not_adopted(self) -> None:
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.StartManualCalibration(0.2))
+        bench.run_until_probe_finishes()
+
+        assert "set_calibration_memory" not in bench.backend.names()
+        assert bench.loop.info.provenance == calibration.PROVENANCE_USER
+        assert "标定未完成" in bench.signals.alerts()[-1]
+
+    def test_saving_an_adopted_probe_opens_the_gate(self) -> None:
+        bench = Bench()
+        bench.bring_up()
+        bench.swap_calibration(calibration.in_memory(CLOSED_RAD, OPEN_RAD, 65.21, 120.0))
+        assert bench.loop.gate is GateState.BLOCKED
+
+        # Saving is what promotes it: the file is the only thing that survives.
+        bench.swap_calibration(USER_CAL)
+        assert bench.loop.gate is GateState.READY
+        assert bench.loop.motion.state is MotionState.HOLD
+
+
+class TestTheAxisIsHandedBackAfterAProbe:
+    """An enabled motor must keep being told what to do, and a probe is where
+    it is easiest to stop telling it.
+
+    The last thing a probe does is press a hard stop at the rated force, so the
+    axe's own release is a real event — and if the loop drops to IDLE at that
+    moment it sends no frame at all, which leaves the drive acting on whatever
+    it was last given and the fingers free to go wherever the mechanism's springs
+    push them.  On the real gripper that is a pop open and a fault light, right
+    as the operator is looking at the wizard that just said 标定完成.
+    """
+
+    def _finished_manual_probe(self) -> Bench:
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.StartManualCalibration(1.0))
+        bench.tick()
+        bench.drive_to(0.0)
+        bench.drive_to(120.0)
+        bench.run_until_probe_finishes()
+        return bench
+
+    def test_it_holds_the_pose_the_probe_ended_on(self) -> None:
+        bench = self._finished_manual_probe()
+        assert bench.loop.motion.state is MotionState.HOLD_RAD
+
+        # Commanded, not abandoned: one frame per tick, all of them at the angle
+        # the probe ended on, at the move gain and with no feed-forward.
+        ended = bench.backend.q_rad
+        bench.backend.calls.clear()
+        bench.tick(20)
+        frames = [c[1] for c in bench.backend.calls if c[0] == "stream_frame"]
+        assert len(frames) == 20
+        assert all(f[0] == pytest.approx(ended) for f in frames)
+        assert all(f[1] == constants.KP_MOVE for f in frames)
+        assert all(f[4] == 0.0 for f in frames)
+
+    def test_it_does_not_zero_torque_the_axis_on_the_way_out(self) -> None:
+        """The withdrawal this replaced: zero torque once, then silence."""
+        bench = self._finished_manual_probe()
+        bench.backend.calls.clear()
+        bench.tick(20)
+
+        assert "zero_torque" not in bench.backend.names()
+        assert bench.loop.motion.state is MotionState.HOLD_RAD
+
+    def test_the_hold_is_not_a_millimetre_command(self) -> None:
+        """Nothing about it is derived from the unsaved limits, which is what
+        makes it safe to hold through a shut gate.  Published as no command at
+        all, so the UI does not claim a target the operator never set."""
+        bench = self._finished_manual_probe()
+        assert bench.frame().cmd_mm is None
+
+    def test_a_probe_that_never_saw_a_reading_hands_back_a_free_axis(self) -> None:
+        """With no reading there is no pose to hold to, and guessing one is
+        worse than it sounds: the SDK's cached angle is 0.0 rad until a status
+        frame arrives, and 0.0 rad is somewhere inside any real travel — a
+        plausible-looking number the jaws have never been at.  Zero stiffness
+        asks nothing of a position nobody has measured, and it still keeps the
+        frames going, which is what the axis needs to stay under control."""
+        bench = Bench(RecordingBackend(fresh=False))
+        bench.bring_up()
+        bench.swap_calibration(BROKEN)
+        bench.send(cmd.StartGuidedCalibration())
+        bench.run_until_probe_finishes()
+
+        assert bench.loop.motion.state is MotionState.RELEASE
+        bench.backend.calls.clear()
+        bench.tick(3)
+        frames = [c[1] for c in bench.backend.calls if c[0] == "stream_frame"]
+        assert len(frames) == 3, "an enabled axis is still talked to"
+        assert all(f[1] == 0.0 and f[2] == 0.0 and f[4] == 0.0 for f in frames)
+
+    def test_a_guided_probe_against_the_plant_also_ends_held(self) -> None:
+        """The reported flow, end to end: a real guided probe against the
+        simulated mechanism, which presses both stops and stops on one."""
+        clock = FakeClock()
+        bench = Bench(RecordingSim(clock=clock), clock=clock)
+        bench.send(cmd.Connect())
+        bench.loop.set_allow_factory(True)
+        bench.send(cmd.Enable())
+        bench.send(cmd.StartGuidedCalibration())
+        bench.run_until_probe_finishes(timeout_s=40.0)
+
+        assert bench.loop.info.provenance == calibration.PROVENANCE_MEMORY
+        assert bench.loop.gate is GateState.BLOCKED
+        assert bench.loop.motion.state is MotionState.HOLD_RAD
+
+        backend = bench.backend
+        backend.frames.clear()
+        backend.zeroes = 0
+        bench.tick(20)
+        assert len(backend.frames) == 20
+        # One angle, held: the closed limit the probe just recorded, which is
+        # where the guided probe ends.
+        ended = backend.frames[0][0]
+        assert all(f[0] == ended for f in backend.frames)
+        assert ended == pytest.approx(bench.loop.info.limits.rad_high, abs=1e-4)
+        assert all(f[1] == constants.KP_MOVE for f in backend.frames)
+        assert all(f[4] == 0.0 for f in backend.frames)
+        assert backend.zeroes == 0
+
+
+class TestAProbeThatIsMovingNothing:
+    """A probe records a limit when the angle it reads stops changing.
+
+    That is the same signal for "the jaws are against a stop", for "no frame is
+    reaching the motor", and for "the feedback has gone silent" — and when it is
+    one of the last two, the probe records *both* limits wherever the jaws
+    happen to be sitting and reports a degenerate travel.  A real run did
+    exactly that and the operator was told "行程异常: 闭合 -1.370650 rad 未大于
+    张开 -1.370650 rad" by a probe that had not moved the axis at all; nothing in
+    that message distinguished it from a gripper whose two stops coincide.
+
+    Only the caller can tell them apart, because only the caller knows what the
+    bus did.  These tests pin all three to being told apart.
+    """
+
+    def test_refused_frames_stop_the_probe_instead_of_inventing_a_limit(self) -> None:
+        bench = Bench()
+        bench.bring_up()
+        # The motor drops out from under the loop: the worker still believes it
+        # is enabled, and every frame is refused at the backend from here on.
+        bench.backend.enabled = False
+
+        bench.send(cmd.StartGuidedCalibration())
+        bench.run_until_probe_finishes()
+
+        assert bench.loop.probe is None
+        assert "set_calibration_memory" not in bench.backend.names()
+        alert = bench.signals.alerts()[-1]
+        assert "标定未完成" in alert
+        assert "位置帧" in alert, alert
+        assert "行程异常" not in alert
+
+    def test_a_link_that_goes_quiet_stops_the_probe(self) -> None:
+        """The case a refused-frame check cannot see: the frames leave, the
+        answers stop coming, and the probe steers by a reading that is frozen.
+        """
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.StartGuidedCalibration())
+
+        # Let the open phase finish: with the axis never moving, the stall
+        # detector records the open limit one stall window in.
+        deadline = int(3.0 / constants.CTRL_DT)
+        for _ in range(deadline):
+            probe = bench.loop.probe
+            if probe is None or probe.open_rad is not None:
+                break
+            bench.tick()
+        probe = bench.loop.probe
+        assert probe is not None and probe.open_rad is not None, "张开极限没有被记录"
+
+        bench.backend.fresh = False
+        bench.run_until_probe_finishes()
+
+        assert "set_calibration_memory" not in bench.backend.names()
+        alert = bench.signals.alerts()[-1]
+        assert "标定未完成" in alert and "状态帧" in alert, alert
+        assert "行程异常" not in alert
+
+    def test_a_failed_probe_still_logs_which_limit_it_decided_and_why(self) -> None:
+        """On a failed probe these lines are the only account of where it got
+        to.  They used to be logged on success only, which is exactly backwards:
+        the operator reading them is the one whose calibration did not finish.
+        """
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.StartGuidedCalibration())
+        for _ in range(int(3.0 / constants.CTRL_DT)):
+            probe = bench.loop.probe
+            if probe is None or probe.open_rad is not None:
+                break
+            bench.tick()
+        assert bench.loop.probe is not None
+
+        bench.backend.fresh = False
+        bench.run_until_probe_finishes()
+
+        lines = [text for _l, text in bench.signals.of("log")]
+        assert any("张开极限" in text for text in lines), lines
+        assert any("步未移动" in text or "最大步数" in text for text in lines), lines
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# The thread
+# ═══════════════════════════════════════════════════════════════════════════
+class TestTheThread:
+    def test_the_backend_is_claimed_by_the_thread_that_drives_it(self) -> None:
+        """The SDK is not thread-safe, and this turns the race into a failure
+        that reproduces every time instead of one that interleaves frames."""
+        bench = Bench()
+        bench.tick()
+        assert bench.backend.owner_tid == threading.get_ident()
+
+        errors: list[BaseException] = []
+
+        def intrude() -> None:
+            try:
+                bench.backend.read()
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        thread = threading.Thread(target=intrude)
+        thread.start()
+        thread.join(2.0)
+        assert len(errors) == 1
+        assert isinstance(errors[0], RuntimeError)
+        assert "two threads" in str(errors[0])
+
+    def test_shutdown_returns_and_the_teardown_order_is_safe(self) -> None:
+        """The order is the whole point: a disabled DM motor coasts, and the
+        frames still in flight must not be a position command when that
+        happens."""
+        backend = RecordingBackend()
+        worker = GripperWorker(backend, watchdog_s=None)
+        thread = threading.Thread(target=worker.run)
+        thread.start()
+
+        worker.submit(cmd.Connect())
+        worker.set_allow_factory(True)
+        worker.submit(cmd.Enable())
+        deadline = time.monotonic() + 2.0
+        while not worker.enabled and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert worker.enabled
+
+        backend.calls.clear()
+        started = time.monotonic()
+        assert worker.shutdown(timeout_ms=2000)
+        assert time.monotonic() - started < 2.0
+
+        thread.join(2.0)
+        assert not thread.is_alive()
+
+        names = backend.names()
+        assert "zero_torque" in names and "disable" in names and "disconnect" in names
+        assert names.index("zero_torque") < names.index("disable") < names.index("disconnect")
+        assert not worker.connected
+
+    def test_the_teardown_runs_once_however_often_it_is_called(self) -> None:
+        backend = RecordingBackend()
+        worker = GripperWorker(backend, watchdog_s=None)
+        worker.loop._connected = True
+        worker.loop._enabled = True
+        worker.teardown()
+        worker.teardown()
+        assert backend.names().count("disconnect") == 1
+
+    def test_an_exception_in_a_tick_does_not_abort_the_process(self) -> None:
+        """An exception escaping QThread.run aborts the process, which is
+        exactly what the teardown exists to prevent: the motor would be left
+        enabled with the last frame it was given."""
+        backend = RecordingBackend()
+        signals = Recorder()
+        loop = WorkerLoop(backend, signals, watchdog_s=None)
+        loop.set_allow_factory(True)
+
+        # The setup runs through the queue rather than through tick_once: the
+        # backend binds itself to the thread that first touches it (that is what
+        # keeps the SDK single-threaded), so a setup tick here would poison it
+        # for the thread about to run the loop.
+        loop.submit(cmd.Connect())
+        loop.submit(cmd.Enable())
+        thread = threading.Thread(target=loop.run)
+        thread.start()
+        assert _wait_for(lambda: loop.enabled, timeout_s=2.0), "the motor never enabled"
+
+        # Armed only now, and only for the frames the loop sends after this
+        # point: enabling itself succeeded, so what fails is a hold frame.
+        backend.fail.add("stream_frame")
+        backend.calls.clear()
+        thread.join(5.0)
+
+        assert not thread.is_alive(), "the loop should have given up and exited"
+        levels = [level for level, _text in signals.of("log")]
+        assert "fatal" in levels
+        assert any("tick 出错" in text for text in (t for _l, t in signals.of("log")))
+        assert not loop.enabled
+        # The teardown ran, and in the order that leaves the motor harmless: a
+        # disabled DM motor coasts, so the last frame in flight had to be zero
+        # torque before the disable went out.
+        names = backend.names()
+        assert names[-1] == "disconnect"
+        assert names.index("zero_torque") < names.index("disable") < names.index("disconnect")
+
+    def test_the_loop_ends_promptly_when_asked(self) -> None:
+        backend = RecordingBackend()
+        loop = WorkerLoop(backend, Recorder(), clock=time.monotonic, watchdog_s=None)
+        thread = threading.Thread(target=loop.run)
+        thread.start()
+        loop.shutdown()
+        thread.join(1.0)
+        assert not thread.is_alive()
+
+    def test_the_worker_exposes_everything_the_gui_needs_to_paint(self) -> None:
+        """The first paint happens before the loop has ticked, so these have to
+        answer without one."""
+        worker = GripperWorker(RecordingBackend(), watchdog_s=None)
+        assert worker.gate is None
+        assert worker.info is None
+        assert not worker.connected
+        assert not worker.enabled
+        assert not worker.estopped
+        assert worker.loop.last_frame.motion_state == MotionState.IDLE.value
+
+
+class TestAReadingThatHasGoneStale:
+    """The loop marks the *reading*, not the link.
+
+    ``LINK_STALE_MS`` is where the axis is treated as gone; a link that misses a
+    few frames is not that.  But the position in hand is a cache — the SDK's
+    ``get_state`` returns whatever the last poll brought — and a cache accumulates
+    lost motion at the reference speed while the jaws are travelling perfectly
+    well.  The state machine cannot tell: the frozen frame reports no velocity
+    either, so even the veto that separates "lagging" from "held" reads it as a
+    standstill.  So the loop, which knows when the last frame arrived, tells it.
+    """
+
+    def test_a_few_missed_frames_are_not_an_obstruction(self) -> None:
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.SetSpeed(speed_mm_s=20.0))
+        bench.send(cmd.MoveToMm(30.0), count=2)
+        assert bench.loop.motion.state is MotionState.SERVO
+
+        # The frames stop; what the loop is reading does not change.  A hundred
+        # milliseconds of that is well short of a dead link, and long enough for
+        # a frozen position to have "lost" a millimetre at this speed.
+        bench.backend.fresh = False
+        bench.tick(30)
+
+        assert "堵转" not in bench.loop.motion.note
+        assert bench.loop.motion.state is MotionState.SERVO

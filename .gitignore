@@ -1,27 +1,26 @@
-# Provisional: replace once the desktop stack is chosen
-# (Electron, Tauri, Qt, .NET, ...).
+# Python desktop application (PyQt5), packaged with PyInstaller.
+
+# Byte-compiled files and packaging metadata
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Toolchain caches and dependencies
+.venv/
+venv/
+
+# Test and coverage output
+.pytest_cache/
+.coverage
+htmlcov/
 
 # Build output
 build/
-Build/
 dist/
-out/
-target/
-release/
-Debug/
-Release/
-*.exe
-*.app
-*.dmg
-*.AppImage
-*.msi
-*.deb
+*.spec
 
-# Toolchain caches and dependencies
-node_modules/
-.venv/
-__pycache__/
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-compile_commands.json
+# The version stamp `build.sh` writes for the packaged binary
+_version.py
+
+# Logs
+*.log
