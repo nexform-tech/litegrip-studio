@@ -1545,6 +1545,120 @@ class TestStopping:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 放开: opening further than where the jaws are
+# ═══════════════════════════════════════════════════════════════════════════
+class TestOpeningFurtherToLetGo:
+    """The release after a grasp, and the reason it is measured from the jaws.
+
+    A grasp is :meth:`MotionFSM.grasp` — a move to 0 mm under a force cap — so
+    its target is the *closed* end.  "The target plus ten millimetres" is
+    therefore 10 mm, a command back into the object being held, and the jaws
+    stopped somewhere the target never described.  Every test below is one
+    consequence of measuring from the reading instead.
+    """
+
+    def _held_at(self, mm: float) -> Bench:
+        """A bench whose jaws are pinched at ``mm`` with the gate open."""
+        bench = Bench()
+        bench.backend.q_rad = LIMITS.to_rad(mm)
+        bench.bring_up()
+        return bench
+
+    def _sent_q(self, bench: Bench) -> list[float]:
+        return [
+            q for name, args in bench.backend.calls if name == "stream_frame"
+            for q in args[:1]
+        ]
+
+    def _commanded(self, bench: Bench) -> bool:
+        """Whether any frame carried a position gain.
+
+        A refused command still leaves the loop publishing — an enabled DM
+        motor that is sent nothing is not a safe resting state — so "nothing was
+        commanded" is the stiffness, not the silence.
+        """
+        return any(
+            kp != 0.0
+            for _q, kp, _kd, _dq, _tau, _probe in [
+                args for name, args in bench.backend.calls if name == "stream_frame"
+            ]
+        )
+
+    def test_it_opens_from_where_the_jaws_are(self) -> None:
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.BackOff(), count=4)
+        assert bench.loop.motion.state is MotionState.SERVO
+        assert bench.loop.motion.last_command_mm == pytest.approx(
+            (60.0 + constants.RELEASE_OPEN_MM), abs=1e-6
+        )
+
+    def test_it_measures_from_the_object_not_from_the_grasp_target(self) -> None:
+        """The failure mode this command exists to avoid.
+
+        The grasp's target is 0 mm and the object holds the jaws at 28 mm.  A
+        release computed from the target would command 10 mm — into the object,
+        through the gap it is not in — instead of 38 mm, which is clear of it.
+        """
+        bench = self._held_at(28.0)
+        bench.send(cmd.Grasp(force_n=18.0), count=4)
+        assert bench.loop.motion.last_command_mm == pytest.approx(0.0, abs=1e-6)
+
+        bench.send(cmd.BackOff(), count=4)
+        assert bench.loop.motion.last_command_mm == pytest.approx(38.0, abs=1e-6)
+
+    def test_a_release_at_the_top_of_the_travel_is_clamped_not_refused(self) -> None:
+        """Nothing left to open: the move is short, and it is still a move.
+
+        Refusing would leave the operator holding 停止 and 零重力 as the only
+        answers at the one moment they are trying to put something down.
+        """
+        bench = self._held_at(LIMITS.max_stroke_mm)
+        bench.backend.calls.clear()
+        bench.send(cmd.BackOff(), count=4)
+
+        assert bench.loop.motion.state is MotionState.SERVO
+        assert bench.loop.motion.last_command_mm == LIMITS.max_stroke_mm
+        sent = self._sent_q(bench)
+        assert sent, "仍然要发帧，电机靠它保持使能"
+        assert all(LIMITS.rad_low <= q <= LIMITS.rad_high for q in sent)
+
+    def test_the_command_carries_the_distance(self) -> None:
+        """The worker uses the delta it was handed, not the default: the button
+        and the log have to describe the same move as the one that happens."""
+        bench = self._held_at(20.0)
+        bench.send(cmd.BackOff(delta_mm=3.0), count=4)
+        assert bench.loop.motion.last_command_mm == pytest.approx(23.0, abs=1e-6)
+
+    def test_a_release_is_refused_while_the_gate_is_shut(self) -> None:
+        """It is a millimetre command, so it needs the travel like any other."""
+        bench = Bench()
+        bench.bring_up()
+        bench.swap_calibration(BROKEN)
+        assert bench.loop.gate is GateState.BLOCKED
+        bench.backend.calls.clear()
+
+        bench.send(cmd.BackOff(), count=2)
+
+        assert bench.loop.motion.state is not MotionState.SERVO
+        assert "被拒绝" in bench.signals.alerts()[-1]
+        assert "放开" in bench.signals.alerts()[-1]
+        assert not self._commanded(bench)
+
+    def test_a_release_without_a_reading_is_refused(self) -> None:
+        """No measurement, no arithmetic: the release says so rather than
+        commanding a target derived from an angle nobody has read."""
+        bench = Bench(RecordingBackend(fresh=False))
+        bench.bring_up()
+        bench.backend.calls.clear()
+
+        bench.send(cmd.BackOff(), count=2)
+
+        assert "尚未读到位置" in bench.signals.alerts()[-1]
+        assert not self._commanded(bench)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Calibration through the worker
 # ═══════════════════════════════════════════════════════════════════════════
 class TestCalibrationCommands:

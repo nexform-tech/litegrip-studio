@@ -24,6 +24,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Union
 
+from .. import constants
+
 # ── base ────────────────────────────────────────────────────────────────────
 class Command:
     """Marker base class for every command.
@@ -124,7 +126,26 @@ class Grasp(Command):
 
     def describe(self) -> str:
         cap = "" if self.force_n is None else f" {self.force_n:.1f} N"
-        return f"夹持{cap}（来源 {self.source}）"
+        return f"夹取{cap}（来源 {self.source}）"
+
+
+@dataclass(frozen=True)
+class BackOff(Command):
+    """Open ``delta_mm`` further than where the jaws are — the release after a grasp.
+
+    Relative to the *measured* position rather than to the target, and that is
+    the whole of why this is a command of its own instead of a :class:`MoveToMm`
+    the GUI computes: a grasp drives to 0 mm under a force cap, so its target is
+    the closed end and "the target plus ten millimetres" is a command back into
+    the object being held.  Where the jaws actually are is knowledge the worker
+    has and the page only has a twenty-millisecond-old copy of.
+    """
+
+    delta_mm: float = constants.RELEASE_OPEN_MM
+    source: str = "back_off"
+
+    def describe(self) -> str:
+        return f"放开（在当前位置再张开 {self.delta_mm:.1f} mm，来源 {self.source}）"
 
 
 @dataclass(frozen=True)
@@ -143,12 +164,20 @@ class Stop(Command):
 
 @dataclass(frozen=True)
 class Release(Command):
-    """Zero torque, still enabled and back-drivable.  The jaws can be pushed."""
+    """Zero torque, still enabled and back-drivable.  The jaws can be pushed.
+
+    Named 零重力 on the button and in the log, like :class:`SetZeroGravity`
+    below it — the two are the same physical state and the operator has one word
+    for it.  They stay two commands because they are two different acts: this
+    one is a resting state the button puts the axis in, and
+    :class:`SetZeroGravity` is a step of the calibration wizard that has to be
+    left again to finish.
+    """
 
     source: str = "release"
 
     def describe(self) -> str:
-        return f"松力（零力矩，来源 {self.source}）"
+        return f"零重力（零力矩，来源 {self.source}）"
 
 
 @dataclass(frozen=True)
@@ -322,6 +351,7 @@ AnyCommand = Union[
     Open,
     Close,
     Grasp,
+    BackOff,
     Stop,
     Release,
     SetZeroGravity,

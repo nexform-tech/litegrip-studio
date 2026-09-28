@@ -361,9 +361,9 @@ class TestFreeStates:
         self, enter
     ) -> None:
         """Zero stiffness has nothing to gate, and on real hardware an ungated
-        flag is the difference between 松力 working and doing nothing.
+        flag is the difference between 零重力 working and doing nothing.
 
-        松力 on a console whose file is unusable is how the operator gets the
+        零重力 on a console whose file is unusable is how the operator gets the
         jaws into their hands to re-calibrate, which is exactly the console that
         has a shut gate.
         """

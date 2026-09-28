@@ -180,6 +180,38 @@ class TestBeforeTheAxisHasAnswered:
         assert "37.5" in page.readout.actual.text()
 
 
+class TestWhatTheReadoutSaysWhileGrasping:
+    """``frame.grasped`` is the grasp held under a force cap.
+
+    The page is where the frame becomes a number on a panel, and these two
+    numbers describe the object rather than the move: the target is the closed
+    end the grasp was aimed at and the error is the width of what is between the
+    jaws.
+    """
+
+    def test_only_the_actual_position_is_shown(self, page) -> None:
+        page.update_frame(
+            frame(position_mm=28.0, cmd_mm=0.0, err_mm=-28.0, grasped=True,
+                  motion_state="HOLD_FORCE")
+        )
+
+        assert "28.0" in page.readout.actual.text()
+        assert not page.readout.target.isVisibleTo(page.readout)
+        assert not page.readout.error.isVisibleTo(page.readout)
+
+    def test_approaching_the_object_still_shows_the_trajectory(self, page) -> None:
+        """Before the jaws meet anything the target and the error are the real
+        trajectory and the real following error, and this is the phase an
+        operator watching for contact is reading them in."""
+        page.update_frame(
+            frame(position_mm=28.0, cmd_mm=0.0, err_mm=-28.0, moving=True,
+                  motion_state="SERVO")
+        )
+
+        assert page.readout.target.isVisibleTo(page.readout)
+        assert page.readout.error.isVisibleTo(page.readout)
+
+
 class TestTheButtonMoves:
     def test_open_and_close_send_their_commands(self, page) -> None:
         page._open.click()
@@ -238,6 +270,27 @@ class TestTheButtonMoves:
         page.update_frame(frame(position_mm=64.0, cmd_mm=120.0, motion_state="SERVO"))
 
         assert page.slider.value_mm == pytest.approx(64.0)
+
+    def test_the_release_after_a_grasp_sends_its_own_command(self, page) -> None:
+        """``BackOff`` and not a computed ``MoveToMm``: the distance is measured
+        from where the jaws are, which is the worker's reading to make."""
+        page._back_off.click()
+
+        assert len(page.recorder.of(cmd.BackOff)) == 1
+
+    def test_the_release_sits_under_the_grasp(self, page) -> None:
+        """One gesture, two halves — clamp it, then let go — and the column
+        says which order they come in."""
+        column = page._grasp.parentWidget().layout()
+
+        assert column.indexOf(page._back_off) == column.indexOf(page._grasp) + 1
+
+    def test_the_release_button_quotes_the_distance_it_opens(self, page) -> None:
+        """The number is the one the worker will use, from the one constant the
+        two share — a tooltip with its own ten millimetres would be a second
+        copy to keep in step."""
+        assert f"{constants.RELEASE_OPEN_MM:.1f} mm" in page._back_off.toolTip()
+        assert cmd.BackOff().delta_mm == constants.RELEASE_OPEN_MM
 
     def test_stop_and_release_are_sent(self, page) -> None:
         page._stop.click()
@@ -320,6 +373,7 @@ class TestTheGate:
         assert not page._open.isEnabled()
         assert not page._close.isEnabled()
         assert not page._grasp.isEnabled()
+        assert not page._back_off.isEnabled()
         assert "尚未" in page.slider.toolTip()
 
     def test_a_blocked_gate_refuses_the_slider_and_names_the_reason(self, page) -> None:
@@ -329,13 +383,19 @@ class TestTheGate:
         assert "缺少标定文件" in page.slider.toolTip()
 
     def test_a_blocked_gate_disables_the_moves_but_not_the_stops(self, page) -> None:
-        """停止 and 松力 are the two controls whose purpose is to stop rather
-        than to go anywhere; refusing them would be refusing to let go."""
+        """停止 and 零重力 are the two controls whose purpose is to stop rather
+        than to go anywhere; refusing them would be refusing to let go.
+
+        放开 is *not* one of them: it is a millimetre command derived from the
+        travel, so with the travel in doubt it stays refused, and the two above
+        are what an operator reaches for instead.
+        """
         page.set_gate(GateState.BLOCKED, "缺少标定文件")
 
         assert not page._open.isEnabled()
         assert not page._close.isEnabled()
         assert not page._grasp.isEnabled()
+        assert not page._back_off.isEnabled()
         assert page._stop.isEnabled()
         assert page._release.isEnabled()
 
@@ -350,6 +410,7 @@ class TestTheGate:
 
         assert page.slider.isEnabled()
         assert page._open.isEnabled()
+        assert page._back_off.isEnabled()
         assert page.slider.toolTip().startswith("拖动")
 
 
@@ -369,7 +430,13 @@ class TestSpeedAndForce:
     def test_the_grasp_button_says_what_it_will_do(self, page) -> None:
         page._force.setValue(18.0)
 
+        assert "夹取" in page._grasp.text()
         assert "18.0" in page._grasp.text()
+
+    def test_the_release_button_is_named_what_the_operator_calls_it(self, page) -> None:
+        """The same word the calibration wizard uses for the same state, and the
+        one the log line carries — one name for one physical thing."""
+        assert page._release.text() == "零重力（可手掰）"
 
     def test_a_force_near_the_rating_is_flagged_before_it_is_reached(self, page) -> None:
         page._force.setValue(constants.FORCE_SOFT_WARN_N + 1.0)

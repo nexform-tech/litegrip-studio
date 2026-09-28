@@ -561,12 +561,13 @@ class TestFrameRefusal:
         assert _stub(armed).frames == []
 
     def test_a_zero_gain_frame_reaches_an_uncalibrated_motor(self, backend) -> None:
-        """松力 and 零重力 carry no pose: kp and kd are zero, so there is no
+        """零重力 (``RELEASE``) and the wizard's zero gravity (``ZERO_G``) carry
+        no pose: kp and kd are zero, so there is no
         position for a calibration to have got wrong, and the frame cannot move
         the axis whatever the angle field says.
 
         They used to be refused here, and that is what made a bad file
-        un-escapable: with the gate shut, 松力 did nothing, the operator could
+        un-escapable: with the gate shut, 零重力 did nothing, the operator could
         not push the jaws by hand, and re-calibrating needs the jaws to move.
         """
         backend._info = None

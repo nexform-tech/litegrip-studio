@@ -153,14 +153,14 @@ class GripperBackend(ABC):
         two such frames: a probe step, which is looking for the mechanical stops
         the calibration records, and therefore has to be allowed outside the
         travel and before a calibration exists at all; and a zero-gain or
-        hold-at-what-was-measured frame — 松力, 零重力, and the pose a probe is
-        left in — which commands no pose, or the identity of the pose the
+        hold-at-what-was-measured frame — 零重力 (``RELEASE``), the
+        wizard's zero gravity (``ZERO_G``), and the pose a probe is left in — which commands no pose, or the identity of the pose the
         encoder just reported.  Both relax the calibration requirement and the
         travel check and nothing else: a non-finite value or a negative gain is
         still refused, because those are wrong whatever the calibration says.
 
-        It is not a licence for a *state*: nothing about holding 松力 open for
-        an hour widens what it permits, because what it permits is a frame with
+        It is not a licence for a *state*: nothing about holding 零重力 open
+        for an hour widens what it permits, because what it permits is a frame with
         nothing in it to be wrong.
         """
 

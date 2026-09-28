@@ -119,13 +119,26 @@ class PositionReadout(QWidget):
         # the operator's hand.
         self.setFixedWidth(112)
 
-    def update_position(self, actual_mm: float, target_mm: float | None = None) -> None:
+    def update_position(
+        self, actual_mm: float, target_mm: float | None = None, *, grasping: bool = False
+    ) -> None:
+        """Draw the three lines, or one of them while the jaws hold something.
+
+        ``grasping`` is the grasp that has been made and is being held under a
+        force cap.  Its target is the closed end and its error is the width of
+        the object between the jaws — both true, neither a place the jaws are
+        going — and printed together they read as "28.0 mm from where you asked
+        and not closing", which is the most alarming pair of numbers on the
+        panel describing a grasp that is working exactly as intended.  The
+        actual position stays, because it is the one number that is about the
+        gripper rather than about the command.
+        """
         text = format_readout(actual_mm, target_mm)
         self.actual.set_value(text.actual, theme.ACTUAL)
         self.target.set_value(text.target, theme.TARGET)
         self.error.set_value(text.error, theme.WARN if text.moving else theme.TEXT_MUTED)
-        self.target.setVisible(bool(text.target))
-        self.error.setVisible(bool(text.error))
+        self.target.setVisible(not grasping and bool(text.target))
+        self.error.setVisible(not grasping and bool(text.error))
 
 
 class Banner(QFrame):

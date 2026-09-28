@@ -70,8 +70,9 @@ class ControlPage(QWidget):
         self._open = QPushButton("全部张开")
         self._close = QPushButton("全部闭合")
         self._grasp = QPushButton()
+        self._back_off = QPushButton("放开")
         self._stop = QPushButton("停止（保持位置）")
-        self._release = QPushButton("松力（可手掰）")
+        self._release = QPushButton("零重力（可手掰）")
 
         self._speed = QSlider(Qt.Horizontal)
         self._speed_value = QLabel()
@@ -93,6 +94,11 @@ class ControlPage(QWidget):
         self._stop.setToolTip("停在当前角度并保持，电机保持使能")
         self._release.setToolTip("零刚度零力矩，可以用手掰动，电机保持使能")
         self._grasp.setProperty("accent", True)
+        self._back_off.setProperty("accent", True)
+        self._back_off.setToolTip(
+            f"从夹爪现在的位置再张开 {constants.RELEASE_OPEN_MM:.1f} mm，用来松开夹住的物体。"
+            "不是回到夹取前的目标位置，也不是量程顶端"
+        )
         # The two end-to-end moves sit either side of the bar, on the ends they
         # command, so "闭合 lives at the left and 张开 at the right" is read off
         # the layout rather than learned.  Their tooltips carry the millimetres,
@@ -104,7 +110,6 @@ class ControlPage(QWidget):
 
         actions = QVBoxLayout()
         actions.setSpacing(6)
-        actions.addWidget(self._grasp)
         actions.addWidget(self._stop)
         actions.addWidget(self._release)
 
@@ -138,6 +143,12 @@ class ControlPage(QWidget):
         force_layout = QVBoxLayout(force_box)
         force_layout.addWidget(self._force)
         force_layout.addWidget(self._grasp)
+        # 放开 goes directly under 夹取 because the two are one gesture: the
+        # grasp is the only thing that can leave the jaws holding something, and
+        # this is the only button that undoes it.  Apart, in the action column,
+        # they would read as two unrelated moves — and the grasp's own button is
+        # drawn here in the first place, under the force it carries.
+        force_layout.addWidget(self._back_off)
         force_layout.addStretch(1)
 
         lower = QHBoxLayout()
@@ -177,6 +188,7 @@ class ControlPage(QWidget):
         self._grasp.clicked.connect(
             lambda: self._issue_button(cmd.Grasp(force_n=self._force.value()))
         )
+        self._back_off.clicked.connect(lambda: self._issue_button(cmd.BackOff()))
         self._stop.clicked.connect(self._on_stop)
         self._release.clicked.connect(self._on_release)
         self._speed.valueChanged.connect(self._on_speed_changed)
@@ -241,12 +253,15 @@ class ControlPage(QWidget):
         self._gate = state
         ready = state is GateState.READY
         self.slider.set_blocked("" if ready else reason)
-        for button in (self._open, self._close, self._grasp):
+        for button in (self._open, self._close, self._grasp, self._back_off):
             button.setEnabled(ready)
-        # 停止 and 松力 stay available through the gate.  They are the two
+        # 停止 and 零重力 stay available through the gate.  They are the two
         # controls whose whole purpose is to stop rather than to go anywhere,
         # and refusing them on an uncalibrated gripper would be refusing to let
         # go — which is the wrong way to fail on a machine holding something.
+        # 放开 is not one of them: it is a millimetre command, so it needs the
+        # travel the gate is holding back, and the two above are what an
+        # operator reaches for when there is no travel to command.
 
     def update_frame(self, frame: TelemetryFrame) -> None:
         self._echo += 1
@@ -255,7 +270,9 @@ class ControlPage(QWidget):
         # than one publish later.
         self._track(frame)
         self.slider.set_actual(frame.position_mm)
-        self.readout.update_position(frame.position_mm, frame.cmd_mm)
+        self.readout.update_position(
+            frame.position_mm, frame.cmd_mm, grasping=frame.grasped
+        )
         self._state_label.setText(
             f'<span style="color:{theme.TEXT_MUTED}">状态 </span>'
             f'<span style="color:{self._state_colour(frame)}">{frame.motion_state}</span>'
@@ -341,7 +358,7 @@ class ControlPage(QWidget):
 
     def _on_force_changed(self, value: float) -> None:
         self._submit(cmd.SetForce(force_n=float(value)))
-        self._grasp.setText(f"夹持 {value:.1f} N")
+        self._grasp.setText(f"夹取 {value:.1f} N")
         if value >= constants.FORCE_MAX_N:
             self._force.setStyleSheet(f"color: {theme.ERROR};")
         elif value > constants.FORCE_SOFT_WARN_N:

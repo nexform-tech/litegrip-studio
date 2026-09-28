@@ -91,6 +91,17 @@ FORCE_THEORETICAL_MAX_N = 100.0
 
 GRASP_STALL_CYCLES = 20
 
+# How far 放开 opens past where the jaws are, to let go of what they are holding.
+#
+# Measured from the *measured* position and not from the grasp's target: a grasp
+# drives to 0 mm under a force cap (``MotionFSM.grasp``), so its target is the
+# closed end, and ten millimetres past that would be a command back into the
+# object.  It is the operator's number, and it is at the bottom of the accepted
+# travel range (``STROKE_MIN_MM``): a gripper configured with the shortest travel
+# the console accepts can still open this far from a fully closed pinch.  A
+# longer travel clamps at its own top, so the move is short rather than refused.
+RELEASE_OPEN_MM = 10.0
+
 # Contact detection for a force-carrying move, in two independent channels.
 #
 # ``CONTACT_LOST_MM`` is the primary detector and needs no hardware knowledge:

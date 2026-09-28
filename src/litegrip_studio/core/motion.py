@@ -320,7 +320,7 @@ class MotionFSM:
             # Zero stiffness has nothing to gate: there is no command to get
             # wrong, and the point of these states is that the jaws are free.
             # ``ungated`` because of that: this frame must reach the motor on a
-            # console whose calibration is unusable, or 松力 does nothing and an
+            # console whose calibration is unusable, or 零重力 does nothing and an
             # operator with a bad file cannot move the jaws by hand — which is
             # exactly when they need to re-calibrate.
             return self._send(
