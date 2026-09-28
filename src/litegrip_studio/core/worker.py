@@ -878,6 +878,23 @@ class WorkerLoop:
                 self._motion.close(command.source, force_n=command.force_n)
             else:
                 self._motion.grasp(command.force_n, command.source)
+        elif isinstance(command, cmd.BackOff):
+            # Gated exactly like the moves above, and for the same reason: it is
+            # a millimetre command derived from the travel.  The way to let go of
+            # something on a console whose calibration is unusable is 零重力 or
+            # 停止, both of which are ungated — not this.
+            self._end_probe_on_interrupt(command.describe())
+            if not self._require_motion(command.describe()):
+                return
+            measured = self._measured_mm()
+            # ``_refusal`` will not let a command through without a measurement,
+            # so this only has to satisfy the type checker and say why.
+            assert measured is not None
+            # Opening from where the jaws *are*: the target of a grasp is the
+            # closed end, so a target-relative release would drive back into the
+            # object.  ``move_to_mm`` clamps, so a release at the top of the
+            # travel is a move of zero length rather than an out-of-range one.
+            self._motion.move_to_mm(measured + command.delta_mm, command.source)
         elif isinstance(command, cmd.Stop):
             self._end_probe_on_interrupt(command.describe())
             if self._estop.is_set():

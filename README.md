@@ -105,7 +105,7 @@ disable / clear fault / reset emergency stop), the emergency-stop button, and th
 
 | Page | Contents |
 | --- | --- |
-| Control | Position slider, open all / close all, stop (hold position), release (back-drivable), speed, grasp force |
+| Control | Position slider, open all / close all, stop (hold position), release (back-drivable), speed, grasp force, grasp / let go |
 | Status | Telemetry table, temperature, faults and clearing them, link health |
 | Plots | pyqtgraph position and force plots (the force axis autoscales) |
 | Calibration | Provenance banner, file actions, guided and manual two-point wizards, the gate |
@@ -148,6 +148,14 @@ millimetre figure and refreshes as soon as a calibration arrives — before one 
 tooltip quotes the **range** (`max_stroke_mm`), not the span the calibration file records: once
 mm/rad has been derived from the measured travel the two differ, and quoting the span sends people
 looking for travel that cannot be reached.
+
+Directly under **Grasp** in the force box is a **Let go** button: it opens 10 mm further than where
+the jaws **are** (`RELEASE_OPEN_MM`), to release whatever they are holding. It measures from the
+**measurement**, not from the last command's target — a grasp drives to 0 mm under a force cap, so
+its target is always the closed end and "target + 10 mm" is a command straight back into the
+object. At the top of the range it is a move of zero length (`move_to_mm` clamps) rather than an
+error. It is a millimetre command, so the gate refuses it like any other move; with an unusable
+calibration the two ways to let go are **release (back-drivable)** and **stop**.
 
 ### The force plot autoscales
 

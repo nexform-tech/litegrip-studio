@@ -239,6 +239,27 @@ class TestTheButtonMoves:
 
         assert page.slider.value_mm == pytest.approx(64.0)
 
+    def test_the_release_after_a_grasp_sends_its_own_command(self, page) -> None:
+        """``BackOff`` and not a computed ``MoveToMm``: the distance is measured
+        from where the jaws are, which is the worker's reading to make."""
+        page._back_off.click()
+
+        assert len(page.recorder.of(cmd.BackOff)) == 1
+
+    def test_the_release_sits_under_the_grasp(self, page) -> None:
+        """One gesture, two halves — clamp it, then let go — and the column
+        says which order they come in."""
+        column = page._grasp.parentWidget().layout()
+
+        assert column.indexOf(page._back_off) == column.indexOf(page._grasp) + 1
+
+    def test_the_release_button_quotes_the_distance_it_opens(self, page) -> None:
+        """The number is the one the worker will use, from the one constant the
+        two share — a tooltip with its own ten millimetres would be a second
+        copy to keep in step."""
+        assert f"{constants.RELEASE_OPEN_MM:.1f} mm" in page._back_off.toolTip()
+        assert cmd.BackOff().delta_mm == constants.RELEASE_OPEN_MM
+
     def test_stop_and_release_are_sent(self, page) -> None:
         page._stop.click()
         page._release.click()
@@ -320,6 +341,7 @@ class TestTheGate:
         assert not page._open.isEnabled()
         assert not page._close.isEnabled()
         assert not page._grasp.isEnabled()
+        assert not page._back_off.isEnabled()
         assert "尚未" in page.slider.toolTip()
 
     def test_a_blocked_gate_refuses_the_slider_and_names_the_reason(self, page) -> None:
@@ -330,12 +352,18 @@ class TestTheGate:
 
     def test_a_blocked_gate_disables_the_moves_but_not_the_stops(self, page) -> None:
         """停止 and 松力 are the two controls whose purpose is to stop rather
-        than to go anywhere; refusing them would be refusing to let go."""
+        than to go anywhere; refusing them would be refusing to let go.
+
+        放开 is *not* one of them: it is a millimetre command derived from the
+        travel, so with the travel in doubt it stays refused, and the two above
+        are what an operator reaches for instead.
+        """
         page.set_gate(GateState.BLOCKED, "缺少标定文件")
 
         assert not page._open.isEnabled()
         assert not page._close.isEnabled()
         assert not page._grasp.isEnabled()
+        assert not page._back_off.isEnabled()
         assert page._stop.isEnabled()
         assert page._release.isEnabled()
 
@@ -350,6 +378,7 @@ class TestTheGate:
 
         assert page.slider.isEnabled()
         assert page._open.isEnabled()
+        assert page._back_off.isEnabled()
         assert page.slider.toolTip().startswith("拖动")
 
 
