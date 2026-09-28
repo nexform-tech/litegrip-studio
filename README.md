@@ -90,8 +90,10 @@ sudo ip link set can0 up
 ```
 
 **On a real gripper, run the guided calibration from the calibration page and save it before
-touching the slider.** If the calibration page shows `FACTORY` or `BLOCKED`, calibrate first
-rather than overriding the gate.
+touching the slider.** If the fingers are mounted the other way round — the encoder angle growing
+as the jaws open — tick 反向装配 first, or use the manual two-point wizard, which takes the
+direction from the labels the operator presses instead. If the calibration page shows `FACTORY` or
+`BLOCKED`, calibrate first rather than overriding the gate.
 
 ---
 
@@ -105,7 +107,7 @@ disable / clear fault / reset emergency stop), the emergency-stop button, and th
 | Control | Position slider, open all / close all, stop (hold position), release (back-drivable), speed, grasp force |
 | Status | Telemetry table, temperature, faults and clearing them, link health |
 | Plots | pyqtgraph position and force plots (the force axis autoscales) |
-| Calibration | Provenance banner, file actions, guided and manual wizards, the gate |
+| Calibration | Provenance banner, file actions, guided and manual two-point wizards, the gate |
 
 **Esc is an application-level shortcut**: it works with a spinbox focused and with a modal dialog
 open.
@@ -191,9 +193,14 @@ itself rather than trusting the SDK's return value:
 - **`load_calibration()` overwrites `kp` / `kd` / `grasp_torque_threshold`**, and reads its fields
   without protection: a bad file raises `KeyError`.
 
-The test the console applies is `zero_rad <= open_rad`, i.e. the dangerous reversed state. It
-separates the three known data sets cleanly: the uncalibrated defaults `(0.0, 1.14)` fail it, the
-factory file `(0.114, -1.491)` passes, and the example user file `(1.776, -0.064)` passes.
+The ordering `zero_rad <= open_rad` is what the SDK's defaults look like — `(0.0, 1.14)` — and it
+is still the signature the console recognises them by. But an ordering is not a verdict: the same
+two numbers, read in the same order, describe a reverse-mounted gripper and a file whose limits
+were recorded the wrong way round, and no amount of arithmetic can tell those apart. So the
+console *reads* the mounting direction out of the two angles (`Limits.direction`) and every
+conversion, clamp and velocity feed-forward uses it, which makes a reverse-mounted unit work end
+to end; a reversed file is a **warning** to be confirmed against the live reading rather than a
+refusal. What refuses a file is `frame_mismatch`, below, which never looks at the ordering.
 
 All of the above is decided by **reading files**, and a file can be perfectly self-consistent while
 describing a different gripper — as long as it was calibrated against another encoder zero (a
@@ -216,7 +223,7 @@ indistinguishable, and the clamped number still looks entirely reasonable. On re
 what "it clamps the moment you enable it" is made of.
 
 The gate has three states: `READY` (user calibration, no problems), `FACTORY` (needs "I understand
-the risk" ticked), and `BLOCKED` (reversed, missing, or a zero that belongs to another machine —
+the risk" ticked), and `BLOCKED` (missing, or a zero that belongs to another machine —
 **never overridable**). **The gate logic lives in the worker, not the UI**: the UI can disable
 widgets, but the refusal has to happen before a frame is sent.
 
@@ -281,6 +288,14 @@ to command" as the open limit — a wrong answer that reads like a successful me
 frames now skip that check explicitly (`probe_frame=True`) while still refusing non-finite values
 and negative gains, which are wrong whatever the calibration says.
 
+The probe also has to know **which way the jaws open**, and it cannot read that from a file: it is
+the thing producing the file. It walks the jaws into the open stop and then into the closed one,
+and walking a reverse-mounted gripper the SDK's way drives it into the wrong stop and records the
+two ends the wrong way round — a result that validates, saves, and moves inverted. So the direction
+is declared before the probe starts (反向装配 on the calibration page, carried as
+`StartGuidedCalibration.reversed_mount`), and the page shows the raw encoder angle beside the
+millimetres, because the millimetres are computed through the calibration under suspicion.
+
 The probe decides it has reached a stop when the angle it reads stops changing, and that same
 signal also means "no frame reached the motor" and "the feedback died" — in which case it records
 both limits at the same position and reports a travel error (real hardware has produced
@@ -300,6 +315,37 @@ failed probe those lines are the whole truth.
 The probe measures the distance between the hard stops (the two hard stops, not the distance
 between the soft limits); the angle it measures is the denominator of the mm conversion, and the
 numerator is the travel the operator measured — see "Known limitations".
+
+### The two-point manual probe
+
+The guided probe needs the stops to be reachable and detectable. When they are not — a stiff
+linkage, a travel that is not where the SDK expects it, a drive that will not take a probe step at
+all — the manual wizard takes over: the axis is held limp and the operator works the jaws to each
+extreme by hand.
+
+- **Two labelled buttons, not one.** The open extreme is recorded first, then the closed one, which
+  is 0 mm. The label on the button is the operator's whole answer to "which end is zero", so a
+  press that arrives out of step is refused out loud rather than taken as whichever point is due:
+  the two angles swapped pass every check the console makes and drive the gripper backwards.
+- **Nothing is sampled in the background.** The angle recorded is the one the encoder reports on the
+  tick after the press — the first reading after the hand stopped moving. Sweeping the axis and
+  keeping the extremes, which is what the SDK's zero-gravity mode does, measures the travel the hand
+  happened to sweep: a gripper released halfway still looks like a calibration, and neither end is
+  named, so the file cannot say which one is 0 mm.
+- **It needs no mounting declaration.** The labels supply the direction, so a gripper assembled
+  either way round records correctly and the mounting is whatever the two angles turn out to be.
+  Both points recorded in the same place is reported, not adopted — a file built from it would put
+  every millimetre of the travel at one angle.
+- **Readings are checked before they are believed.** A value outside the SDK's own plausibility
+  bound, or one that moved further in one tick than the mechanism can, is dropped rather than
+  recorded: a lost frame leaves the SDK's cached position at `0.0`, which is inside that bound and
+  is exactly where a misread would put the *open* limit — the one reading that would quietly invert
+  the whole travel. A drop also cancels a press it lands on, since the angle the operator pressed
+  for is the one that could not be read.
+- **Every wait is bounded** at `TWO_POINT_TIMEOUT_S` (5 minutes per point). The axis is limp for the
+  whole procedure, and a console left holding an enabled, limp motor is a gripper that falls open on
+  whatever is under it. A probe that fails or is cancelled stays limp; only one that ran to the end
+  hands the axis back under position control, at the SDK's exit gains.
 
 ---
 
@@ -467,8 +513,8 @@ semantic-release from the commit history, the git tag is the only source of trut
 
 - **Automatic calibration (`calibrate()`) is not offered in this version.** It has no stdin
   dependency, but it cannot be interrupted and drives the motors for about 24 seconds — better to
-  offer only the guided and manual wizards than a 24-second window in which the emergency stop does
-  nothing.
+  offer only the guided and two-point manual wizards than a 24-second window in which the emergency
+  stop does nothing.
 - The factory calibration is a **fallback, not a substitute**: used on another gripper it does not
   crash, it silently makes every millimetre wrong. The calibration page looks at the travel implied
   by the file's own scale, but only warns when it is wrong by orders of magnitude (outside
