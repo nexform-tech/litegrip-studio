@@ -276,6 +276,21 @@ class TestSelftest:
 
 
 class TestEnsureSdk:
+    @staticmethod
+    def _hide_the_sdk(monkeypatch) -> None:
+        """Make ``import litegrip`` fail, however the SDK got on the path.
+
+        Stripping ``sys.path`` is not enough to say "the SDK is not here": the
+        SDK can be *installed*, and an editable install resolves it through a
+        meta-path finder rather than through a ``sys.path`` entry, so the import
+        would still succeed and ``ensure_sdk()`` would return before it looked at
+        anything.  A ``None`` in ``sys.modules`` halts the import whatever the
+        finders say, which is the condition these two tests are about.
+        """
+        monkeypatch.setitem(sys.modules, "litegrip", None)
+        # A copy, so the path ``ensure_sdk()`` inserts is undone with the rest.
+        monkeypatch.setattr(sys, "path", list(sys.path))
+
     def test_it_finds_the_checkout_on_the_path(self) -> None:
         assert cli.ensure_sdk() is True
 
@@ -283,9 +298,8 @@ class TestEnsureSdk:
         self, monkeypatch, tmp_path, capsys
     ) -> None:
         monkeypatch.setattr(cli, "DEFAULT_SDK_PATH", str(tmp_path))
-        monkeypatch.delitem(sys.modules, "litegrip", raising=False)
-        monkeypatch.setattr(sys, "path", [p for p in sys.path if "lite-grip" not in p])
         monkeypatch.delenv("LITEGRIP_SDK_PATH", raising=False)
+        self._hide_the_sdk(monkeypatch)
 
         assert cli.ensure_sdk() is False
         assert str(tmp_path) in capsys.readouterr().err
@@ -297,8 +311,7 @@ class TestEnsureSdk:
         elsewhere = tmp_path / "sdk-elsewhere"
         monkeypatch.setattr(cli, "DEFAULT_SDK_PATH", str(tmp_path / "nowhere"))
         monkeypatch.setenv("LITEGRIP_SDK_PATH", str(elsewhere))
-        monkeypatch.delitem(sys.modules, "litegrip", raising=False)
-        monkeypatch.setattr(sys, "path", [p for p in sys.path if "lite-grip" not in p])
+        self._hide_the_sdk(monkeypatch)
 
         cli.ensure_sdk()
 
