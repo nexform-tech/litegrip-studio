@@ -12,6 +12,8 @@ that logs what it was asked to do.
 
 from __future__ import annotations
 
+import json
+import logging
 import threading
 import time
 from typing import Callable
@@ -1940,3 +1942,76 @@ class TestAReadingThatHasGoneStale:
 
         assert "堵转" not in bench.loop.motion.note
         assert bench.loop.motion.state is MotionState.SERVO
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Alerts: what the operator is told, and what survives the window
+# ═══════════════════════════════════════════════════════════════════════════
+class TestAlertsReachTheLogFile:
+    """An alert is a widget message; the log file is the record.
+
+    The alerts worth having are the ones explaining a refusal, and until these
+    existed the only account of one was on screen — so it went away with the
+    window, and an operator reporting 「标定不可用」 had nothing to attach to
+    the report.  The messages were reaching the file only by accident, through
+    whichever of them happened to also be written as a log line at a level the
+    file keeps.
+    """
+
+    def test_an_error_alert_is_written_as_an_error(self, caplog) -> None:
+        bench = Bench()
+
+        with caplog.at_level(logging.ERROR, logger="litegrip_studio.core.worker"):
+            bench.loop._alert("error", "标定不可用：推导出的rad超出合理范围")
+
+        records = [r for r in caplog.records if "超出合理范围" in r.getMessage()]
+        assert [r.levelname for r in records] == ["ERROR"]
+
+    def test_a_warning_alert_is_written_as_a_warning(self, caplog) -> None:
+        bench = Bench()
+
+        with caplog.at_level(logging.WARNING, logger="litegrip_studio.core.worker"):
+            bench.loop._alert("warn", "结果未自动保存")
+
+        records = [r for r in caplog.records if "未自动保存" in r.getMessage()]
+        assert [r.levelname for r in records] == ["WARNING"]
+
+    def test_an_info_alert_is_not_demoted_to_debug(self, caplog) -> None:
+        """The one level where this deliberately departs from ``_log``: an
+        alert the operator was shown is a record, not running commentary."""
+        bench = Bench()
+
+        with caplog.at_level(logging.INFO, logger="litegrip_studio.core.worker"):
+            bench.loop._alert("info", "标定已保存到 /tmp/cal.json")
+
+        records = [r for r in caplog.records if "标定已保存到" in r.getMessage()]
+        assert [r.levelname for r in records] == ["INFO"]
+
+    def test_an_unusable_calibration_says_so_in_the_log(self, caplog, tmp_path) -> None:
+        """The reported symptom, end to end: the console refuses to move, and
+        the reason has to be findable afterwards.
+
+        The file is the shape of the one that did it — a recorded span too short
+        for the travel it claims — and it goes through ``resolve``, so the text
+        asserted here is the text ``validate_limits`` produces rather than one
+        written into the test.
+        """
+        broken = tmp_path / "tiny.json"
+        broken.write_text(
+            json.dumps(
+                {
+                    "zero_position_rad": 1.0,
+                    "max_position_rad": 0.996,
+                    "rad_to_mm": 21500.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        bench = Bench()
+        bench.backend.info = calibration.resolve(str(broken))
+
+        with caplog.at_level(logging.ERROR, logger="litegrip_studio.core.worker"):
+            bench.send(cmd.LoadCalibration())
+
+        assert bench.loop.gate is GateState.BLOCKED
+        assert any("超出合理范围" in r.getMessage() for r in caplog.records)

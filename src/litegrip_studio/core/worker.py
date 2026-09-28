@@ -1070,7 +1070,8 @@ class WorkerLoop:
         The return value exists for the one caller that has to *decide*
         something on the answer — a finished probe, whose hand-back depends on
         whether the file now carries the result (see :meth:`_save_probe_result`).
-        Everything else reports the outcome through the alerts below.
+        Everything else reports the outcome through the alerts below, which are
+        the record as well as the message (see :meth:`_alert`).
         """
         try:
             written = self.backend.save_calibration(path)
@@ -1079,7 +1080,6 @@ class WorkerLoop:
             return None
         self._refresh_calibration()
         self._alert("info", f"标定已保存到 {written}")
-        self._log("info", f"标定已保存: {written}")
         return written
 
     def _save_probe_result(self, probe: Any, info: CalibrationInfo) -> bool:
@@ -1469,7 +1469,28 @@ class WorkerLoop:
             log.debug(text)
 
     def _alert(self, level: str, text: str) -> None:
+        """Show the operator something, and write it to the log file as well.
+
+        The two channels answer different questions.  The alert is what the
+        operator sees now; the file is all anyone reading afterwards has, and
+        for the alerts that matter — a calibration the console refused to move
+        on, a save that failed, an E-stop — the alert is the only place the
+        reason exists at all.  Written nowhere but the widget, it is gone the
+        moment the window is.
+
+        The level mapping is written out rather than shared with :meth:`_log`,
+        because the two disagree on purpose: an ``info`` line in the log is a
+        running commentary and belongs at DEBUG, while an ``info`` alert is
+        something the operator was shown and belongs in the file at the level it
+        was shown at.
+        """
         self._signals.alert.emit(level, text)
+        if level in ("error", "fatal"):
+            log.error(text)
+        elif level == "warn":
+            log.warning(text)
+        else:
+            log.info(text)
 
     # ── introspection, for the UI's first paint and for tests ───────────────
     @property
