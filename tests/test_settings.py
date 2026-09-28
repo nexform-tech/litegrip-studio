@@ -20,6 +20,7 @@ from litegrip_studio.settings import (
     KEY_ALLOW_FACTORY,
     KEY_FORCE,
     KEY_SPEED,
+    KEY_TRAVEL_MM,
     Settings,
     default_settings_path,
 )
@@ -62,7 +63,6 @@ class TestDefaults:
 
         assert settings.speed_mm_s == constants.SPEED_DEFAULT_MM_S
         assert settings.force_n == constants.FORCE_DEFAULT_N
-        assert settings.travel_mm == constants.DEFAULT_TRAVEL_MM
         assert settings.live_follow is False
         assert settings.calibration_path is None
         assert settings.active_tab == 0
@@ -86,7 +86,6 @@ class TestRoundTrip:
         settings.force_n = 25.0
         settings.live_follow = True
         settings.allow_factory_calibration = True
-        settings.travel_mm = 150.0
         settings.calibration_path = "/tmp/cal.json"
         settings.active_tab = 2
         settings.show_debug_log = True
@@ -96,7 +95,6 @@ class TestRoundTrip:
         assert reopened.force_n == pytest.approx(25.0)
         assert reopened.live_follow is True
         assert reopened.allow_factory_calibration is True
-        assert reopened.travel_mm == pytest.approx(150.0)
         assert reopened.calibration_path == "/tmp/cal.json"
         assert reopened.active_tab == 2
         assert reopened.show_debug_log is True
@@ -123,6 +121,51 @@ class TestRoundTrip:
         Settings(store).geometry = blob
 
         assert Settings(store).geometry == blob
+
+
+class TestRetiredKeys:
+    """Preferences an older console wrote and this one no longer reads.
+
+    They are removed rather than ignored because the file is what someone reads
+    when the console is misbehaving, and a stale value sitting in it reads as
+    the console's own belief about the bench.  The travel is the one that
+    mattered: 10 mm in that file is what turned a good calibration into a
+    problem the operator could not clear.
+    """
+
+    def test_a_travel_left_by_an_older_console_is_dropped(self) -> None:
+        store = raw(**{KEY_TRAVEL_MM: 10.0})
+        Settings(store)
+
+        assert KEY_TRAVEL_MM in store.removed
+        assert KEY_TRAVEL_MM not in store.data
+
+    def test_the_migration_is_written_through(self) -> None:
+        """A file left dirty until the next close would be read by the very
+        session that is trying to diagnose it."""
+        store = raw(**{KEY_TRAVEL_MM: 10.0})
+        Settings(store)
+
+        assert store.syncs > 0
+
+    def test_a_fresh_store_is_not_written_to_on_open(self) -> None:
+        store = Store()
+        Settings(store)
+
+        assert store.removed == []
+        assert store.syncs == 0
+
+    def test_a_store_that_cannot_remove_is_survivable(self) -> None:
+        """Same rule as every other read: a hostile or read-only store must not
+        be able to stop the console from opening."""
+
+        class Stubborn(Store):
+            def remove(self, key) -> None:
+                raise OSError("read-only")
+
+        settings = Settings(Stubborn(**{KEY_TRAVEL_MM: 10.0}))
+
+        assert settings.allow_factory_calibration is False
 
 
 class TestTheStoreIsHostileInput:

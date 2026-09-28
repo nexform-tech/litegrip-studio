@@ -177,21 +177,6 @@ class SetForce(Command):
         return f"夹持力设为 {self.force_n:.1f} N"
 
 
-@dataclass(frozen=True)
-class SetTravel(Command):
-    """The measured travel of this gripper, in millimetres.
-
-    Carried on ``max_stroke_mm`` because that is the field it fills in
-    ``Limits``, and it is what the slider spans and what the mm scale is derived
-    from — see :func:`litegrip_studio.units.derive_scale`.
-    """
-
-    max_stroke_mm: float
-
-    def describe(self) -> str:
-        return f"行程设为 {self.max_stroke_mm:.1f} mm"
-
-
 # ── calibration ─────────────────────────────────────────────────────────────
 @dataclass(frozen=True)
 class LoadCalibration(Command):
@@ -342,7 +327,6 @@ AnyCommand = Union[
     SetZeroGravity,
     SetSpeed,
     SetForce,
-    SetTravel,
     LoadCalibration,
     SaveCalibration,
     StartGuidedCalibration,
@@ -359,7 +343,7 @@ AnyCommand = Union[
 #: Commands of which only the last in a run can matter.  Everything else — a
 #: connect, a fault clear, a calibration step — has an effect that a later
 #: command of the same kind does not supersede.
-COALESCABLE = (MoveToMm, SetSpeed, SetForce, SetTravel, Heartbeat)
+COALESCABLE = (MoveToMm, SetSpeed, SetForce, Heartbeat)
 
 
 def coalesce(commands: list[AnyCommand]) -> list[AnyCommand]:

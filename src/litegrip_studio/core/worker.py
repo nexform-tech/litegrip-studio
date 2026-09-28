@@ -61,7 +61,6 @@ import threading
 import time
 from collections import deque
 from enum import Enum
-from pathlib import Path
 from typing import Any, Callable
 
 from PyQt5.QtCore import QThread, pyqtSignal
@@ -166,7 +165,7 @@ def evaluate_gate(
 #: pressure loses nothing that will not be re-issued a moment later.  Everything
 #: else — a connect, a fault clear, a calibration step, a shutdown — has an
 #: effect a later command of the same kind does not supersede.
-DROPPABLE = (cmd.MoveToMm, cmd.SetSpeed, cmd.SetForce, cmd.SetTravel)
+DROPPABLE = (cmd.MoveToMm, cmd.SetSpeed, cmd.SetForce)
 
 
 class CommandQueue:
@@ -860,8 +859,6 @@ class WorkerLoop:
             self._motion.set_speed(command.speed_mm_s)
         elif isinstance(command, cmd.SetForce):
             self._motion.set_force(command.force_n)
-        elif isinstance(command, cmd.SetTravel):
-            self._set_travel_mm(command.max_stroke_mm)
 
         # ── calibration ─────────────────────────────────────────────────────
         elif isinstance(command, cmd.LoadCalibration):
@@ -1053,22 +1050,6 @@ class WorkerLoop:
         return True
 
     # ── parameters ──────────────────────────────────────────────────────────
-    def _set_travel_mm(self, max_stroke_mm: float) -> None:
-        info = self.backend.calibration_info()
-        self.backend.set_travel_mm(max_stroke_mm)
-        # Re-resolve, because the travel is what the mm scale is derived from and
-        # what the plausibility check compares a file's own scale against — a
-        # change to it changes every millimetre the console reports, so the
-        # calibration in force has to be rebuilt rather than patched.  Only a
-        # path that is really there is handed over: an explicit path that does
-        # not exist would send the resolver down its factory branch and silently
-        # change the provenance.
-        path = None
-        if info is not None and info.path and Path(info.path).is_file():
-            path = info.path
-        self.backend.load_calibration(path)
-        self._refresh_calibration()
-        self._log("info", f"行程已设为 {max_stroke_mm:.1f} mm")
 
     # ── calibration ─────────────────────────────────────────────────────────
     def _load_calibration(self, path: str | None) -> None:
@@ -1132,7 +1113,11 @@ class WorkerLoop:
             self._alert("warn", "已有标定正在进行")
             return
 
-        stroke = self._motion.limits.max_stroke_mm
+        # The measured travel, written down here rather than read off the limits
+        # in force: the probe records the angles either side of it, and those two
+        # angles are the whole of the calibration.  Reading it from the limits
+        # would make the result depend on whatever file is being replaced.
+        stroke = constants.DEFAULT_TRAVEL_MM
         probe: GuidedCalibFSM | TwoPointCalibFSM
         if guided:
             probe = GuidedCalibFSM(stroke, reversed_mount=reversed_mount)

@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 from PyQt5.QtWidgets import QLabel, QScrollArea
 
-from litegrip_studio import calibration, constants
+from litegrip_studio import calibration
 from litegrip_studio.calibration import CalibrationInfo
 from litegrip_studio.core import commands as cmd
 from litegrip_studio.core.calibration_fsm import GuidedPhase, TwoPointPhase
@@ -434,13 +434,13 @@ class TestTheCommandsItSends:
 
         assert page.recorder.of(cmd.LoadCalibration)[-1].path == "/tmp/other.json"
 
-    def test_the_travel_mm_travels_as_a_command(self, page) -> None:
-        page._travel.setValue(140.0)
-        page.recorder.commands.clear()
-
-        page._travel_apply.click()
-
-        assert page.recorder.of(cmd.SetTravel)[-1].max_stroke_mm == 140.0
+    def test_there_is_no_travel_widget_to_set(self, page) -> None:
+        """The travel was editable here until 2026-09-28, when 10 mm was typed
+        into it and the derived scale fell below the plausible band — the console
+        then refused every move and the page could not explain why.  A
+        measurement of the bench is not a preference, so the control is gone."""
+        assert not hasattr(page, "_travel")
+        assert not hasattr(page, "travel_mm")
 
 
 class TestSaving:
@@ -606,27 +606,24 @@ class TestTheProgress:
         assert "SOMETHING_NEW" in page._phase_label.text()
 
 
-class TestTheTravel:
-    """The one number on this page that is a measurement rather than a file's.
+class TestTheTravelIsNotOnThisPage:
+    """The travel used to be a spinbox here.  It is
+    :data:`constants.DEFAULT_TRAVEL_MM` now, and the page must not offer a way to
+    move it: the console derives every millimetre from it, and one that can be
+    told the wrong number reports every reading wrong while looking healthy."""
 
-    It is what the millimetres per rad is derived from and what the slider tops
-    out at, so it is editable — but only inside a band, because a mistyped travel
-    scales every reading on the console.
-    """
-
-    def test_it_defaults_to_the_measured_travel(self, page) -> None:
-        assert page.travel_mm == pytest.approx(constants.DEFAULT_TRAVEL_MM)
-
-    def test_it_is_restored_from_the_settings(self, qapp) -> None:
+    def test_the_page_does_not_read_a_stored_travel(self, qapp) -> None:
+        """An older console's value must not leak in through the settings."""
         store = _Store(**{"calibration/travel_mm": "140.0"})
         page = CalibrationPage(Recorder(), None, Settings(store))
 
-        assert page.travel_mm == pytest.approx(140.0)
+        assert not hasattr(page, "travel_mm")
 
-    def test_it_cannot_be_set_outside_the_plausible_range(self, page) -> None:
-        page._travel.setValue(9999.0)
+    def test_the_retired_key_is_dropped_from_the_store(self, qapp) -> None:
+        store = _Store(**{"calibration/travel_mm": "10.0"})
+        Settings(store)
 
-        assert page.travel_mm == pytest.approx(constants.STROKE_MAX_MM)
+        assert "calibration/travel_mm" not in store.data
 
 
 @pytest.fixture

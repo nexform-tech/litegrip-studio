@@ -71,14 +71,6 @@ def build_parser(release: str | None = None) -> argparse.ArgumentParser:
         help="标定文件路径；缺省用上次记住的路径，再回退到 ~/.litegrip 下的默认位置",
     )
     parser.add_argument(
-        "--travel-mm", type=float, default=None,
-        help=(
-            "本机夹爪的全行程 mm，用来推导 mm/rad、决定滑块量程，"
-            f"并判断标定文件是否属于这台夹爪（缺省 {constants.DEFAULT_TRAVEL_MM:.0f}，"
-            "标定页也可以随时改）"
-        ),
-    )
-    parser.add_argument(
         "--log-level", default="INFO",
         help="控制台输出的日志级别；文件里始终记录 DEBUG",
     )
@@ -142,11 +134,6 @@ def make_backend(args):
         print(f"无法载入 {args.backend} 后端：{exc}", file=sys.stderr)
         raise SystemExit(2) from exc
 
-    if args.travel_mm is not None:
-        # Applied through the setter rather than a constructor argument because
-        # it is one thing both backends do the same way, and because it only has
-        # to be in place before the load that happens on connect.
-        backend.set_travel_mm(args.travel_mm)
     return backend
 
 
@@ -248,11 +235,6 @@ def main(argv: list[str] | None = None) -> int:
 
     settings = Settings()
     args.calibration = resolve_calibration_path(args, settings)
-    if args.travel_mm is not None:
-        # Written through to the page, which is where the number is shown and
-        # changed; a flag that silently disagreed with the spinbox would be worse
-        # than no flag.
-        settings.travel_mm = args.travel_mm
 
     backend = make_backend(args)
     log.info("后端：%s", backend.describe())

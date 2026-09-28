@@ -323,7 +323,6 @@ class MainWindow(QMainWindow):
     # ── closing ─────────────────────────────────────────────────────────────
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt's name
         self.control_page.persist()
-        self.calibration_page.persist()
         if self._settings is not None:
             self._settings.window_state = bytes(self.saveGeometry())
             self._settings.active_tab = self.tabs.currentIndex()

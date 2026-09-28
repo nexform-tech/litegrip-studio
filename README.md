@@ -520,7 +520,8 @@ semantic-release from the commit history, the git tag is the only source of trut
   by the file's own scale, but only warns when it is wrong by orders of magnitude (outside
   `STROKE_MIN_MM` / `STROKE_MAX_MM`). That test **cannot** be tightened into a comparison with the
   measured travel: files written by the SDK and by earlier versions of the console all carry
-  "nominal travel ÷ span", and that nominal is a setting rather than a measurement, so a 60 mm
+  "nominal travel ÷ span", and that nominal is the SDK's own default rather than a measurement of
+  the unit it was recorded on, so a 60 mm
   gripper and a 120 mm gripper write the same number — tightening it would make every file,
   including this machine's own, warn, and an alarm that is always on is no alarm at all.
   Telling which gripper a file belongs to is the job of the measured-angle frame check
@@ -537,11 +538,15 @@ semantic-release from the commit history, the git tag is the only source of trut
   `(measured travel + SPAN_INSET_MM) / span`. On this machine that is
   `(85 + 1) / 1.681925 = 51.13 mm/rad`, so the two recorded limits span 86.00 mm, the slider's
   0…85 covers the whole travel, and the top of the range sits 1 mm inside the recorded open limit.
-- The travel (`constants.DEFAULT_TRAVEL_MM`, 85.0 mm by default) is the **measured value for this
-  gripper** and can be edited on the calibration page. It decides two things: the mm coefficient and
-  the slider's range. The old settings key `calibration/nominal_stroke_mm` meant something else and
-  is no longer read; `calibration/travel_mm` is read instead, so an old value cannot be mistaken
-  for a measured travel. Saving a calibration writes **this derived coefficient** into the file (the
+- The travel (`constants.DEFAULT_TRAVEL_MM`, 85.0 mm) is the **measured value for this gripper** and
+  is a constant, not a setting. It decides two things: the mm coefficient and the slider's range, so
+  a console told the wrong one reports every millimetre wrong while looking healthy. It was editable
+  on the calibration page until 2026-09-28, when 10 mm was typed into it: that derives 8.0 mm/rad,
+  below `RAD_TO_MM_MIN`, so the plausibility check turned a good calibration into a problem and the
+  gate refused motion — a console that could not move and could not say why. There is no flag, no
+  setting and no widget for it now (`--travel-mm` is gone; the retired `calibration/travel_mm` is
+  deleted from an existing ini when the console opens), and moving this console to another unit means
+  editing the constant and re-probing. Saving a calibration writes **this derived coefficient** into the file (the
   SDK writes the file from its own config, and the console pushes the limits into that config
   before saving), which is the number the console actually moves with: reading it back is
   self-consistent, and the cross-check (the coefficient the SDK applied equals the one in the file)

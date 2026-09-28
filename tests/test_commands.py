@@ -28,7 +28,6 @@ from litegrip_studio.core.commands import (
     Release,
     SaveCalibration,
     SetForce,
-    SetTravel,
     SetSpeed,
     StartGuidedCalibration,
     StartManualCalibration,
@@ -88,7 +87,6 @@ class TestDescribe:
             Release(),
             SetSpeed(80.0),
             SetForce(15.0),
-            SetTravel(200.0),
             LoadCalibration(),
             LoadCalibration("/tmp/x.json"),
             SaveCalibration(),
@@ -162,7 +160,6 @@ class TestCoalesce:
             (MoveToMm, (10.0,)),
             (SetSpeed, (50.0,)),
             (SetForce, (10.0,)),
-            (SetTravel, (120.0,)),
             (Heartbeat, ()),
         ],
     )

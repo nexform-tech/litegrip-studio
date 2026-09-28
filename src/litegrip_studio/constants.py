@@ -213,9 +213,17 @@ KP_GRASP_APPROACH = 25.0
 FORCE_RAMP_S = 0.05
 
 # ── Stroke ──────────────────────────────────────────────────────────────────
-#: The travel of the gripper this console drives, in millimetres: the default for
-#: the operator's setting, and the fallback everywhere the setting has not been
-#: read yet.
+#: The travel of the gripper this console drives, in millimetres.
+#:
+#: A property of the bench, not a preference: it is the constant the whole
+#: console reads, and there is deliberately no flag, setting or widget that
+#: changes it.  A console that could be told the wrong travel would report every
+#: millimetre wrong while looking perfectly healthy, and one that *was* told 10
+#: mm (which is what the calibration page's old spinbox did on 2026-09-28)
+#: derives a scale below :data:`RAD_TO_MM_MIN`, so the plausibility check turns
+#: the whole calibration into a problem and the gate refuses motion — the
+#: operator is then holding an unusable console and a file that looks fine.
+#: Moving this console to another unit means editing this number and re-probing.
 #:
 #: Deliberately NOT the SDK's 120 mm.  ``GripperConfig.max_stroke_mm``, the
 #: README's spec table and every calibration file the SDK writes are built around
@@ -240,17 +248,17 @@ DEFAULT_TRAVEL_MM = 85.0
 #: depends on how hard the probe pushed.
 SPAN_INSET_MM = 1.0
 
-# Band the travel may be set to.  It is editable in the calibration page because
-# it is a measurement of one particular unit rather than a constant — it decides
-# the mm scale and the slider's range, so it has to be adjustable, but not to
-# anything: a travel of 3 mm or 9000 mm is a typo, and scaling by it would
-# produce a calibration that looks plausible and is not.
+# Band a travel may fall in.  Nothing sets the travel any more, so this is no
+# longer a range a control is bounded by — it is the plausibility band
+# :func:`~litegrip_studio.calibration.validate_limits` holds a *file's* own
+# numbers to: a file whose angles and scale imply a stroke of 3 mm or 9000 mm is
+# describing a different machine, and one of the two files is wrong.
 STROKE_MIN_MM = 10.0
 STROKE_MAX_MM = 300.0
-# Plausibility band for the derived mm/rad.  A travel setting that cannot belong
-# to these angles shows up here, as a problem rather than as a slider that
-# covers a fraction of the jaws' travel: 85 mm over this unit's span is 46.7
-# mm/rad, and a mistyped 10 mm would be 6.0.
+# Plausibility band for the derived mm/rad.  A travel that cannot belong to a
+# file's angles shows up here, as a problem rather than as a slider that covers a
+# fraction of the jaws' travel: this unit's 85 mm over its recorded span is 62.9
+# mm/rad, and the same number derived at 10 mm would be 8.0.
 #
 # The same band is deliberately NOT applied to the mm/rad a file carries.  That
 # one is a nominal stroke over a span, so it reads 120 mm for a 60 mm unit and a

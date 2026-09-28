@@ -34,7 +34,6 @@ from __future__ import annotations
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QCheckBox,
-    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -170,17 +169,6 @@ class CalibrationPage(QWidget):
         )
         self._allow.toggled.connect(self._on_allow_toggled)
 
-        self._travel = QDoubleSpinBox()
-        self._travel.setToolTip(
-            "本机夹爪上用卡尺量到的全行程，从完全闭合到完全张开。\n"
-            "一个值，两个用途：\n"
-            "· 毫米换算系数 —— 由标定文件里的两个角度和本值推导，不读文件自带的 "
-            "rad_to_mm（那一项是「标称行程 ÷ 跨度」，哪台夹爪写出来都一样）；\n"
-            "· 滑块量程 —— 0 是标定的闭合零点，本值是量程顶端，比记录到的张开极限"
-            "内缩 1 mm。\n"
-            "改了这个值，界面上所有毫米读数会立刻按新比例尺重算。"
-        )
-        self._travel_apply = QPushButton("应用")
         self._reload = QPushButton("重新读取")
         self._load = QPushButton("载入文件…")
         self._save = QPushButton("保存标定…")
@@ -287,12 +275,9 @@ class CalibrationPage(QWidget):
         """Where that calibration came from, and how to change it."""
         files = QGridLayout()
         files.setSpacing(6)
-        files.addWidget(QLabel("全行程"), 0, 0)
-        files.addWidget(self._travel, 0, 1)
-        files.addWidget(self._travel_apply, 0, 2)
-        files.addWidget(self._reload, 1, 0)
-        files.addWidget(self._load, 1, 1)
-        files.addWidget(self._save, 1, 2)
+        files.addWidget(self._reload, 0, 0)
+        files.addWidget(self._load, 0, 1)
+        files.addWidget(self._save, 0, 2)
 
         box = QGroupBox("标定文件")
         layout = QVBoxLayout(box)
@@ -427,21 +412,8 @@ class CalibrationPage(QWidget):
         self._reload.clicked.connect(lambda: self._submit(cmd.LoadCalibration()))
         self._load.clicked.connect(self._on_load_clicked)
         self._save.clicked.connect(lambda: self._submit(cmd.SaveCalibration()))
-        self._travel_apply.clicked.connect(
-            lambda: self._submit(cmd.SetTravel(max_stroke_mm=self._travel.value()))
-        )
 
     def _load_settings(self) -> None:
-        travel = (
-            constants.DEFAULT_TRAVEL_MM if self._settings is None
-            else self._settings.travel_mm
-        )
-        self._travel.setRange(constants.STROKE_MIN_MM, constants.STROKE_MAX_MM)
-        self._travel.setDecimals(1)
-        self._travel.setSingleStep(10.0)
-        self._travel.setSuffix(" mm")
-        self._travel.setValue(travel)
-
         allowed = (
             False if self._settings is None
             else self._settings.allow_factory_calibration
@@ -616,7 +588,6 @@ class CalibrationPage(QWidget):
 
         self._reload.setEnabled(not any_running)
         self._load.setEnabled(not any_running)
-        self._travel_apply.setEnabled(not any_running)
         # Only a calibration whose numbers are self-consistent is worth writing
         # out; saving a file the console has just called unusable would launder
         # it into one that looks like a user calibration next launch.
@@ -670,14 +641,6 @@ class CalibrationPage(QWidget):
         return self._allow.isChecked()
 
     @property
-    def travel_mm(self) -> float:
-        return float(self._travel.value())
-
-    @property
     def reversed_mount(self) -> bool:
         """The mounting, as the operator declared it for the guided probe."""
         return self._guided_reversed.isChecked()
-
-    def persist(self) -> None:
-        if self._settings is not None:
-            self._settings.travel_mm = self.travel_mm
