@@ -156,6 +156,11 @@ class RecordingBackend(GripperBackend):
         self.connected = False
         self.enabled = False
         self.q_rad = MID_RAD
+        #: The angle the drive last reported while it was being addressed.  A
+        #: disabled DM motor stops answering, so the SDK goes on serving this
+        #: number while the mechanism itself sits wherever it was left — which is
+        #: why :meth:`drag` moves ``q_rad`` without touching it.
+        self._served_rad: float | None = None
         self.error_code = constants.ERROR_DISABLED
         self.rx_frames = 0
 
@@ -206,16 +211,30 @@ class RecordingBackend(GripperBackend):
         self._record("poll")
         return self.fresh
 
+    def drag(self, q_rad: float) -> None:
+        """Push the jaws by hand while the drive is dark.
+
+        The real backend reads the SDK's cache, and a disabled drive stops
+        updating it: the angle served stays where it was while the mechanism
+        moves.  A fake whose ``read`` followed ``q_rad`` straight away would hand
+        the worker the hand's work as though the encoder had seen it, and the
+        tests below would pass with the bug they exist to catch still in place.
+        """
+        self.q_rad = q_rad
+
     def read(self) -> Telemetry:
         self._claim()
+        if self.enabled or self._served_rad is None:
+            self._served_rad = self.q_rad
+        q_rad = self._served_rad
         return Telemetry(
-            position_rad=self.q_rad,
+            position_rad=q_rad,
             velocity_rad_s=0.0,
             torque_nm=0.0,
             temperature_mos=30,
             temperature_coil=30,
             error_code=self.error_code,
-            position_mm=self._limits.to_mm(self.q_rad),
+            position_mm=self._limits.to_mm(q_rad),
             force_n=0.0,
             t=0.0,
         )
@@ -1036,6 +1055,93 @@ class TestEnablingBeforeTheAxisHasAnswered:
         assert bench.loop.motion.state is MotionState.ZERO_G
         bench.send(cmd.SetZeroGravity(False))
         assert bench.loop.motion.state is MotionState.RELEASE
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 使能 an axis a hand has moved while the drive was dark
+# ═══════════════════════════════════════════════════════════════════════════
+class TestEnablingAfterTheJawsWerePushedByHand:
+    """使能 holds where the jaws *are*, not what the drive last said.
+
+    A disabled drive stops answering, so the SDK goes on serving the angle from
+    before the disable while a hand can push the jaws anywhere.  The worker's own
+    frame count outlived the disable, so the next 使能 took the hold branch with
+    that pre-disable pose, froze it, and commanded it with full position gain —
+    driving the gripper back to where it had been pushed away from.  The display
+    is drawn from the same reading, so the number the operator watched while they
+    pushed was the number the hold then aimed at.
+    """
+
+    PUSHED_RAD = LIMITS.to_rad(52.5)
+
+    def frames_since(self, bench: Bench, mark: int) -> list[tuple]:
+        """Every frame the backend was sent after ``mark`` calls were made.
+
+        The mark matters: the axis was *holding* before it was disabled, so a
+        scan of the whole call log would find the pre-disable hold and read the
+        bug into frames that predate it.
+        """
+        return [
+            call[1] for call in bench.backend.calls[mark:] if call[0] == "stream_frame"
+        ]
+
+    def pushed(self) -> Bench:
+        """Enabled and measured, then disabled and shoved a long way by hand."""
+        bench = Bench()
+        bench.bring_up()
+        bench.tick(2)
+        assert bench.loop.motion.state is MotionState.HOLD
+        assert bench.loop.last_frame.position_mm == pytest.approx(60.0, abs=1e-6)
+        bench.send(cmd.Disable())
+        bench.backend.drag(self.PUSHED_RAD)
+        bench.tick(2)
+        return bench
+
+    def test_a_dark_axis_claims_no_position(self) -> None:
+        """``None``, so the display reads 「—」.  The drive's last angle describes
+        where the jaws *were*, and drawing it as the current position is what
+        made a stale pose look like a live one."""
+        bench = self.pushed()
+        assert bench.loop.last_frame.position_mm is None
+
+    def test_the_next_enable_holds_where_the_hand_left_the_jaws(self) -> None:
+        bench = self.pushed()
+        bench.send(cmd.Enable())
+        bench.tick(2)
+        assert bench.loop.motion.state is MotionState.HOLD
+        assert bench.loop.last_frame.cmd_mm == pytest.approx(52.5, abs=1e-6)
+
+    def test_no_frame_ever_aims_at_the_pose_from_before_the_disable(self) -> None:
+        """The regression itself, stated as the thing that hurt: not one frame
+        may carry the old pose with a stiffness on it.  A hold freezes its target
+        when it is entered, so a single such frame is enough to drive there."""
+        bench = self.pushed()
+        mark = len(bench.backend.calls)
+        bench.send(cmd.Enable())
+        bench.tick(4)
+        aimed = [(q_rad, kp) for (q_rad, kp, *_rest) in self.frames_since(bench, mark) if kp]
+        assert aimed, "使能后必须真的发出一个带增益的驻留帧"
+        assert all(
+            q_rad == pytest.approx(self.PUSHED_RAD) for q_rad, _kp in aimed
+        ), "驻留帧指向了失能前的位姿"
+
+    def test_a_re_enable_whose_link_stays_dark_holds_nothing(self) -> None:
+        """The other way the same mistake lands: with no frame since this
+        energisation there is no pose to hold, so the axis is left free.  The
+        frames counted in the session before the disable are not evidence about
+        this one, and holding on their strength would aim at that old pose."""
+        bench = self.pushed()
+        bench.backend.fresh = False
+        mark = len(bench.backend.calls)
+        bench.send(cmd.Enable())
+        assert bench.loop.motion.state is MotionState.RELEASE
+        assert all(kp == 0.0 for _q, kp, *_rest in self.frames_since(bench, mark))
+
+    def test_the_console_says_where_it_is_holding(self) -> None:
+        bench = self.pushed()
+        bench.send(cmd.Enable())
+        bench.tick(2)
+        assert any("52.5 mm" in text for text in bench.signals.logs())
 
 
 # ═══════════════════════════════════════════════════════════════════════════
