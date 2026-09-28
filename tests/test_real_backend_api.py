@@ -529,7 +529,7 @@ class TestFrameRefusal:
         assert armed.stream_frame(limits.rad_low, 100.0, 2.0) is True
         assert armed.stream_frame(limits.rad_high, 100.0, 2.0) is True
 
-    def test_a_probe_frame_may_leave_the_travel_it_is_measuring(self, armed) -> None:
+    def test_an_ungated_frame_may_leave_the_travel_it_is_measuring(self, armed) -> None:
         """The guided probe exists to find the mechanical stops, and those sit
         outside the calibrated travel by design — the red lines are the margin.
 
@@ -541,23 +541,56 @@ class TestFrameRefusal:
         """
         beyond = armed.limits().rad_low - 0.08
         assert armed.stream_frame(beyond, 60.0, 2.0) is False
-        assert armed.stream_frame(beyond, 60.0, 2.0, probe_frame=True) is True
+        assert armed.stream_frame(beyond, 60.0, 2.0, ungated=True) is True
         assert _stub(armed).frames[-1]["q"] == beyond
 
-    def test_a_probe_frame_is_still_refused_when_it_is_nonsense(self, backend) -> None:
-        """``probe_frame`` relaxes the calibration requirement and the travel
+    def test_an_ungated_frame_is_still_refused_when_it_is_nonsense(self, backend) -> None:
+        """``ungated`` relaxes the calibration requirement and the travel
         check, not the sanity checks: those are wrong whatever a calibration
         says, and on that path the frame is the one thing that presses."""
-        assert backend.stream_frame(math.nan, 100.0, 2.0, probe_frame=True) is False
-        assert backend.stream_frame(1.0, -1.0, 2.0, probe_frame=True) is False
+        assert backend.stream_frame(math.nan, 100.0, 2.0, ungated=True) is False
+        assert backend.stream_frame(1.0, -1.0, 2.0, ungated=True) is False
         assert _stub(backend).frames == []
         # Uncalibrated is what a probe is for, so that one is sent.
-        assert backend.stream_frame(1.0, 100.0, 2.0, probe_frame=True) is True
+        assert backend.stream_frame(1.0, 100.0, 2.0, ungated=True) is True
 
     def test_a_negative_gain_is_refused(self, armed) -> None:
         assert armed.stream_frame(1.0, -1.0, 2.0) is False
         assert armed.stream_frame(1.0, 100.0, -1.0) is False
         assert _stub(armed).frames == []
+
+    def test_a_zero_gain_frame_reaches_an_uncalibrated_motor(self, backend) -> None:
+        """松力 and 零重力 carry no pose: kp and kd are zero, so there is no
+        position for a calibration to have got wrong, and the frame cannot move
+        the axis whatever the angle field says.
+
+        They used to be refused here, and that is what made a bad file
+        un-escapable: with the gate shut, 松力 did nothing, the operator could
+        not push the jaws by hand, and re-calibrating needs the jaws to move.
+        """
+        backend._info = None
+        assert backend.stream_frame(0.9, 0.0, 0.0, 0.0, 0.0, ungated=True) is True
+        assert len(_stub(backend).frames) == 1
+
+    def test_an_ungated_hold_may_sit_outside_a_stale_travel(self, armed) -> None:
+        """The pose a probe is left in is the one the encoder reported, and it
+        is outside the old file's travel by exactly the amount that made the
+        file wrong.  Refusing it leaves the axis free while the log says held."""
+        stale = armed.limits().rad_low - 0.9
+        assert armed.stream_frame(stale, 60.0, 2.0) is False
+        assert armed.stream_frame(stale, 60.0, 2.0, ungated=True) is True
+        assert _stub(armed).frames[-1]["q"] == stale
+
+    def test_a_position_frame_is_still_refused_without_a_calibration(
+        self, backend
+    ) -> None:
+        """The relaxation belongs to the flag, not to a frame that happens to
+        have no gain: the same call without it must still be refused, or every
+        move on an uncalibrated console would reach the motor."""
+        backend._info = None
+        assert backend.stream_frame(0.9, 0.0, 0.0) is False
+        assert backend.stream_frame(0.9, 100.0, 2.0) is False
+        assert _stub(backend).frames == []
 
     def test_zero_gains_are_allowed(self, armed) -> None:
         """Zero stiffness is how the gripper is made back-drivable, so it must

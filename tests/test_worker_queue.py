@@ -194,9 +194,9 @@ class RecordingBackend(GripperBackend):
         self.error_code = constants.ERROR_ENABLED if self.enabled else constants.ERROR_DISABLED
 
     # ── control-rate primitives ─────────────────────────────────────────────
-    def stream_frame(self, q_rad, kp, kd, dq_rad_s=0.0, tau_nm=0.0, *, probe_frame=False):
+    def stream_frame(self, q_rad, kp, kd, dq_rad_s=0.0, tau_nm=0.0, *, ungated=False):
         self._claim()
-        self._record("stream_frame", q_rad, kp, kd, dq_rad_s, tau_nm, probe_frame)
+        self._record("stream_frame", q_rad, kp, kd, dq_rad_s, tau_nm, ungated)
         return self.enabled
 
     def poll(self) -> bool:
@@ -272,9 +272,9 @@ class RecordingSim(SimBackend):
         self.frames: list[tuple] = []
         self.zeroes = 0
 
-    def stream_frame(self, q_rad, kp, kd, dq_rad_s=0.0, tau_nm=0.0, *, probe_frame=False):
-        self.frames.append((q_rad, kp, kd, dq_rad_s, tau_nm, probe_frame))
-        return super().stream_frame(q_rad, kp, kd, dq_rad_s, tau_nm, probe_frame=probe_frame)
+    def stream_frame(self, q_rad, kp, kd, dq_rad_s=0.0, tau_nm=0.0, *, ungated=False):
+        self.frames.append((q_rad, kp, kd, dq_rad_s, tau_nm, ungated))
+        return super().stream_frame(q_rad, kp, kd, dq_rad_s, tau_nm, ungated=ungated)
 
     def zero_torque(self) -> None:
         self.zeroes += 1
@@ -1251,7 +1251,7 @@ class TestCalibrationCommands:
         assert bench.loop.probe is None
         assert "使能" in bench.signals.alerts()[-1]
 
-    def test_the_probe_drives_the_axis_with_probe_frame(self) -> None:
+    def test_the_probe_drives_the_axis_with_an_ungated_frame(self) -> None:
         """The one motion in the application allowed before a calibration
         exists — it is what produces one."""
         bench = Bench()

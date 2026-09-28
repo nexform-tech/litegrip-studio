@@ -319,7 +319,13 @@ class MotionFSM:
         if self.state in (MotionState.RELEASE, MotionState.ZERO_G):
             # Zero stiffness has nothing to gate: there is no command to get
             # wrong, and the point of these states is that the jaws are free.
-            return self._send(backend, pos_mm, 0.0, 0.0, 0.0, 0.0, 0.0, self.state.value)
+            # ``ungated`` because of that: this frame must reach the motor on a
+            # console whose calibration is unusable, or 松力 does nothing and an
+            # operator with a bad file cannot move the jaws by hand — which is
+            # exactly when they need to re-calibrate.
+            return self._send(
+                backend, pos_mm, 0.0, 0.0, 0.0, 0.0, 0.0, self.state.value, ungated=True
+            )
 
         if self.state is MotionState.HOLD_RAD:
             # The other state a shut gate cannot refuse, and for the same
@@ -543,7 +549,14 @@ class MotionFSM:
         assert self._frozen_rad is not None
         assert self._frozen_mm is None
         p = self.params
-        sent = bool(backend.stream_frame(self._frozen_rad, p.kp, p.kd, 0.0, 0.0))
+        # ``ungated``: the pose held here is the one the encoder just reported,
+        # and behind a shut gate it is outside the travel by definition — the
+        # gate is shut because the file does not describe this gripper.  A
+        # *gated* hold would be refused here, leaving the log claiming the axis
+        # is held while it is actually free.
+        sent = bool(
+            backend.stream_frame(self._frozen_rad, p.kp, p.kd, 0.0, 0.0, ungated=True)
+        )
         return FrameOut(None, 0.0, None, p.kp, p.kd, 0.0, sent, "hold_rad")
 
     def _force_frame(
@@ -607,6 +620,7 @@ class MotionFSM:
         err_mm: float,
         note: str,
         dq_rad: float | None = None,
+        ungated: bool = False,
     ) -> FrameOut:
         q_mm = self.limits.clamp_mm(q_cmd_mm)
         q_rad = self.limits.clamp_rad(self.limits.to_rad(q_mm))
@@ -614,7 +628,7 @@ class MotionFSM:
             dq_rad = mm_to_rad_per_s(
                 vel_mm_s, self.limits.rad_to_mm, direction=self.limits.direction
             )
-        sent = bool(backend.stream_frame(q_rad, kp, kd, dq_rad, tau_nm))
+        sent = bool(backend.stream_frame(q_rad, kp, kd, dq_rad, tau_nm, ungated=ungated))
         return FrameOut(
             q_cmd_mm=q_mm,
             vel_ref_mm_s=vel_mm_s,
@@ -653,7 +667,8 @@ def simulate_move(
         def __init__(self) -> None:
             self.mm = start_mm
 
-        def stream_frame(self, q_rad, kp, kd, dq=0.0, tau=0.0) -> bool:
+        def stream_frame(self, q_rad, kp, kd, dq=0.0, tau=0.0, *, ungated=False) -> bool:
+            del ungated  # an ideal plant has no gate to relax
             self.mm = limits.to_mm(q_rad)
             return True
 

@@ -282,11 +282,19 @@ both follow from what it is for:
   and the hard stops are by definition beyond the soft limits.
 
 The second rule was once missing: `stream_frame`'s travel check only asked whether a usable
-calibration existed, not whether this frame was a probe frame, so any valid calibration shut the
-probe inside the very travel it was there to measure, and it recorded "the last step I was allowed
-to command" as the open limit — a wrong answer that reads like a successful measurement. Probe
-frames now skip that check explicitly (`probe_frame=True`) while still refusing non-finite values
-and negative gains, which are wrong whatever the calibration says.
+calibration existed, not whether this frame carried a target the check could judge, so any valid
+calibration shut the probe inside the very travel it was there to measure, and it recorded "the
+last step I was allowed to command" as the open limit — a wrong answer that reads like a successful
+measurement. Such frames now say so explicitly (`ungated=True`): the probe steps, which are looking
+for stops beyond the red lines, and the frames that carry no target at all — 松力, 零重力, and the
+hold a probe is left in, whose pose is the angle the encoder has just reported. An ungated frame
+still refuses non-finite values and negative gains, which are wrong whatever the calibration says.
+
+The flag is named for what the frame *is* rather than for who sent it, and that includes the
+long-lived states: 松力 can be held open for an hour without widening what it permits, because what
+it permits is a frame with no stiffness in it. Before it existed there was one flag named after its
+first caller, and 松力 behind a shut gate — the state an operator needs precisely when the file is
+bad — was refused by the gate it was there to work around.
 
 The probe also has to know **which way the jaws open**, and it cannot read that from a file: it is
 the thing producing the file. It walks the jaws into the open stop and then into the closed one,

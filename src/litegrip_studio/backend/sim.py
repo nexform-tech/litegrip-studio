@@ -143,15 +143,15 @@ class SimBackend(GripperBackend):
         dq_rad_s: float = 0.0,
         tau_nm: float = 0.0,
         *,
-        probe_frame: bool = False,
+        ungated: bool = False,
     ) -> bool:
-        # ``probe_frame`` is accepted and ignored.  It relaxes checks the
-        # simulator does not have: the plant is a set of differential equations,
-        # not a CAN bus, so there is nothing in it that depends on a calibration
-        # being right or on a target being inside one.  Refusing here instead
-        # would make the probe behave differently on the two backends, which is
+        # ``ungated`` is accepted and ignored.  It relaxes checks the simulator
+        # does not have: the plant is a set of differential equations, not a CAN
+        # bus, so there is nothing in it that depends on a calibration being
+        # right or on a target being inside one.  Refusing here instead would
+        # make an ungated frame behave differently on the two backends, which is
         # the one thing the simulator must never do.
-        del probe_frame
+        del ungated
         self._claim()
         self._advance()
         if not self._connected or not self._enabled:

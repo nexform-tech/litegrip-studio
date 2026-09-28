@@ -1143,13 +1143,13 @@ class WorkerLoop:
 
         sent = False
         if out.q_rad is not None:
-            # ``probe_frame`` is the whole point of the probe: it is the one
-            # motion that must happen before a calibration exists, and it is
-            # allowed outside the travel the calibration describes, because the
+            # ``ungated`` is the whole point of the probe: it is the one motion
+            # that must happen before a calibration exists, and it is allowed
+            # outside the travel the calibration describes, because the
             # mechanical stops it is looking for are outside it by design.
             sent = bool(
                 self.backend.stream_frame(
-                    out.q_rad, out.kp, out.kd, 0.0, out.tau_nm, probe_frame=True
+                    out.q_rad, out.kp, out.kd, 0.0, out.tau_nm, ungated=True
                 )
             )
             self._watch_probe_frames(sent, dt, probe)

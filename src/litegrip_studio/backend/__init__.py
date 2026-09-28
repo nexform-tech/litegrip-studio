@@ -140,7 +140,7 @@ class GripperBackend(ABC):
         dq_rad_s: float = 0.0,
         tau_nm: float = 0.0,
         *,
-        probe_frame: bool = False,
+        ungated: bool = False,
     ) -> bool:
         """Send one MIT frame.  Returns False when the frame could not be sent.
 
@@ -148,14 +148,20 @@ class GripperBackend(ABC):
         offers: ``CanTransport.recv`` swallows all ``OSError`` and returns
         ``None``, so a dead link otherwise looks exactly like an idle one.
 
-        ``probe_frame`` is for the calibration probes, the one motion in the
-        application that has to run before a calibration exists — and, once one
-        does, the only motion allowed to leave the travel it describes.  A probe
-        exists to find the mechanical stops, and those sit outside the red lines
-        by design, so a travel check applied to it traps the probe inside the
-        very band it is measuring.  It relaxes the calibration requirement and
-        the travel check and nothing else: a non-finite value or a negative gain
-        is still refused on that path.
+        ``ungated`` says the frame carries no target the calibration may veto,
+        and it is a property of the frame rather than of its caller.  There are
+        two such frames: a probe step, which is looking for the mechanical stops
+        the calibration records, and therefore has to be allowed outside the
+        travel and before a calibration exists at all; and a zero-gain or
+        hold-at-what-was-measured frame — 松力, 零重力, and the pose a probe is
+        left in — which commands no pose, or the identity of the pose the
+        encoder just reported.  Both relax the calibration requirement and the
+        travel check and nothing else: a non-finite value or a negative gain is
+        still refused, because those are wrong whatever the calibration says.
+
+        It is not a licence for a *state*: nothing about holding 松力 open for
+        an hour widens what it permits, because what it permits is a frame with
+        nothing in it to be wrong.
         """
 
     @abstractmethod
