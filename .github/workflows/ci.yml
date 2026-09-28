@@ -69,6 +69,15 @@ jobs:
       - name: Install the studio and its test dependencies
         run: |
           python -m pip install --upgrade pip
+          # `project.version` holds the semantic-release placeholder, which is
+          # not a PEP 440 version, so setuptools refuses to build the metadata
+          # while it is there. A publish job substitutes the released value in
+          # its own workspace (AGENTS.md §3); this job substitutes a valid one in
+          # the checkout, and the file in the repository keeps its placeholder.
+          # The match is asserted: a placeholder written differently fails here
+          # rather than quietly installing a version nobody chose.
+          grep -q '^version = "0\.0\.0-semantic-release"$' pyproject.toml
+          sed -i 's/^version = "0\.0\.0-semantic-release"$/version = "0.0.0"/' pyproject.toml
           python -m pip install -e ".[dev]"
 
       - name: Run the test suite
