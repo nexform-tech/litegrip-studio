@@ -19,7 +19,7 @@ from PyQt5.QtWidgets import QPushButton
 from litegrip_studio import calibration, constants
 from litegrip_studio.calibration import CalibrationInfo
 from litegrip_studio.core import commands as cmd
-from litegrip_studio.core.calibration_fsm import GuidedPhase, ManualPhase
+from litegrip_studio.core.calibration_fsm import GuidedPhase, TwoPointPhase
 from litegrip_studio.core.worker import (
     CONN_CONNECTED,
     CONN_CONNECTING,
@@ -287,10 +287,10 @@ class TestTheWiring:
         reading."""
         window.tabs.setCurrentIndex(0)
 
-        worker.calib_progress.emit(ManualPhase.RECORDING.value, 0.1, "")
+        worker.calib_progress.emit(TwoPointPhase.RECORD_OPEN.value, 0.1, "")
 
         assert window.tabs.currentWidget() is window.calibration_page
-        assert window.calibration_page.phase == ManualPhase.RECORDING.value
+        assert window.calibration_page.phase == TwoPointPhase.RECORD_OPEN.value
 
     def test_the_dock_is_not_forced_open_by_a_probe(self, window, worker) -> None:
         window.tabs.setCurrentIndex(1)

@@ -23,6 +23,8 @@ from litegrip_studio.core.commands import (
     LoadCalibration,
     MoveToMm,
     Open,
+    RecordCloseLimit,
+    RecordOpenLimit,
     Release,
     SaveCalibration,
     SetForce,
@@ -94,7 +96,9 @@ class TestDescribe:
             StartGuidedCalibration(reversed_mount=True),
             ConfirmProbeLimit(),
             StartManualCalibration(),
-            StartManualCalibration(30.0),
+            StartManualCalibration(source="button"),
+            RecordOpenLimit(),
+            RecordCloseLimit(),
             Heartbeat(),
             Inject({"uv": True, "obj_mm": 40.0}),
         ],
@@ -124,6 +128,16 @@ class TestDescribe:
         images of each other are identical in the log without it."""
         assert "反向装配" in StartGuidedCalibration(reversed_mount=True).describe()
         assert "反向" not in StartGuidedCalibration().describe()
+
+    def test_a_manual_record_says_which_end_it_records(self) -> None:
+        """The button the operator pressed is the whole of the answer to "which
+        end is 0 mm", and the log line is where that answer is kept — two
+        presses that read the same in the log would make the file
+        unattributable."""
+        open_text = RecordOpenLimit().describe()
+        close_text = RecordCloseLimit().describe()
+        assert "张开" in open_text and "闭合" in close_text
+        assert open_text != close_text
 
     def test_the_injection_reports_its_values(self) -> None:
         text = Inject({"uv": True, "obj_mm": 40.0}).describe()
@@ -198,6 +212,18 @@ class TestCoalesce:
             ConfirmProbeLimit(),
             ConfirmProbeLimit(),
             ConfirmProbeLimit(),
+        ]
+        assert commands.coalesce(seq) == seq
+
+    def test_every_record_press_reaches_the_probe(self) -> None:
+        """A record press is an operator saying where the jaws are.  Folding two
+        of them would drop one silently; the probe refuses an out-of-turn press
+        out loud, which is the behaviour worth having."""
+        seq = [
+            StartManualCalibration(),
+            RecordOpenLimit(),
+            RecordCloseLimit(),
+            RecordCloseLimit(),
         ]
         assert commands.coalesce(seq) == seq
 

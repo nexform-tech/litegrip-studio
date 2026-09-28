@@ -26,7 +26,6 @@ from litegrip_studio.core import commands as cmd
 from litegrip_studio.core.calibration_fsm import (
     MANUAL_MAX_JUMP_RAD_PER_TICK,
     GuidedPhase,
-    ManualPhase,
 )
 from litegrip_studio.core.commands import AnyCommand
 from litegrip_studio.core.motion import MotionState
@@ -1326,10 +1325,11 @@ class TestCalibrationCommands:
         bench.send(cmd.ConfirmProbeLimit())
         assert bench.loop.probe.open_rad is not None
 
-    def test_the_manual_probe_runs_limp_and_stops_on_command(self) -> None:
+    def test_the_manual_probe_runs_limp(self) -> None:
+        """Zero torque is the whole mechanism: the operator drives the jaws."""
         bench = Bench()
         bench.bring_up()
-        bench.send(cmd.StartManualCalibration(60.0))
+        bench.send(cmd.StartManualCalibration())
         bench.tick()
         assert bench.loop.probe is not None
         _q, kp, kd, _dq, tau, _u = [
@@ -1337,44 +1337,71 @@ class TestCalibrationCommands:
         ][-1]
         assert (kp, kd, tau) == (0.0, 0.0, 0.0)
 
-        bench.send(cmd.StopManualRecording())
-        assert bench.loop.probe.phase is ManualPhase.SETTLE
-        assert "提前结束" in bench.signals.of("log")[-1][1]
-
-    def test_stop_manual_is_refused_without_a_manual_probe(self) -> None:
+    def test_the_two_labelled_points_finish_the_probe(self) -> None:
+        """The reported flow end to end, at the worker's own level: the
+        operator works the jaws to the open extreme, records it, works them back
+        to the closed one, records that — and the result is adopted"""
         bench = Bench()
         bench.bring_up()
-        bench.send(cmd.StopManualRecording())
-        assert "没有正在进行的手动记录" in bench.signals.alerts()[-1]
-
-    def test_a_finished_probe_is_adopted_but_still_gated(self) -> None:
-        """An in-memory result is usable — the UI should show its numbers — but
-        unsaved, so nothing about it survives a restart."""
-        bench = Bench()
-        bench.bring_up()
-        bench.send(cmd.StartManualCalibration(1.0))
+        bench.send(cmd.StartManualCalibration())
         bench.tick()
         assert bench.loop.probe is not None
 
-        bench.drive_to(0.0)
         bench.drive_to(120.0)
-        bench.run_until_probe_finishes()
+        bench.send(cmd.RecordOpenLimit())
+        assert bench.loop.probe is not None, "one point is not a calibration"
 
+        bench.drive_to(0.0)
+        bench.send(cmd.RecordCloseLimit())
+
+        assert bench.loop.probe is None, "the second point should finish it"
         assert "set_calibration_memory" in bench.backend.names()
         assert bench.loop.info.provenance == calibration.PROVENANCE_MEMORY
-        assert bench.loop.gate is GateState.BLOCKED
         # Gated, and held all the same: an unsaved result is not a set of limits
         # anyone has vetted, so no command in *millimetres* is derived from it —
         # but the axis is not abandoned either.  The hold is at the angle the
         # encoder reported, which needs no limits at all.  See
         # ``test_the_axis_is_handed_back_after_a_probe``.
+        assert bench.loop.gate is GateState.BLOCKED
         assert bench.loop.motion.state is MotionState.HOLD_RAD
         assert "尚未保存" in bench.signals.alerts()[-1]
 
-    def test_a_probe_that_captured_no_range_is_reported_not_adopted(self) -> None:
+    def test_a_record_without_a_manual_probe_is_refused(self) -> None:
         bench = Bench()
         bench.bring_up()
-        bench.send(cmd.StartManualCalibration(0.2))
+        bench.send(cmd.RecordOpenLimit())
+        assert "没有正在进行的手动标定" in bench.signals.alerts()[-1]
+
+    def test_a_record_out_of_turn_is_refused_rather_than_relabelled(self) -> None:
+        """The press carries the label, and the label is what decides which end
+        is 0 mm — so a press that arrives during the other step must not be
+        taken as the point that happens to be due.  A calibration built from the
+        two angles swapped passes every check the console makes and drives the
+        gripper backwards."""
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.StartManualCalibration())
+        bench.tick()
+
+        bench.drive_to(120.0)
+        bench.send(cmd.RecordCloseLimit())
+
+        probe = bench.loop.probe
+        assert probe is not None
+        assert probe.close_rad is None and probe.open_rad is None
+        assert "已忽略这次按键" in bench.signals.of("log")[-1][1]
+
+    def test_a_probe_that_captured_no_range_is_reported_not_adopted(self) -> None:
+        """Both buttons pressed in the same place: a "calibration" whose every
+        millimetre is one angle.  It must be reported, not adopted."""
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.StartManualCalibration())
+        bench.tick()
+
+        bench.drive_to(60.0)
+        bench.send(cmd.RecordOpenLimit())
+        bench.send(cmd.RecordCloseLimit())
         bench.run_until_probe_finishes()
 
         assert "set_calibration_memory" not in bench.backend.names()
@@ -1408,11 +1435,13 @@ class TestTheAxisIsHandedBackAfterAProbe:
     def _finished_manual_probe(self) -> Bench:
         bench = Bench()
         bench.bring_up()
-        bench.send(cmd.StartManualCalibration(1.0))
+        bench.send(cmd.StartManualCalibration())
         bench.tick()
-        bench.drive_to(0.0)
         bench.drive_to(120.0)
-        bench.run_until_probe_finishes()
+        bench.send(cmd.RecordOpenLimit())
+        bench.drive_to(0.0)
+        bench.send(cmd.RecordCloseLimit())
+        assert bench.loop.probe is None
         return bench
 
     def test_it_holds_the_pose_the_probe_ended_on(self) -> None:

@@ -11,9 +11,14 @@ no way into it.
     fixed 0.3 s, so nothing can interrupt it, and its output goes to ``print``.
 
 ``calibrate_manual`` (gripper.py:354)
-    Documents "press Ctrl+C to stop early", which can never happen here: Python
-    delivers signals to the main thread only, so the worker thread would wait
-    out the full duration whatever the operator did.
+    Sweeps the axis with the motor for a fixed duration with the position gain
+    at zero and takes the extremes it passed through.  It documents "press
+    Ctrl+C to stop early", which can never happen here: Python delivers signals
+    to the main thread only, so the worker thread would wait out the full
+    duration whatever the operator did.  More to the point, an extreme a hand
+    happened to sweep past is not a limit anyone measured, and the two points
+    are not named — so the result cannot say which end is 0 mm.  The console
+    asks for two labelled points instead: see :class:`TwoPointCalibFSM`.
 
 Pure by construction — no backend, no Qt, no clock.  :meth:`tick` is handed the
 measured angle and the elapsed time and returns the frame to send, so the whole
@@ -28,6 +33,13 @@ nothing" during a probe means "keep pressing with the last reference" — which 
 a hard stop is exactly the command that must not persist.  Every terminal path
 returns a zero-gain frame, and the reference is anchored to the measurement
 rather than integrated, so a stalled axis cannot wind up.
+
+**A reading is a reading.**  Both probes drop a measurement the mechanism could
+not have produced — a value that moved further in one tick than the drive can,
+or one outside the SDK's own plausibility bound — rather than folding it into
+the result.  The failure this catches is not hypothetical: a dropped frame
+leaves the SDK's cached position at ``0.0``, and ``0.0`` is inside any real
+travel, so it looks exactly like a limit that was reached.
 """
 
 from __future__ import annotations
@@ -128,8 +140,6 @@ def summarise(
     open_rad: float,
     max_stroke_mm: float,
     notes: tuple[str, ...],
-    *,
-    degenerate_message: str | None = None,
 ) -> CalibResult | str:
     """Round a probe's readings into a result, or return why it is unusable.
 
@@ -147,18 +157,17 @@ def summarise(
     number, and its own three calibrations do not even agree with each other on
     which nominal to divide by.
 
-    A degenerate range is reported by the probe that saw it, because the two
-    probes fail differently: a guided probe found the same place twice and needs
-    the angles, while a manual probe found nothing and needs the procedure
-    repeated — the SDK's own wording for that, which is what the operator will
-    find in the SDK's documentation.
+    A degenerate range is the one reading neither probe can have produced by
+    accident: both ends recorded in the same place means the same place was
+    handed over twice, and a file built from it would put every millimetre of
+    the travel at a single angle.  The angles are quoted back because that is
+    what makes it recognisable — a probe that never moved and a probe that was
+    answered with the wrong button look identical without them.
     """
     zero = round(zero_rad, 6)
     opened = round(open_rad, 6)
     travel = abs(zero - opened)
     if travel <= 0:
-        if degenerate_message is not None:
-            return degenerate_message
         return (
             f"行程异常: 两个极限落在同一个位置 ({zero:.6f} rad)。"
             "请确认两个极限都真正走到了位置"
@@ -552,76 +561,95 @@ class GuidedCalibFSM:
         return ProbeOut(self._ref_rad, self.kp, self.kd, 0.0, self.note)
 
 
+
+
 # ═══════════════════════════════════════════════════════════════════════════
-# Manual (zero-gravity) probe
+# Two-point manual probe
 # ═══════════════════════════════════════════════════════════════════════════
-class ManualPhase(str, Enum):
+class TwoPointPhase(str, Enum):
     IDLE = "IDLE"
-    RECORDING = "RECORDING"
-    SETTLE = "SETTLE"
-    RECOVER = "RECOVER"
+    RECORD_OPEN = "RECORD_OPEN"
+    RECORD_CLOSE = "RECORD_CLOSE"
     DONE = "DONE"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
 
 
 MANUAL_TERMINAL = frozenset(
-    {ManualPhase.DONE, ManualPhase.FAILED, ManualPhase.CANCELLED}
+    {TwoPointPhase.DONE, TwoPointPhase.FAILED, TwoPointPhase.CANCELLED}
 )
 
-#: The SDK's own failure text for a manual probe that captured no range
-#: (gripper.py:462), keeping the console and the SDK saying the same thing about
-#: the same procedure, with the console's extra guidance appended.
-_NO_RANGE_MESSAGE = (
-    "标定失败：未能捕获有效的位置范围。请确认已使能且有反馈，"
-    "并在标定期间把夹爪推拉到两个极限"
-)
+#: What each waiting phase is asking for: the name of the limit it is waiting
+#: for, and the line the operator reads while it waits.  Keyed by phase, and the
+#: keys are exactly the phases that wait for something — everything that asks
+#: "is the operator still being waited on?" reads this rather than listing them
+#: a second time in the right order.
+TWO_POINT_PROMPTS = {
+    TwoPointPhase.RECORD_OPEN: (
+        "张开",
+        "零重力：用手把两片手指推到张开最大处，再按「记录张开极限」",
+    ),
+    TwoPointPhase.RECORD_CLOSE: (
+        "闭合",
+        "已记录张开极限 {open_rad:.6f} rad；再把两片手指合到闭合处，"
+        "再按「记录闭合极限」",
+    ),
+}
 
 
-class ManualCalibFSM:
-    """Runs the axis limp and records the extremes the operator pushes it to.
+class TwoPointCalibFSM:
+    """Records the two travel limits the operator moves the jaws to by hand.
 
-    Zero torque throughout the recording, so the jaws can be driven by hand
-    through the whole travel.  The operator stops when they are done — by
-    pressing a button, which is what the SDK's Ctrl+C can never be from a worker
-    thread — or the duration simply runs out.
+    The axis is limp throughout, which is the reason this probe exists: it is
+    the one that still works when the guided probe cannot.  That probe walks the
+    jaws into each stop with the motor, so it needs the stops to be reachable
+    and detectable; this one needs only a hand and a pair of eyes, and it is
+    what an operator falls back on when the mechanism is stiff, the travel is
+    not where the SDK expects it, or the drive will not take a probe step at
+    all.
 
-    Sampling happens every tick rather than at the SDK's 100 Hz
-    (gripper.py:376), which is strictly better for a min/max: more samples can
-    only ever include more of the travel.
+    What it asks for is two *labelled* points, in the order a calibration file
+    stores them: the open extreme first, then the closed one, which is 0 mm.
+    Both labels come from the operator, so — unlike the guided probe — this flow
+    needs no mounting declaration.  The direction is not assumed and then
+    checked; it is the answer.  A gripper assembled either way round records
+    correctly, and the mounting is whatever the two angles turn out to be.
+
+    Nothing is sampled in the background, so nothing else can be mistaken for a
+    limit.  The angle recorded is the one the encoder reports on the tick after
+    the button was pressed, which is the first angle taken after the operator's
+    hand stopped moving the jaws.  Tracking the extremes the hand passes
+    through instead — which is what the SDK's zero-gravity mode does — measures
+    the travel that happened to be swept, including wherever the jaws were
+    released, and a gripper does not have to be pushed all the way to a stop for
+    that to look like a calibration.
     """
 
     def __init__(
         self,
         max_stroke_mm: float = constants.DEFAULT_TRAVEL_MM,
         *,
-        duration_s: float | None = None,
-        settle_s: float = constants.MANUAL_SETTLE_S,
-        recover_s: float = constants.MANUAL_RECOVER_S,
+        timeout_s: float = constants.TWO_POINT_TIMEOUT_S,
         pos_guard_rad: float = constants.MANUAL_POS_GUARD_RAD,
         hold_kp: float = constants.KP_MOVE,
         hold_kd: float = constants.KD_DEFAULT,
         max_jump_rad: float = MANUAL_MAX_JUMP_RAD_PER_TICK,
     ) -> None:
         self.max_stroke_mm = float(max_stroke_mm)
-        self.duration_s = float(
-            constants.MANUAL_DURATION_DEFAULT_S if duration_s is None else duration_s
-        )
-        self.settle_s = float(settle_s)
-        self.recover_s = float(recover_s)
+        self.timeout_s = float(timeout_s)
         self.pos_guard_rad = float(pos_guard_rad)
         self.hold_kp = float(hold_kp)
         self.hold_kd = float(hold_kd)
         self.max_jump_rad = float(max_jump_rad)
 
-        self.phase = ManualPhase.IDLE
+        self.phase = TwoPointPhase.IDLE
         self.open_rad: float | None = None
         self.close_rad: float | None = None
         self.result: CalibResult | None = None
-        self.note = ""
-        self.samples = 0
         self.rejected = 0
 
+        self._reason = ""
+        self._pending: TwoPointPhase | None = None
         self._elapsed = 0.0
         self._measured = 0.0
         self._have_measurement = False
@@ -629,33 +657,36 @@ class ManualCalibFSM:
 
     # ── commands ────────────────────────────────────────────────────────────
     def start(self, measured_rad: float) -> bool:
+        """Begin waiting for the open limit, from where the jaws are now."""
         if not math.isfinite(measured_rad):
-            self.phase = ManualPhase.FAILED
-            self.note = f"位置读数无效 ({measured_rad!r})，无法开始标定"
+            self.phase = TwoPointPhase.FAILED
+            self._reason = f"位置读数无效 ({measured_rad!r})，无法开始标定"
             return False
-        self.phase = ManualPhase.RECORDING
-        self.result = None
-        self._measured = float(measured_rad)
-        self._have_measurement = True
-        self._elapsed = 0.0
+        self.phase = TwoPointPhase.RECORD_OPEN
         self.open_rad = None
         self.close_rad = None
-        self.samples = 0
+        self.result = None
         self.rejected = 0
-        self._record(self._measured)
-        self.note = "零重力：请用手把夹爪推到底再拉到底"
+        self._reason = ""
+        self._pending = None
+        self._elapsed = 0.0
+        self._measured = float(measured_rad)
+        self._have_measurement = True
+        self._prev_rad = float(measured_rad)
         return True
 
-    def stop(self) -> None:
-        """The operator is done: keep what was recorded and settle."""
-        if self.phase is ManualPhase.RECORDING:
-            self.phase = ManualPhase.SETTLE
-            self._elapsed = 0.0
-            self.note = "已停止记录，正在沉降"
+    def record_open(self) -> bool:
+        """Take the current angle as the open extreme — the first point."""
+        return self._queue(TwoPointPhase.RECORD_OPEN)
+
+    def record_close(self) -> bool:
+        """Take the current angle as the closed extreme, which is 0 mm."""
+        return self._queue(TwoPointPhase.RECORD_CLOSE)
 
     def cancel(self) -> None:
-        self.phase = ManualPhase.CANCELLED
-        self.note = "已取消标定"
+        self._pending = None
+        self.phase = TwoPointPhase.CANCELLED
+        self._reason = "已取消标定"
 
     def fail(self, reason: str) -> None:
         """Stop the probe from outside — see :meth:`GuidedCalibFSM.fail`.
@@ -665,74 +696,78 @@ class ManualCalibFSM:
         motor are the extremes of nothing.
         """
         if self.phase not in MANUAL_TERMINAL:
+            self._pending = None
             self._fail(reason)
+
+    def _queue(self, phase: TwoPointPhase) -> bool:
+        """Arm a record for the next tick, and say whether it was expected.
+
+        Taken on the next tick rather than here because this class only ever
+        sees a measurement through :meth:`tick`, and because that tick is the
+        first reading taken *after* the press — which is the reading the button
+        means.
+        """
+        if self.phase is not phase:
+            return False
+        self._pending = phase
+        return True
 
     # ── the tick ────────────────────────────────────────────────────────────
     def tick(self, measured_rad: float, dt: float) -> ProbeOut:
-        if self.phase is ManualPhase.IDLE:
+        if self.phase is TwoPointPhase.IDLE:
             return NO_FRAME
-        if self.phase is ManualPhase.CANCELLED:
-            # Cancelled from zero gravity, so back to zero gravity: the operator
-            # asked for the probe to stop, not for the jaws to stiffen.
-            return FREE_FRAME
-        if self.phase in MANUAL_TERMINAL:
+        if self.phase is TwoPointPhase.DONE:
             return self._hold_frame()
+        if self.phase in MANUAL_TERMINAL:
+            # Failed or cancelled, and limp either way: limp is the state this
+            # axis has been in for the whole probe and the one the operator's
+            # hand is holding it in.  Every way out of here except finishing
+            # happens mid-procedure, with them about to try again, so a hold
+            # would stiffen against that hand from a reference the probe has
+            # just refused to trust — or, after a timeout, one taken up to
+            # ``timeout_s`` ago.
+            return FREE_FRAME
 
         if not math.isfinite(measured_rad):
             self._fail(f"位置读数无效 ({measured_rad!r})，已停止标定")
             return self._hold_frame()
 
-        # A jump is dropped rather than fatal here: this probe only records, so
-        # one bad sample costs nothing and the operator can carry on.  It matters
-        # because a dropped frame leaves the SDK's cached position at zero, which
-        # the ``|pos| < 50`` guard below does *not* catch — zero is well inside
-        # it — and zero is exactly where a misread would put the open limit.
-        jumped = (
-            self._prev_rad is not None
-            and abs(measured_rad - self._prev_rad) > self.max_jump_rad
-        )
-        self._prev_rad = float(measured_rad)
+        self._elapsed += dt
+        previous, self._prev_rad = self._prev_rad, float(measured_rad)
+
+        if self._implausible(measured_rad, previous):
+            # A pending record goes with it rather than being served from the
+            # last angle that looked good: the operator pressed the button with
+            # the jaws where they are now, and where they are now is precisely
+            # what could not be read.
+            self.rejected += 1
+            self._pending = None
+            return FREE_FRAME
+
         self._measured = float(measured_rad)
         self._have_measurement = True
-        self._elapsed += dt
+        pending, self._pending = self._pending, None
+        if pending is not None:
+            self._take(pending)
 
-        if self.phase is ManualPhase.RECORDING:
-            if jumped:
-                self.rejected += 1
-            else:
-                self._record(self._measured)
-            if self._elapsed >= self.duration_s:
-                self.phase = ManualPhase.SETTLE
-                self._elapsed = 0.0
-                self.note = "记录时间到，正在沉降"
-            # Zero stiffness: the axis is limp and follows the operator's hand.
-            return FREE_FRAME
+        if self.phase in TWO_POINT_PROMPTS and self._elapsed >= self.timeout_s:
+            self._fail(
+                f"记录超时：{self.timeout_s:.0f} s 内没有记到{self._waiting_for}极限。"
+                "请重新开始标定"
+            )
+        # Zero stiffness: the axis is limp and follows the operator's hand.
+        return FREE_FRAME
 
-        if self.phase is ManualPhase.SETTLE:
-            # The SDK keeps sampling through its settle phase (gripper.py:448),
-            # and so does this: the jaws often drift the last millimetre as the
-            # hand releases them.
-            if jumped:
-                self.rejected += 1
-            else:
-                self._record(self._measured)
-            if self._elapsed >= self.settle_s:
-                self.phase = ManualPhase.RECOVER
-                self._elapsed = 0.0
-                self.note = "正在恢复保持"
-            return FREE_FRAME
-
-        # RECOVER: hand the axis back under position control, which is what the
-        # SDK's exit_zero_gravity does (gripper.py:342) at the same gains.  The
-        # alternative is leaving the motor executing a zero-gain frame while the
-        # operator lets go of a gripper that has just been run to both stops.
-        #
-        # No sampling here: the recording is over, and folding in where the
-        # recovery hold happens to settle would widen the travel the operator
-        # measured by hand with a number the servo produced.
-        if self._elapsed >= self.recover_s:
-            self._complete()
-        return self._hold_frame()
+    def _take(self, pending: TwoPointPhase) -> None:
+        """Store the point that was just recorded, and move to the next one."""
+        assert self._have_measurement
+        if pending is TwoPointPhase.RECORD_OPEN:
+            self.open_rad = self._measured
+            self.phase = TwoPointPhase.RECORD_CLOSE
+            self._elapsed = 0.0
+            return
+        self.close_rad = self._measured
+        self._complete()
 
     # ── state, for the worker and the GUI ───────────────────────────────────
     @property
@@ -741,82 +776,110 @@ class ManualCalibFSM:
 
     @property
     def is_active(self) -> bool:
-        return self.phase is not ManualPhase.IDLE and not self.is_terminal
+        return self.phase is not TwoPointPhase.IDLE and not self.is_terminal
+
+    @property
+    def note(self) -> str:
+        """What the operator is being asked for, or how the probe ended.
+
+        Derived rather than stored, so a warning about a reading that could not
+        be trusted cannot outlive the record it was about — the alternative is a
+        note that has to be cleared by whichever line of code notices first.
+        """
+        if self._reason:
+            return self._reason
+        prompt = TWO_POINT_PROMPTS.get(self.phase)
+        if prompt is None:
+            return ""
+        text = prompt[1].format(open_rad=self.open_rad or 0.0)
+        if self.rejected:
+            text += f"（已忽略 {self.rejected} 次不可信读数）"
+        return text
+
+    @property
+    def _waiting_for(self) -> str:
+        """Which limit the current phase is waiting for, in words."""
+        prompt = TWO_POINT_PROMPTS.get(self.phase)
+        return prompt[0] if prompt else ""
 
     @property
     def progress(self) -> float:
-        if self.phase is ManualPhase.RECORDING:
-            return 0.8 * min(self._elapsed / max(self.duration_s, 1e-9), 1.0)
-        if self.phase is ManualPhase.SETTLE:
-            return 0.8 + 0.1 * min(self._elapsed / max(self.settle_s, 1e-9), 1.0)
-        if self.phase is ManualPhase.RECOVER:
-            return 0.9 + 0.1 * min(self._elapsed / max(self.recover_s, 1e-9), 1.0)
-        return 1.0 if self.phase is ManualPhase.DONE else 0.0
+        """How much of the procedure is done, in points rather than in seconds.
+
+        Half the work is the first point and half is the second, so the bar
+        steps at the record rather than creeping along a clock — there is no
+        clock here, the operator decides when a point is recorded.
+        """
+        if self.phase is TwoPointPhase.RECORD_OPEN:
+            return 0.0
+        if self.phase is TwoPointPhase.RECORD_CLOSE:
+            return 0.5
+        return 1.0 if self.phase is TwoPointPhase.DONE else 0.0
 
     @property
     def remaining_s(self) -> float:
-        if self.phase is not ManualPhase.RECORDING:
+        if self.phase not in TWO_POINT_PROMPTS:
             return 0.0
-        return max(self.duration_s - self._elapsed, 0.0)
+        return max(self.timeout_s - self._elapsed, 0.0)
 
     # ── internals ───────────────────────────────────────────────────────────
+    def _implausible(self, measured_rad: float, previous: float | None) -> bool:
+        """Whether this tick's reading is one to build a calibration on.
+
+        Two ways it is not, and neither is hypothetical.  ``abs(rad) >=
+        pos_guard_rad`` is the SDK's own guard (gripper.py:427) against a runaway
+        value being adopted as a limit.  The jump is this console's, and it is
+        the one that matters on a hand-driven axis: a dropped frame leaves the
+        SDK's cached position at 0.0, which is well inside the first guard and is
+        also where a misread would put the *open* limit — the one reading that
+        would quietly invert the whole travel.
+        """
+        if abs(measured_rad) >= self.pos_guard_rad:
+            return True
+        if previous is None:
+            return False
+        return abs(measured_rad - previous) > self.max_jump_rad
+
     def _hold_frame(self) -> ProbeOut:
         """Hold where the jaws are, at the SDK's own exit gains.
 
         This is a deliberate divergence from the guided probe, which ends at zero
         gains: a hold at the end of a *manual* probe holds the position the
         operator left the jaws at, while a hold at the end of a *guided* probe
-        would be a press against the hard stop the probe just drove into.
+        would be a press against the hard stop the probe just drove into.  Only
+        a probe that ran to the end holds; a failed one is limp, for the reason
+        :meth:`tick` gives.
 
-        A probe that never saw a valid reading has no position to hold — holding
-        at the ``0.0`` it was constructed with would command a move to zero.  It
-        gets zero gains instead, which is both safe and the honest description of
-        a probe that has measured nothing.
+        The position held is always one that was measured: this is reached only
+        from :attr:`TwoPointPhase.DONE`, which ``_complete`` sets after both
+        points were taken from readings, so holding at the ``0.0`` the class was
+        constructed with — a command to move to zero — cannot happen.
         """
-        if not self._have_measurement:
-            return FREE_FRAME
+        assert self._have_measurement
         return ProbeOut(self._measured, self.hold_kp, self.hold_kd, 0.0, self.note)
 
-    def _record(self, rad: float) -> None:
-        """Fold one sample into the extremes, ignoring implausible readings.
-
-        The guard is the SDK's (gripper.py:427) and it is not a formality: a
-        lost frame leaves the cached position at zero, and adopting that as a
-        travel limit would produce a calibration with the closed stop in the
-        middle of the stroke.
-        """
-        if abs(rad) >= self.pos_guard_rad:
-            self.rejected += 1
-            return
-        self.samples += 1
-        # ``open`` is the numerically smaller angle, ``close`` the larger.
-        if self.open_rad is None or rad < self.open_rad:
-            self.open_rad = rad
-        if self.close_rad is None or rad > self.close_rad:
-            self.close_rad = rad
-
     def _complete(self) -> None:
-        if self.open_rad is None or self.close_rad is None or self.samples == 0:
-            self._fail(_NO_RANGE_MESSAGE)
-            return
+        assert self.open_rad is not None and self.close_rad is not None
+        notes = [
+            f"手动记录：张开极限 {self.open_rad:.6f} rad，"
+            f"闭合极限 {self.close_rad:.6f} rad"
+        ]
+        if self.rejected:
+            notes.append(f"已忽略 {self.rejected} 次不可信读数")
         outcome = summarise(
-            self.close_rad,
-            self.open_rad,
-            self.max_stroke_mm,
-            (f"手工记录 {self.samples} 个样本（忽略 {self.rejected} 个越界读数）",),
-            degenerate_message=_NO_RANGE_MESSAGE,
+            self.close_rad, self.open_rad, self.max_stroke_mm, tuple(notes)
         )
         if isinstance(outcome, str):
             self._fail(outcome)
             return
         self.result = outcome
-        self.phase = ManualPhase.DONE
-        self.note = (
+        self.phase = TwoPointPhase.DONE
+        self._reason = (
             f"标定完成：行程 {outcome.travel_rad:.6f} rad，可命令 "
             f"{outcome.max_stroke_mm:.1f} mm（记录极限跨度 {outcome.stroke_mm:.1f} mm），"
             f"系数 {outcome.rad_to_mm:.2f} mm/rad"
         )
 
     def _fail(self, reason: str) -> None:
-        self.phase = ManualPhase.FAILED
-        self.note = reason
+        self.phase = TwoPointPhase.FAILED
+        self._reason = reason

@@ -53,7 +53,7 @@ from ..core.worker import GateState
 from ..settings import Settings
 from ..telemetry import TelemetryFrame
 from . import theme
-from .calibration_page import CalibrationPage
+from .calibration_page import CalibrationPage, manual_active
 from .connect_bar import ConnectBar
 from .control_page import ControlPage
 from .plots_page import PlotsPage
@@ -256,10 +256,13 @@ class MainWindow(QMainWindow):
 
     def _on_calib_progress(self, phase: str, progress: float, note: str) -> None:
         self.calibration_page.set_progress(phase, progress, note)
-        if phase == "RECORDING":
-            # The slider is disabled during a probe — there is no valid travel
-            # to span yet — so the page that has the only live reading is the
-            # one the operator needs to be looking at.
+        if manual_active(phase):
+            # A manual probe is the one the operator drives themselves, and the
+            # buttons that say "the jaws are at the open extreme" are on this
+            # page and nowhere else: a window left on another tab is an operator
+            # holding a limp gripper with no way to record where it is.  A
+            # guided probe steers itself and asks for nothing mid-step, so it
+            # does not take the tab the operator chose.
             self.tabs.setCurrentWidget(self.calibration_page)
 
     def _on_log(self, level: str, text: str) -> None:

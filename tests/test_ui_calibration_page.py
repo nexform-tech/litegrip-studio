@@ -19,7 +19,7 @@ from PyQt5.QtWidgets import QLabel, QScrollArea
 from litegrip_studio import calibration, constants
 from litegrip_studio.calibration import CalibrationInfo
 from litegrip_studio.core import commands as cmd
-from litegrip_studio.core.calibration_fsm import GuidedPhase, ManualPhase
+from litegrip_studio.core.calibration_fsm import GuidedPhase, TwoPointPhase
 from litegrip_studio.core.worker import (
     CONN_CONNECTED,
     CONN_DISCONNECTED,
@@ -287,10 +287,15 @@ class TestTheProbeButtons:
         assert page._guided_cancel.isEnabled()
 
     def test_the_manual_probe_withdraws_the_guided_one_too(self, page) -> None:
-        page.set_progress(ManualPhase.RECORDING.value, 0.3)
+        page.set_progress(TwoPointPhase.RECORD_OPEN.value, 0.0)
 
         assert not page._guided_start.isEnabled()
-        assert page._manual_stop.isEnabled()
+        assert page._manual_open.isEnabled()
+        # Including the guided probe's own controls: a cancel button that is
+        # live during the *other* probe cancels nothing, and the operator finds
+        # that out at the moment they most need it to work.
+        assert not page._guided_cancel.isEnabled()
+        assert not page._guided_confirm.isEnabled()
 
     def test_a_finished_probe_offers_a_new_one(self, page) -> None:
         page.set_progress(GuidedPhase.DONE.value, 1.0)
@@ -390,24 +395,30 @@ class TestTheCommandsItSends:
         page._guided_cancel.click()
         assert isinstance(page.recorder.last(), cmd.CancelCalibration)
 
-    def test_the_manual_probe_carries_the_duration(self, page) -> None:
-        page._manual_duration.setValue(45.0)
+    def test_starting_the_manual_probe_carries_nothing_else(self, page) -> None:
+        """There is no duration to send any more: the operator decides when each
+        point is recorded, so the probe has nothing to be told in advance."""
         page.recorder.commands.clear()
 
         page._manual_start.click()
 
-        assert page.recorder.of(cmd.StartManualCalibration)[-1].duration_s == 45.0
+        assert page.recorder.of(cmd.StartManualCalibration)[-1] == (
+            cmd.StartManualCalibration()
+        )
 
-    def test_stopping_the_recording_keeps_the_samples(self, page) -> None:
-        """Distinct from cancelling: the SDK's Ctrl+C equivalent settles and
-        validates what it captured, and a worker thread can never receive the
-        signal itself."""
-        page.set_progress(ManualPhase.RECORDING.value, 0.5)
+    def test_each_record_button_sends_its_own_label(self, page) -> None:
+        """The command carries the label rather than the point being inferred
+        from the step the probe is in — the label is the operator's whole answer
+        to which end is 0 mm, and the two must not be able to disagree."""
+        page.set_progress(TwoPointPhase.RECORD_OPEN.value, 0.0)
         page.recorder.commands.clear()
+        page._manual_open.click()
+        assert isinstance(page.recorder.last(), cmd.RecordOpenLimit)
 
-        page._manual_stop.click()
-
-        assert isinstance(page.recorder.last(), cmd.StopManualRecording)
+        page.set_progress(TwoPointPhase.RECORD_CLOSE.value, 0.5)
+        page.recorder.commands.clear()
+        page._manual_close.click()
+        assert isinstance(page.recorder.last(), cmd.RecordCloseLimit)
 
     def test_reloading_and_saving_are_commands(self, page) -> None:
         page.recorder.commands.clear()
@@ -509,23 +520,36 @@ class TestThePhaseHelpers:
     @pytest.mark.parametrize(
         "phase, active",
         [
-            (ManualPhase.RECORDING.value, True),
-            (ManualPhase.SETTLE.value, True),
-            (ManualPhase.RECOVER.value, True),
-            (ManualPhase.IDLE.value, False),
-            (ManualPhase.DONE.value, False),
-            (ManualPhase.FAILED.value, False),
-            (ManualPhase.CANCELLED.value, False),
+            (TwoPointPhase.RECORD_OPEN.value, True),
+            (TwoPointPhase.RECORD_CLOSE.value, True),
+            (TwoPointPhase.IDLE.value, False),
+            (TwoPointPhase.DONE.value, False),
+            (TwoPointPhase.FAILED.value, False),
+            (TwoPointPhase.CANCELLED.value, False),
         ],
     )
     def test_a_manual_phase_is_active_or_not(self, phase: str, active: bool) -> None:
         assert manual_active(phase) is active
 
+    def test_neither_probe_claims_the_other_probes_phases(self) -> None:
+        """The two probes report through one progress signal and spell their
+        idle phases the same way, so "is a probe running" is never the question
+        a widget is asking — "is *this* probe running" is.  A predicate that
+        answered with "not idle in my set" would say yes to every phase of the
+        other probe; the phase *name* is the only thing that tells them apart.
+        """
+        idle = {"IDLE", "DONE", "FAILED", "CANCELLED"}
+        for phase in (*GuidedPhase, *TwoPointPhase):
+            guided = phase in GuidedPhase
+            live = phase.value not in idle
+            assert guided_active(phase.value) is (guided and live)
+            assert manual_active(phase.value) is (not guided and live)
+
     def test_the_two_phase_sets_share_the_idle_names(self) -> None:
         """The worker emits one signal for both probes, so "no probe running"
         has to be recognisable whichever one the phase came from."""
         for phase in GuidedPhase:
-            assert (phase.value in {p.value for p in ManualPhase}) == (
+            assert (phase.value in {p.value for p in TwoPointPhase}) == (
                 phase.value in {"IDLE", "DONE", "FAILED", "CANCELLED"}
             )
 
@@ -542,7 +566,7 @@ class TestTheProgress:
         assert "闭合" in page._phase_label.text()
 
     def test_the_note_is_shown(self, page) -> None:
-        page.set_progress(ManualPhase.RECORDING.value, 0.3, "剩余 20 s")
+        page.set_progress(TwoPointPhase.RECORD_OPEN.value, 0.3, "剩余 20 s")
 
         assert page._note.text() == "剩余 20 s"
 

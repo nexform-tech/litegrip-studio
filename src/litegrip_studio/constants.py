@@ -336,10 +336,19 @@ PROBE_REFUSED_FAIL_S = 0.5
 # both stops several times.
 MANUAL_MAX_HAND_SPEED_MM_S = 1000.0
 
-# Manual (zero-gravity) calibration, mirroring calibrate_manual() (gripper.py:354).
-MANUAL_DURATION_DEFAULT_S = 30.0
-MANUAL_SETTLE_S = 2.0
-MANUAL_RECOVER_S = 0.2  # hold frames before handing back to the motion FSM
+# Two-point manual calibration: the operator works the jaws to each extreme by
+# hand and records it, so there is no duration to set — the operator says when,
+# and each point is recorded deliberately rather than as the extreme of a sweep.
+# What that leaves is a wait that can only end when someone presses a button, and
+# the axis is limp throughout it, so each wait is bounded.
+#
+# Five minutes per point: the procedure is two hand moves, and the SDK's own
+# version gives the whole sweep thirty seconds.  Generous because the timeout
+# ends in a failed probe and the operator has to start again, and bounded at all
+# because the alternative is a console left holding the motor enabled and limp
+# for as long as someone forgets about it.
+TWO_POINT_TIMEOUT_S = 300.0
+
 # Guard against a runaway reading being adopted as a limit.
 MANUAL_POS_GUARD_RAD = 50.0
 

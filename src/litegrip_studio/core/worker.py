@@ -76,7 +76,7 @@ from ..calibration import (
 from ..telemetry import Telemetry, TelemetryFrame
 from ..units import frame_mismatch, rad_per_s_to_mm
 from . import commands as cmd
-from .calibration_fsm import GuidedCalibFSM, ManualCalibFSM
+from .calibration_fsm import GuidedCalibFSM, TwoPointCalibFSM
 from .commands import AnyCommand
 from .motion import FrameOut, MotionFSM, MotionParams, MotionState
 
@@ -290,7 +290,7 @@ class WorkerLoop:
         self._gate_reason = ""
         self._allow_factory = False
 
-        self._probe: GuidedCalibFSM | ManualCalibFSM | None = None
+        self._probe: GuidedCalibFSM | TwoPointCalibFSM | None = None
         self._tele = Telemetry()
         self._last_frame = _idle_frame(self)
 
@@ -871,18 +871,14 @@ class WorkerLoop:
         elif isinstance(command, cmd.StartGuidedCalibration):
             self._start_probe(guided=True, reversed_mount=command.reversed_mount)
         elif isinstance(command, cmd.StartManualCalibration):
-            self._start_probe(guided=False, duration_s=command.duration_s)
+            self._start_probe(guided=False)
         elif isinstance(command, cmd.ConfirmProbeLimit):
             if isinstance(self._probe, GuidedCalibFSM):
                 self._probe.confirm()
             else:
                 self._alert("warn", "当前没有正在进行的引导式探测")
-        elif isinstance(command, cmd.StopManualRecording):
-            if isinstance(self._probe, ManualCalibFSM):
-                self._probe.stop()
-                self._log("info", "手动记录已提前结束，正在沉降")
-            else:
-                self._alert("warn", "当前没有正在进行的手动记录")
+        elif isinstance(command, (cmd.RecordOpenLimit, cmd.RecordCloseLimit)):
+            self._record_manual_limit(isinstance(command, cmd.RecordOpenLimit))
         elif isinstance(command, cmd.CancelCalibration):
             self._cancel_probe()
 
@@ -1097,13 +1093,27 @@ class WorkerLoop:
         self._alert("info", f"标定已保存到 {written}")
         self._log("info", f"标定已保存: {written}")
 
-    def _start_probe(
-        self,
-        *,
-        guided: bool,
-        duration_s: float | None = None,
-        reversed_mount: bool = False,
-    ) -> None:
+    def _record_manual_limit(self, opening: bool) -> None:
+        """Take the labelled point the operator has just pressed for.
+
+        A press that arrives out of step is refused and logged rather than
+        taken as whichever point is due.  The two readings are the whole content
+        of the calibration — the closed one is 0 mm — so a press accepted as the
+        other point is not a small error: it inverts the travel, and the file it
+        produces passes every check the console makes.
+        """
+        probe = self._probe
+        if not isinstance(probe, TwoPointCalibFSM):
+            self._alert("warn", "当前没有正在进行的手动标定")
+            return
+        wanted = "张开" if opening else "闭合"
+        taken = probe.record_open() if opening else probe.record_close()
+        if taken:
+            self._log("info", f"已记录{wanted}极限，下一控制周期取得角度读数")
+        else:
+            self._log("warn", f"当前步骤不在记录{wanted}极限，已忽略这次按键")
+
+    def _start_probe(self, *, guided: bool, reversed_mount: bool = False) -> None:
         # The E-stop is checked first because it is the reason that explains the
         # others: the E-stop latches and disables the motor, so a probe attempted
         # while it is latched would otherwise be refused with "enable the motor
@@ -1123,11 +1133,11 @@ class WorkerLoop:
             return
 
         stroke = self._motion.limits.max_stroke_mm
-        probe: GuidedCalibFSM | ManualCalibFSM
+        probe: GuidedCalibFSM | TwoPointCalibFSM
         if guided:
             probe = GuidedCalibFSM(stroke, reversed_mount=reversed_mount)
         else:
-            probe = ManualCalibFSM(stroke, duration_s=duration_s)
+            probe = TwoPointCalibFSM(stroke)
 
         # The probe owns the axis from here: the motion FSM must not be holding a
         # position at the same time, or the two would send frames alternately.
@@ -1138,7 +1148,7 @@ class WorkerLoop:
         self._probe = probe
         self._probe_pub_t = 0.0
         self._probe_unsent_s = 0.0
-        kind = "引导式" if guided else "零重力手动"
+        kind = "引导式" if guided else "手动两点"
         self._log("warn", f"开始{kind}标定，入口位置 {self._tele.position_rad:.6f} rad")
 
     def _tick_probe(self, tele: Telemetry, dt: float) -> FrameOut:
@@ -1228,7 +1238,7 @@ class WorkerLoop:
             return
         self._probe_pub_t = 0.0
         note = probe.note
-        if isinstance(probe, ManualCalibFSM) and probe.remaining_s > 0.0:
+        if isinstance(probe, TwoPointCalibFSM) and probe.remaining_s > 0.0:
             note = f"{note}（剩余 {probe.remaining_s:.0f} s）"
         self._signals.calib_progress.emit(probe.phase.value, probe.progress, note)
 
