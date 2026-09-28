@@ -495,7 +495,10 @@ class WorkerLoop:
         frame = TelemetryFrame(
             t=tele.t,
             position_mm=self._measured_mm(),
-            velocity_mm_s=rad_per_s_to_mm(tele.velocity_rad_s, limits.rad_to_mm),
+            position_rad=self._measured_rad(),
+            velocity_mm_s=rad_per_s_to_mm(
+                tele.velocity_rad_s, limits.rad_to_mm, direction=limits.direction
+            ),
             force_n=tele.force_n,
             torque_nm=tele.torque_nm,
             temperature_mos=tele.temperature_mos,
@@ -866,7 +869,7 @@ class WorkerLoop:
         elif isinstance(command, cmd.SaveCalibration):
             self._save_calibration(command.path)
         elif isinstance(command, cmd.StartGuidedCalibration):
-            self._start_probe(guided=True)
+            self._start_probe(guided=True, reversed_mount=command.reversed_mount)
         elif isinstance(command, cmd.StartManualCalibration):
             self._start_probe(guided=False, duration_s=command.duration_s)
         elif isinstance(command, cmd.ConfirmProbeLimit):
@@ -1094,7 +1097,13 @@ class WorkerLoop:
         self._alert("info", f"标定已保存到 {written}")
         self._log("info", f"标定已保存: {written}")
 
-    def _start_probe(self, *, guided: bool, duration_s: float | None = None) -> None:
+    def _start_probe(
+        self,
+        *,
+        guided: bool,
+        duration_s: float | None = None,
+        reversed_mount: bool = False,
+    ) -> None:
         # The E-stop is checked first because it is the reason that explains the
         # others: the E-stop latches and disables the motor, so a probe attempted
         # while it is latched would otherwise be refused with "enable the motor
@@ -1116,7 +1125,7 @@ class WorkerLoop:
         stroke = self._motion.limits.max_stroke_mm
         probe: GuidedCalibFSM | ManualCalibFSM
         if guided:
-            probe = GuidedCalibFSM(stroke)
+            probe = GuidedCalibFSM(stroke, reversed_mount=reversed_mount)
         else:
             probe = ManualCalibFSM(stroke, duration_s=duration_s)
 
@@ -1164,7 +1173,7 @@ class WorkerLoop:
         stops changing — so a probe whose frames never reach the motor, or whose
         feedback has gone silent, records *both* limits wherever the jaws happen
         to be.  That is not a theoretical worry: it is what a real run did, and
-        the operator got "行程异常: 闭合 -1.370650 rad 未大于张开 -1.370650 rad"
+        the operator got "行程异常: 两个极限落在同一个位置 (-1.370650 rad)"
         from a probe that had not moved the axis at all, on a console that had
         been sending fine a minute earlier.  Nothing in that message could have
         told anyone which of the two had happened.
@@ -1420,6 +1429,7 @@ def _idle_frame(_loop: WorkerLoop) -> TelemetryFrame:
         # No connection, so no frame has ever arrived and the position is
         # unknown rather than zero — a zero here is the closed stop.
         position_mm=None,
+        position_rad=None,
         velocity_mm_s=0.0,
         force_n=0.0,
         torque_nm=0.0,

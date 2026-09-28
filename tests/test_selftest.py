@@ -82,16 +82,27 @@ class TestTheReport:
 class TestTheChecksAreNotVacuous:
     """Each check is defeated, and must notice."""
 
-    def test_the_direction_check_fails_if_the_reversal_rule_is_defeated(
+    def test_the_direction_check_fails_if_the_slope_is_assumed(
         self, monkeypatch
     ) -> None:
-        """The uncalibrated default is the reason the console has a gate at all;
-        a check that cannot see it reversed is a check that would wave it
-        through."""
-        monkeypatch.setattr(Limits, "is_reversed", property(lambda self: False))
+        """The SDK's formulas assume the angle shrinks as the jaws open, and a
+        console that inherits that assumption drives a reverse-mounted gripper
+        inverted — silently, since every number stays self-consistent."""
+        monkeypatch.setattr(Limits, "direction", property(lambda self: -1.0))
 
-        with pytest.raises(AssertionError, match="未标定"):
-            selftest.check_direction_is_caught()
+        with pytest.raises(AssertionError, match="反方向"):
+            selftest.check_the_mounting_direction_is_read_from_the_angles()
+
+    def test_the_direction_check_fails_if_the_encoder_check_is_defeated(
+        self, monkeypatch
+    ) -> None:
+        """The other half, and the one that refuses a file: the ordering alone
+        cannot, so with the encoder check out of the way the SDK's default pair
+        is waved through onto a bench it cannot describe."""
+        monkeypatch.setattr(selftest, "frame_mismatch", lambda limits, rad: "")
+
+        with pytest.raises(AssertionError, match="SDK 默认值"):
+            selftest.check_the_mounting_direction_is_read_from_the_angles()
 
     def test_the_travel_check_fails_when_the_file_scale_is_used(
         self, monkeypatch

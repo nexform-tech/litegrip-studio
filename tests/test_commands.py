@@ -91,6 +91,7 @@ class TestDescribe:
             LoadCalibration("/tmp/x.json"),
             SaveCalibration(),
             StartGuidedCalibration(),
+            StartGuidedCalibration(reversed_mount=True),
             ConfirmProbeLimit(),
             StartManualCalibration(),
             StartManualCalibration(30.0),
@@ -116,6 +117,13 @@ class TestDescribe:
 
     def test_a_bare_load_says_it_is_the_default_path(self) -> None:
         assert "默认路径" in LoadCalibration().describe()
+
+    def test_a_probe_says_which_way_it_believes_the_jaws_open(self) -> None:
+        """The direction is the operator's answer to a question, and the log is
+        where it is checked afterwards — the two probes that produce mirror
+        images of each other are identical in the log without it."""
+        assert "反向装配" in StartGuidedCalibration(reversed_mount=True).describe()
+        assert "反向" not in StartGuidedCalibration().describe()
 
     def test_the_injection_reports_its_values(self) -> None:
         text = Inject({"uv": True, "obj_mm": 40.0}).describe()

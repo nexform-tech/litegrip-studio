@@ -47,11 +47,13 @@ PROBE_MAX_JUMP_RAD_PER_TICK = constants.PROBE_MAX_JUMP_RAD_PER_TICK
 #: has, so this is the most permissive reading of "1 m/s" — the guard should
 #: never be the thing that rejects a real hand move.
 #:
-#: ``abs`` because ``mm_to_rad_per_s`` is negated for the MIT velocity term; a
-#: magnitude must not inherit that sign, and a negative bound here would reject
-#: every sample in silence.
+#: ``abs`` because this is a magnitude and the conversion is signed; the
+#: direction it is asked for is therefore arbitrary, and a negative bound here
+#: would reject every sample in silence.
 MANUAL_MAX_JUMP_RAD_PER_TICK = abs(
-    mm_to_rad_per_s(constants.MANUAL_MAX_HAND_SPEED_MM_S, constants.RAD_TO_MM_MIN)
+    mm_to_rad_per_s(
+        constants.MANUAL_MAX_HAND_SPEED_MM_S, constants.RAD_TO_MM_MIN, direction=-1.0
+    )
 ) * constants.CTRL_DT
 
 
@@ -80,12 +82,15 @@ class CalibResult:
     """A completed probe, in the terms the calibration file uses.
 
     ``zero_rad`` is the closed position (0 mm) and ``open_rad`` the open one
-    (full stroke); on real hardware ``zero_rad`` is numerically the larger of the
-    two.  Angles are rounded to 6 decimal places and the conversion factor to 2,
-    the same shape the SDK's own files have, so a file this console writes can be
-    read by anything that reads theirs.  Only the shape: the factor here is
-    derived from the travel rather than the nominal stroke the SDK would divide
-    by, so the two are meant to differ — see :func:`summarise`.
+    (full stroke).  Which of the two is numerically the larger depends on the
+    mounting and is not this class's business — see
+    :attr:`~litegrip_studio.units.Limits.direction` — so the travel below is a
+    magnitude and the ordering is preserved rather than normalised.  Angles are
+    rounded to 6 decimal places and the conversion factor to 2, the same shape
+    the SDK's own files have, so a file this console writes can be read by
+    anything that reads theirs.  Only the shape: the factor here is derived from
+    the travel rather than the nominal stroke the SDK would divide by, so the two
+    are meant to differ — see :func:`summarise`.
     """
 
     zero_rad: float
@@ -96,7 +101,7 @@ class CalibResult:
 
     @property
     def travel_rad(self) -> float:
-        return self.zero_rad - self.open_rad
+        return abs(self.zero_rad - self.open_rad)
 
     @property
     def stroke_mm(self) -> float:
@@ -150,12 +155,12 @@ def summarise(
     """
     zero = round(zero_rad, 6)
     opened = round(open_rad, 6)
-    travel = zero - opened
+    travel = abs(zero - opened)
     if travel <= 0:
         if degenerate_message is not None:
             return degenerate_message
         return (
-            f"行程异常: 闭合 {zero:.6f} rad 未大于张开 {opened:.6f} rad。"
+            f"行程异常: 两个极限落在同一个位置 ({zero:.6f} rad)。"
             "请确认两个极限都真正走到了位置"
         )
     return CalibResult(
@@ -204,12 +209,19 @@ class GuidedCalibFSM:
     (:data:`~litegrip_studio.constants.GUIDED_MAX_FORCE_N`).  The SDK's own loop
     advances its target from the previous target, so a jammed axis accumulates
     0.08 rad of error per iteration for up to 40 iterations.
+
+    Which way the jaws open has to be given, not assumed — see
+    ``reversed_mount``: this is the one probe that produces a calibration out of
+    nothing, so it has no file to read the mounting from, and a probe that steps
+    the wrong way records the closed stop as the open one.  The result would
+    still validate, still be saved, and drive the gripper inverted.
     """
 
     def __init__(
         self,
         max_stroke_mm: float = constants.DEFAULT_TRAVEL_MM,
         *,
+        reversed_mount: bool = False,
         kp: float = constants.GUIDED_KP,
         kd: float = constants.KD_DEFAULT,
         step_rad: float = constants.GUIDED_STEP_RAD,
@@ -219,9 +231,16 @@ class GuidedCalibFSM:
         step_interval_s: float = constants.GUIDED_STEP_INTERVAL_S,
         backoff_rad: float = constants.GUIDED_BACKOFF_RAD,
         max_force_n: float = constants.GUIDED_MAX_FORCE_N,
-        max_jump_rad: float = PROBE_MAX_JUMP_RAD_PER_TICK,
+        max_jump_rad: float = constants.PROBE_MAX_JUMP_RAD_PER_TICK,
     ) -> None:
         self.max_stroke_mm = float(max_stroke_mm)
+        # The mounting, in the terms the rest of the console names it
+        # (``Limits.reversed_mount``), and the one sign every step below is taken
+        # in.  The conversion happens here and nowhere else: further down, a
+        # second opinion about which way is open is how a probe ends up driving
+        # the jaws into the stop it is not looking for.
+        self.reversed_mount = bool(reversed_mount)
+        self.direction = 1.0 if self.reversed_mount else -1.0
         self.kp = float(kp)
         self.kd = float(kd)
         # The one derivation that matters: at a stall the torque is kp × step, so
@@ -279,7 +298,10 @@ class GuidedCalibFSM:
         self._confirmed = False
         self._prev_rad = None
         self._notes = []
-        self.note = "正在探测张开极限"
+        # The direction is said out loud while the first stop is being
+        # approached, because that is the moment the operator can see whether the
+        # jaws are opening or closing and cancel a probe that has it backwards.
+        self.note = f"正在探测张开极限{self._mounting}"
         return True
 
     def confirm(self) -> None:
@@ -386,8 +408,18 @@ class GuidedCalibFSM:
     # ── internals ───────────────────────────────────────────────────────────
     @property
     def _sign(self) -> float:
-        """+1 toward closed (larger rad), -1 toward open (smaller rad)."""
-        return -1.0 if self.phase is GuidedPhase.OPEN_PROBE else 1.0
+        """+1 toward closed, -1 toward open — on this mounting.
+
+        The open probe steps the way the jaws open and the close probe the other
+        way, so the two are each other's negation whichever way round the
+        encoder runs; :attr:`direction` is the one fact they are derived from.
+        """
+        return self.direction if self.phase is GuidedPhase.OPEN_PROBE else -self.direction
+
+    @property
+    def _mounting(self) -> str:
+        """The mounting direction, in words, for a status line."""
+        return "（反向装配：张开时角度变大）" if self.reversed_mount else ""
 
     @property
     def progress(self) -> float:
@@ -431,9 +463,9 @@ class GuidedCalibFSM:
         """Move away from the open stop, one bounded step at a time.
 
         The SDK backs off by commanding ``open_rad - 0.15`` (gripper.py:610),
-        which is *further into* the open stop — the sign is wrong, and it presses
-        at kp=80 for half a second.  Backing off means moving toward closed,
-        which is the larger angle.
+        which is *further into* the open stop — the sign is wrong on its own
+        mounting and it presses at kp=80 for half a second.  Backing off means
+        moving toward closed, which is :attr:`_sign` during this phase.
 
         The length of the back-off is a step *count*
         (:attr:`backoff_steps`), not a distance to be measured.  Everywhere else
@@ -455,7 +487,9 @@ class GuidedCalibFSM:
         if self.iterations == 0 or self._since_step >= self.step_interval_s:
             self._since_step = 0.0
             self.iterations += 1
-            self._ref_rad = self._measured + min(self.step_rad, self.backoff_rad)
+            self._ref_rad = self._measured + self._sign * min(
+                self.step_rad, self.backoff_rad
+            )
         return ProbeOut(self._ref_rad, self.kp, self.kd, 0.0, self.note)
 
     def _finish_limit(self, measured_rad: float, how: str) -> None:
@@ -485,7 +519,7 @@ class GuidedCalibFSM:
         cannot move anything reads as a stall.
         """
         self.phase = GuidedPhase.CLOSE_PROBE
-        self._ref_rad = self._measured + self.step_rad
+        self._ref_rad = self._measured + self._sign * self.step_rad
         self._step_mark_rad = self._measured
         self._since_step = 0.0
         self.iterations = 0

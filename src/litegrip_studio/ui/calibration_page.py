@@ -180,6 +180,7 @@ class CalibrationPage(QWidget):
         self._guided_start = QPushButton("开始引导式标定")
         self._guided_confirm = QPushButton(CONFIRM_LABELS[GuidedPhase.OPEN_PROBE.value])
         self._guided_cancel = QPushButton("取消标定")
+        self._guided_reversed = QCheckBox("反向装配（张开时角度更大）")
         self._manual_start = QPushButton("开始零重力标定")
         self._manual_stop = QPushButton("结束记录（保留样本）")
         self._manual_cancel = QPushButton("取消标定")
@@ -293,6 +294,15 @@ class CalibrationPage(QWidget):
         buttons.addWidget(self._guided_confirm)
         buttons.addWidget(self._guided_cancel)
 
+        self._guided_reversed.setToolTip(
+            "这台夹爪的编码器角度是张开时变大还是变小。\n"
+            "怎么判断：失能（或零重力）后用手把两片手指分开，看下面「实测位置」"
+            "里的角度 —— 变大就是反向装配。\n"
+            "必须先确认再开始：探针只能朝一个方向顶，顶错方向就会把闭合极限记成"
+            "张开极限，而这样的结果照样能通过校验、照样能保存，却会把整台夹爪的方向"
+            "反过来。开始后会先朝张开极限移动，此时若看到夹爪在闭合，请点「取消标定」。"
+        )
+
         text = QLabel(
             "分别顶向张开与闭合两个硬限位，记录停住的位置。"
             "每一步都会重新锚定在实测位置，因此顶住时的力矩有上限；"
@@ -303,6 +313,7 @@ class CalibrationPage(QWidget):
         box = QGroupBox("引导式标定（需要电机已使能）")
         layout = QVBoxLayout(box)
         layout.addWidget(text)
+        layout.addWidget(self._guided_reversed)
         layout.addLayout(buttons)
         return box
 
@@ -368,9 +379,7 @@ class CalibrationPage(QWidget):
         return strip
 
     def _wire(self) -> None:
-        self._guided_start.clicked.connect(
-            lambda: self._submit(cmd.StartGuidedCalibration())
-        )
+        self._guided_start.clicked.connect(self._on_guided_start)
         self._guided_confirm.clicked.connect(
             lambda: self._submit(cmd.ConfirmProbeLimit())
         )
@@ -440,8 +449,22 @@ class CalibrationPage(QWidget):
         self._refresh()
 
     def update_frame(self, frame: TelemetryFrame) -> None:
+        """The live reading, in millimetres *and* in radians.
+
+        The radians are normally the number nobody needs, and they are here for
+        one question the millimetres cannot answer: which way the encoder runs.
+        The mounting direction has to be declared before a guided probe, and the
+        only way to find out is to move the jaws by hand and watch this number —
+        which cannot be the mm one, since that is computed with the very
+        calibration under suspicion.
+        """
         measured = UNKNOWN if frame.position_mm is None else f"{frame.position_mm:>7.2f} mm"
-        self._position.setText(f"实测位置 {measured}")
+        angle = (
+            UNKNOWN
+            if frame.position_rad is None
+            else f"{frame.position_rad:>8.4f} rad"
+        )
+        self._position.setText(f"实测位置 {measured} / {angle}")
         # Whether the motor is enabled comes from the frame rather than from a
         # flag of its own: the two would drift apart the moment an enable
         # request failed, and this is a page that lets the operator drive the
@@ -545,6 +568,9 @@ class CalibrationPage(QWidget):
         any_running = guided_running or manual_running
 
         self._guided_start.setEnabled(ready and not any_running)
+        # Locked while a probe is running: a direction that changes halfway
+        # through a probe is two directions in one file.
+        self._guided_reversed.setEnabled(not any_running)
         self._guided_cancel.setEnabled(guided_running)
         self._guided_confirm.setEnabled(guided_running and self._phase in CONFIRM_LABELS)
         self._guided_confirm.setText(
@@ -577,6 +603,11 @@ class CalibrationPage(QWidget):
     def _on_cancel(self) -> None:
         self._submit(cmd.CancelCalibration())
 
+    def _on_guided_start(self) -> None:
+        self._submit(
+            cmd.StartGuidedCalibration(reversed_mount=self.reversed_mount)
+        )
+
     def _on_manual_start(self) -> None:
         self._submit(cmd.StartManualCalibration(duration_s=self._manual_duration.value()))
 
@@ -607,6 +638,11 @@ class CalibrationPage(QWidget):
     @property
     def travel_mm(self) -> float:
         return float(self._travel.value())
+
+    @property
+    def reversed_mount(self) -> bool:
+        """The mounting, as the operator declared it for the guided probe."""
+        return self._guided_reversed.isChecked()
 
     def persist(self) -> None:
         if self._settings is not None:

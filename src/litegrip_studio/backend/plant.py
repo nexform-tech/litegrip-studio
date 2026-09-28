@@ -155,32 +155,56 @@ class Plant:
         alpha = min(dt / cfg.tau_elec, 1.0) if cfg.tau_elec > 0 else 1.0
         self.tau += (tau_ll - self.tau) * alpha
 
-        # Reaction from whatever the fingers are pressed against.  A positive
-        # penetration means the spring is compressed; it pushes back toward
-        # smaller q at the upper stop and toward larger q at the lower one.
-        # Note ``rad_high`` is the numerically LARGER angle, which on real
-        # calibrations is the CLOSED stop; ``rad_low`` is fully open.  Both
-        # springs restore toward zero penetration and both damp the motion,
-        # hence ``- stop_c * dq`` in each: the damping term must oppose the
-        # velocity, and writing ``+ stop_c * dq`` on the lower stop made it
-        # accelerate the jaws *through* the stop instead of absorbing them
-        # (a −22 Nm kick that threw the gripper from 117 mm back to 10 mm).
+        # Reaction from whatever the fingers are pressed against.
+        #
+        # Worked out in millimetres and converted once at the end, because
+        # millimetres are what the two stops are *named* by: nought is closed and
+        # the full stroke is open, whichever way round the encoder runs.  Written
+        # in q instead — "past the larger angle, so pressed into the closed stop"
+        # — it is only correct on the classic mounting, and on a reverse-mounted
+        # gripper it silently swaps the two stops, and the object contact with
+        # them, which is the same class of mistake as the conversion formulas.
+        #
+        # ``to_mm`` is a linear map and so is defined past both stops: a negative
+        # reading is past the closed stop, one above ``stroke_mm`` is past the
+        # open one.  Each spring restores toward zero penetration and each damps
+        # the motion, hence the ``- *_c * dq``: the damping term must oppose the
+        # velocity, and writing ``+ stop_c * dq`` on one of them made it
+        # accelerate the jaws *through* the stop instead of absorbing them (a
+        # −22 Nm kick that threw the gripper from 117 mm back to 10 mm).
+        limits = self.limits
         tau_ext = 0.0
 
-        penetration = self.q - self.limits.rad_high  # pressed past the closed stop
-        if penetration > 0.0:
-            tau_ext -= cfg.stop_k * penetration + cfg.stop_c * self.dq
+        if limits.rad_to_mm != 0:
+            # The sign that drives the jaws back toward open, which is the
+            # direction the springs and the object push in.
+            toward_open = limits.direction
+            scale = limits.rad_to_mm
+            mm = limits.to_mm(self.q)
 
-        penetration = self.limits.rad_low - self.q  # pressed past the open stop
-        if penetration > 0.0:
-            tau_ext += cfg.stop_k * penetration - cfg.stop_c * self.dq
+            penetration = -mm  # pressed past the closed stop
+            if penetration > 0.0:
+                tau_ext += toward_open * cfg.stop_k * penetration / scale
+                tau_ext -= cfg.stop_c * self.dq
 
-        q_obj = self._object_angle()
-        if q_obj is not None and self.q > q_obj:
-            # Closing past the object compresses it; the reaction pushes the
-            # jaws back open (toward smaller q).
-            penetration = self.q - q_obj
-            tau_ext -= cfg.contact_k * penetration + cfg.contact_c * self.dq
+            # The open stop is where the operator recorded the open extreme, not
+            # the top of the commanded range: the range deliberately stops
+            # ``SPAN_INSET_MM`` short of it, so the jaws are never commanded onto
+            # the stop they were calibrated against.
+            penetration = mm - limits.stroke_mm  # pressed past the open stop
+            if penetration > 0.0:
+                tau_ext -= toward_open * cfg.stop_k * penetration / scale
+                tau_ext -= cfg.stop_c * self.dq
+
+            if self.object_mm is not None:
+                # An obstruction outside the recorded travel is folded onto the
+                # nearest extreme — out there its exact position stops mattering,
+                # because the reaction pins the jaws against that stop instead.
+                object_mm = min(max(self.object_mm, 0.0), limits.stroke_mm)
+                penetration = object_mm - mm  # closed past the object
+                if penetration > 0.0:
+                    tau_ext += toward_open * cfg.contact_k * penetration / scale
+                    tau_ext -= cfg.contact_c * self.dq
 
         # Friction: Coulomb (smoothed through tanh to avoid a sign chatter at
         # zero velocity) plus viscous.
@@ -238,11 +262,6 @@ class Plant:
         self.object_mm = None
 
     # ── helpers ─────────────────────────────────────────────────────────────
-    def _object_angle(self) -> float | None:
-        if self.object_mm is None:
-            return None
-        return self.limits.clamp_rad(self.limits.to_rad(self.object_mm))
-
     def _update_temperatures(self, dt: float) -> None:
         cfg = self.config
         tau_sq = self.tau * self.tau

@@ -111,6 +111,17 @@ USER_RAW = {
 
 FACTORY_RAW = dict(USER_RAW, zero_position_rad=0.114, max_position_rad=-1.491, rad_to_mm=74.8)
 
+#: The same shape with the closed stop at the smaller angle, which is what a
+#: reverse-mounted gripper records.  Its scale is the one derived from its own
+#: travel and the console's travel setting, so nothing about it is a warning.
+REVERSED_RAW = dict(
+    USER_RAW,
+    zero_position_rad=-0.300793,
+    max_position_rad=1.421569,
+    travel_range_rad=1.722362,
+    rad_to_mm=49.93,
+)
+
 
 class StubGripper:
     """The SDK's public surface, recorded.
@@ -560,14 +571,26 @@ class TestFrameRefusal:
         assert backend.stream_frame(1.0, 100.0, 2.0) is False
         assert _stub(backend).frames == []
 
-    def test_a_reversed_calibration_is_not_a_licence_to_transmit(self, env) -> None:
+    def test_an_unusable_calibration_is_not_a_licence_to_transmit(self, env) -> None:
         backend = RealBackend(gripper=StubGripper())
         backend.connect()
         backend.enable()
-        env.write(env.user, dict(USER_RAW, zero_position_rad=0.0, max_position_rad=1.14))
+        env.write(env.user, dict(USER_RAW, max_position_rad=USER_RAW["zero_position_rad"]))
         assert backend.load_calibration(str(env.user)) is False
         assert backend.stream_frame(0.5, 100.0, 2.0) is False
         assert _stub(backend).frames == []
+
+    def test_a_reverse_mounted_calibration_is(self, env) -> None:
+        """The ordering of the two angles is not what refuses a file — the
+        encoder is, and this backend has not read one.  A gripper whose angle
+        grows as the jaws open is a gripper, and refusing to command it was the
+        deadlock that made such a unit impossible to calibrate."""
+        backend = RealBackend(gripper=StubGripper())
+        backend.connect()
+        backend.enable()
+        env.write(env.user, REVERSED_RAW)
+        assert backend.load_calibration(str(env.user)) is True
+        assert backend.stream_frame(0.5, 100.0, 2.0) is True
 
     def test_a_repeating_refusal_is_logged_once(self, armed, caplog) -> None:
         """This sits on a 200 Hz path; 200 identical lines a second would bury
@@ -617,7 +640,7 @@ class TestLoadCalibration:
         assert backend.calibration_info().provenance == calibration.PROVENANCE_FACTORY
 
     def test_an_unusable_file_is_never_handed_to_the_sdk(self, backend, env) -> None:
-        env.write(env.user, dict(USER_RAW, zero_position_rad=0.0, max_position_rad=1.14))
+        env.write(env.user, dict(USER_RAW, max_position_rad=USER_RAW["zero_position_rad"]))
         env.write(env.factory, FACTORY_RAW)
         assert backend.load_calibration(str(env.user)) is False
         assert _stub(backend).loaded == [], "the SDK would have loaded the factory file"
@@ -679,7 +702,7 @@ class TestLoadCalibration:
 
     def test_limits_fall_back_to_the_config_when_unusable(self, backend, env) -> None:
         """The world stays describable while motion is refused."""
-        env.write(env.user, dict(USER_RAW, zero_position_rad=0.0, max_position_rad=1.14))
+        env.write(env.user, dict(USER_RAW, max_position_rad=USER_RAW["zero_position_rad"]))
         backend.load_calibration(str(env.user))
         assert backend.limits() == Limits.from_config(_stub(backend).config)
 

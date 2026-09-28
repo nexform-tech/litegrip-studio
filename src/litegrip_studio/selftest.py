@@ -24,8 +24,9 @@ from .core.motion import MotionFSM, MotionParams, MotionState
 from .units import Limits, frame_mismatch
 
 #: The three calibrations this console has to get right, as (closed, open,
-#: file_scale, description).  The first is the SDK's shipped default and is the
-#: reason the direction check exists.
+#: file_scale, description).  The first is the SDK's shipped default pair, whose
+#: ordering reads as a reverse-mounted gripper and whose range this bench's
+#: encoder readings fall outside of — the two facts the checks below turn on.
 #:
 #: ``file_scale`` is the millimetres per rad the *file* carries, which on both
 #: real files is its own 120 mm of nominal over the span it recorded.  The
@@ -33,10 +34,19 @@ from .units import Limits, frame_mismatch
 #: and the measured travel — so it is kept here as the witness of that: the
 #: travel check is defeated by putting the file's number back.
 KNOWN_CALIBRATIONS = (
-    (0.0, 1.14, 120.0 / 1.14, "未标定（SDK 默认值，方向相反，必须被拒绝）"),
+    (0.0, 1.14, 120.0 / 1.14, "SDK 默认值（反向装配读数，且在实测角度之外）"),
     (0.114, -1.491, 74.8, "出厂标定"),
     (1.775959, -0.064279, 65.21, "用户标定（示例）"),
 )
+
+#: The two angles the bench unit this console was debugged against stands at, all
+#: the way open and all the way shut.  That unit is the one the direction work
+#: came from, and the point of it is the *ordering*: the angle is larger with the
+#: jaws apart, which is not what the SDK's formulas describe.  The file that was
+#: in force there had the two the other way round, which is why commanding 闭合
+#: opened the gripper.
+MEASURED_OPEN_RAD = 1.421569
+MEASURED_CLOSED_RAD = -0.300793
 
 
 def _limits(closed: float, open_: float) -> Limits:
@@ -121,19 +131,53 @@ def check_units_round_trip() -> None:
             assert abs(back - mm) < 1e-6, f"{mm} mm 往返后成了 {back} mm"
 
 
-def check_direction_is_caught() -> None:
+def check_the_mounting_direction_is_read_from_the_angles() -> None:
+    """Which way the jaws open is a fact about the assembly, and it is read from
+    the two recorded angles rather than assumed.
+
+    The SDK's formulas only describe a unit whose angle shrinks as the jaws open.
+    A gripper whose fingers are mounted the other way round has its closed stop at
+    the *smaller* angle, which is also what the SDK's uncalibrated default pair
+    looks like — so the ordering cannot decide whether a calibration is good, and
+    refusing one of the two orderings refuses a real gripper.  Two things have to
+    hold instead, and both are checked here on all three datasets: every
+    conversion agrees with the recorded direction, and the calibration's range
+    contains the angles its own gripper is standing at.
+    """
+    for closed, open_, _file_scale, label in KNOWN_CALIBRATIONS:
+        limits = _limits(closed, open_)
+        assert limits.to_rad(0.0) == closed, f"{label}：0 mm 不是记录的闭合角"
+        assert limits.to_rad(limits.max_stroke_mm) != closed, (
+            f"{label}：量程顶端和 0 mm 落在同一个角度，换算没有方向"
+        )
+        # The sign of the slope has to be the ordering the two recorded angles
+        # have — the one thing a wrong `direction` cannot fake, since it moves
+        # the conversions and leaves the angles where they were.
+        grew = limits.to_rad(limits.max_stroke_mm) > closed
+        assert grew is (open_ > closed), f"{label}：换算是朝反方向的"
+
     uncalibrated = _limits(*KNOWN_CALIBRATIONS[0][:2])
     factory = _limits(*KNOWN_CALIBRATIONS[1][:2])
     user = _limits(*KNOWN_CALIBRATIONS[2][:2])
+    assert uncalibrated.reversed_mount, "SDK 默认值不是反向装配读数"
+    assert not factory.reversed_mount, "出厂标定被误判为反向"
+    assert not user.reversed_mount, "用户标定被误判为反向"
 
-    assert uncalibrated.is_reversed, "未标定的默认值必须被判定为反向"
-    assert not factory.is_reversed, "出厂标定被误判为反向"
-    assert not user.is_reversed, "用户标定被误判为反向"
+    # And the answer has to come from something other than the ordering: both
+    # orderings of the same pair describe a gripper, so what refuses a file that
+    # belongs to another one is the encoder reading.
+    bench = _limits(MEASURED_CLOSED_RAD, MEASURED_OPEN_RAD)
+    assert bench.reversed_mount, "本机的两个极限不是反向装配"
+    for measured in (MEASURED_CLOSED_RAD, MEASURED_OPEN_RAD):
+        assert frame_mismatch(uncalibrated, measured), (
+            f"实测角度 {measured:.4f} rad 落在 SDK 默认值的行程里，这份零点不属于本机"
+        )
+        assert frame_mismatch(bench, measured) == "", "本机标定在自己的读数上被拦下"
 
 
 def check_the_travel_is_derived_from_the_recorded_angles() -> None:
-    """Both real files record the same pair of angles, and the millimetres per
-    rad the console moves by comes out of them and the measured travel.
+    """Every dataset records a pair of angles, and the millimetres per rad the
+    console moves by comes out of them and the measured travel.
 
     Three things have to hold on each, and the third is the one the operator
     sees: 0 mm is the recorded closed angle, the recorded extremes span the
@@ -142,10 +186,14 @@ def check_the_travel_is_derived_from_the_recorded_angles() -> None:
     Move by the file's own scale instead and the recorded span comes out as 120
     mm — a slider covering the middle of a travel nobody has seen the ends of,
     which is what this check exists to catch.
+
+    All three are stated without a sign, and the first dataset is the one that
+    needs that: it is the reversed mounting, where every one of them holds with
+    both angles the other way up.
     """
     travel = constants.DEFAULT_TRAVEL_MM
     inset = constants.SPAN_INSET_MM
-    for closed, open_, file_scale, label in KNOWN_CALIBRATIONS[1:]:
+    for closed, open_, file_scale, label in KNOWN_CALIBRATIONS:
         limits = _limits(closed, open_)
         assert abs(limits.to_mm(closed)) < 1e-9, f"{label}：记录的闭合角不是 0 mm"
 
@@ -155,9 +203,12 @@ def check_the_travel_is_derived_from_the_recorded_angles() -> None:
             f"（行程 {travel:.0f} + 内缩 {inset:.0f}）"
         )
 
-        # Signed toward the open end, where the angle decreases: the top of the
-        # range sits that far short of the recorded extreme.
-        gap_mm = (limits.to_rad(travel) - open_) * limits.rad_to_mm
+        # The top of the commanded range, back in angles: it sits the inset away
+        # from the recorded open extreme.  This is the one place the two
+        # conversions are checked against each other, so it is also the place a
+        # sign error between them shows up — a to_rad that ran the other way
+        # would leave the whole travel between them here, not the inset.
+        gap_mm = abs(limits.to_rad(travel) - open_) * limits.rad_to_mm
         assert abs(gap_mm - inset) < 1e-6, (
             f"{label} 的量程顶端离记录的张开角 {gap_mm:.2f} mm，应为 {inset:.0f} mm"
         )
@@ -297,9 +348,9 @@ def check_a_calibration_from_another_frame_is_refused() -> None:
 
 CHECKS = (
     Check("单位换算往返一致", check_units_round_trip),
-    Check("反向标定被识别为危险", check_direction_is_caught),
+    Check("装配方向取自记录的两个角度", check_the_mounting_direction_is_read_from_the_angles),
     Check("标定零点不属于本机时被拦下", check_a_calibration_from_another_frame_is_refused),
-    Check("两份真实标定的 0 点与量程顶端正确", check_the_travel_is_derived_from_the_recorded_angles),
+    Check("三份标定的 0 点与量程顶端正确", check_the_travel_is_derived_from_the_recorded_angles),
     Check("被控对象在阶跃下收敛且不过冲", check_plant_settles_on_a_step),
     Check("CAN 口探测结果读取正确", check_the_can_probe_is_read_correctly),
     Check("一次运动能到位并停住", check_a_move_arrives_and_stops),

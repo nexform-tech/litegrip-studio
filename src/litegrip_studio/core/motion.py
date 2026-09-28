@@ -479,7 +479,11 @@ class MotionFSM:
         A velocity that cannot be read is not evidence of an obstruction either,
         and the same backstop bounds it.
         """
-        ref_rad_s = abs(mm_to_rad_per_s(ref_mm_s, self.limits.rad_to_mm))
+        ref_rad_s = abs(
+            mm_to_rad_per_s(
+                ref_mm_s, self.limits.rad_to_mm, direction=self.limits.direction
+            )
+        )
         if ref_rad_s <= 0.0:
             return False
         measured_rad_s = abs(telemetry.velocity_rad_s)
@@ -607,7 +611,9 @@ class MotionFSM:
         q_mm = self.limits.clamp_mm(q_cmd_mm)
         q_rad = self.limits.clamp_rad(self.limits.to_rad(q_mm))
         if dq_rad is None:
-            dq_rad = mm_to_rad_per_s(vel_mm_s, self.limits.rad_to_mm)
+            dq_rad = mm_to_rad_per_s(
+                vel_mm_s, self.limits.rad_to_mm, direction=self.limits.direction
+            )
         sent = bool(backend.stream_frame(q_rad, kp, kd, dq_rad, tau_nm))
         return FrameOut(
             q_cmd_mm=q_mm,

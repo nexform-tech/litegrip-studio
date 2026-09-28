@@ -70,6 +70,11 @@ class TelemetryFrame:
     #: would then show, and which a position command would then be computed
     #: from.
     position_mm: float | None
+    #: The same reading in the motor's own units, gated the same way.  The
+    #: millimetres are computed *through* a calibration, so they cannot be used
+    #: to check one — the calibrate page shows this number for the one question
+    #: that needs the raw value: which way the encoder runs.
+    position_rad: float | None
     velocity_mm_s: float
     force_n: float
     torque_nm: float
@@ -104,6 +109,9 @@ class TelemetryFrame:
             "position_mm": (
                 None if self.position_mm is None else round(self.position_mm, 4)
             ),
+            "position_rad": (
+                None if self.position_rad is None else round(self.position_rad, 6)
+            ),
             "velocity_mm_s": round(self.velocity_mm_s, 4),
             "force_n": round(self.force_n, 4),
             "torque_nm": round(self.torque_nm, 6),
@@ -128,6 +136,7 @@ class TelemetryFrame:
 EMPTY_FRAME = TelemetryFrame(
     t=0.0,
     position_mm=None,
+    position_rad=None,
     velocity_mm_s=0.0,
     force_n=0.0,
     torque_nm=0.0,

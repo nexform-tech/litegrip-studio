@@ -15,9 +15,12 @@ below assert that an unusable user file stays *unusable* rather than becoming a
 factory one, and that the SDK is only ever handed a path we have already read.
 
 *The direction reversal.*  The SDK's uncalibrated defaults have ``closed``
-numerically below ``open``, which is backwards for real hardware and collapses
-the SDK's own clamp to a constant.  Every check downstream of that assumes the
-direction is right, so it is caught here, before anything moves.
+numerically below ``open``, which is the ordering a reverse-mounted gripper has
+as well — the two are indistinguishable from the angles alone, and a check that
+refuses the first makes the second impossible to calibrate.  So the ordering is
+reported and the operator is asked to confirm it; what refuses a file is the
+``frame_mismatch`` against the live encoder reading, which is tested in
+``test_units.py``.
 """
 
 from __future__ import annotations
@@ -71,12 +74,31 @@ USER_RAW = {
 }
 
 # ``GripperConfig``'s untouched defaults: closed at 0.0, open at 1.14.  This is
-# what the SDK uses when nothing has been loaded, and it is inverted.
+# what the SDK uses when nothing has been loaded.  Read as a file it describes a
+# reverse-mounted gripper and validates; what it cannot survive is the encoder,
+# because this bench's readings are nowhere inside that range.
 UNCALIBRATED_RAW = {
     "zero_position_rad": 0.0,
     "max_position_rad": 1.14,
     "rad_to_mm": 65.21,
 }
+
+#: A file that is unusable for a reason no operator could mistake for a mounting
+#: direction: both extremes are the same angle, so the travel is zero and the
+#: scale derived from it is zero, which collapses every target to one angle.
+ZERO_TRAVEL_RAW = dict(USER_RAW, max_position_rad=USER_RAW["zero_position_rad"])
+
+#: This bench's own recorded extremes, with the closed stop at the *smaller*
+#: angle — what the two-point capture writes on a reverse-mounted unit.  The
+#: file's scale agrees with the one derived from the travel, so the only thing
+#: distinguishing it from ``USER_RAW`` is the ordering.
+REVERSED_RAW = dict(
+    USER_RAW,
+    zero_position_rad=-0.300793,
+    max_position_rad=1.421569,
+    travel_range_rad=1.722362,
+    rad_to_mm=49.93,
+)
 
 #: The angular travel the user file records, used to place a travel setting
 #: exactly on one of the plausibility-band edges.
@@ -249,27 +271,52 @@ class TestProvenance:
 
 
 # ── the direction check ─────────────────────────────────────────────────────
-class TestDirectionReversal:
-    def test_the_uncalibrated_defaults_are_refused(self, env) -> None:
-        """``(0.0, 1.14)`` is not a weak calibration, it is an inverted one.
+class TestMountingDirection:
+    """The ordering of the two angles is reported, not judged.
 
-        Under it ``mm = (closed - rad) * rad_to_mm`` is negative across the whole
-        travel and every target clamps to the same angle, so the jaws drive at
-        the wrong stop.  Nothing downstream can recover from that, which is why
-        this is a hard problem rather than a warning.
-        """
+    ``closed <= open`` used to be a hard problem here: it is the signature of the
+    SDK's uncalibrated defaults, and every conversion downstream assumes the
+    classic ordering.  It is also the signature of a gripper whose fingers are
+    mounted the other way round, which is entirely valid and cannot be told apart
+    from the defaults by the angles alone — so the check made such a unit
+    impossible to calibrate, which is the deadlock this replaces.  The
+    operator is told which case was recorded; the encoder has the final say, in
+    ``frame_mismatch``.
+    """
+
+    def test_the_uncalibrated_defaults_are_read_as_a_reverse_mounting(self, env) -> None:
         _write(env.user, UNCALIBRATED_RAW)
         info = calibration.resolve()
-        assert info.provenance == PROVENANCE_INVALID
+        assert info.usable, "the angles are self-consistent; only the encoder can refute them"
+        assert info.limits is not None and info.limits.reversed_mount
+        assert info.limits.direction == 1.0
+        assert info.problems == ()
+        assert any("反向装配" in w for w in info.warnings)
+
+    def test_a_reverse_mounted_calibration_may_be_moved_under(self, env) -> None:
+        """The whole point: after the two-point capture on a unit whose angle
+        shrinks as the jaws open, the operator is not left with a dead console."""
+        _write(env.user, dict(REVERSED_RAW))
+        info = calibration.resolve()
+        assert info.usable and info.motion_allowed
+        assert info.limits is not None and info.limits.reversed_mount
+        assert "反向装配" in info.headline()
+
+    def test_the_classic_mounting_is_named_and_does_not_warn(self, env) -> None:
+        _write(env.user, USER_RAW)
+        info = calibration.resolve()
+        assert info.limits is not None and not info.limits.reversed_mount
+        assert not any("反向装配" in w for w in info.warnings)
+        assert "正向装配" in info.headline()
+
+    def test_equal_angles_are_refused(self, env) -> None:
+        """Zero travel is a problem whichever way it is read: the scale derived
+        from it is zero, so every target clamps to one angle."""
+        _write(env.user, ZERO_TRAVEL_RAW)
+        info = calibration.resolve()
         assert not info.usable
         assert info.limits is None
-        assert "方向与实机相反" in " ".join(info.problems)
-
-    def test_equal_angles_are_also_refused(self, env) -> None:
-        """Zero travel is reversed by ``<=``, deliberately: the same clamp
-        collapse, from the other side."""
-        _write(env.user, dict(USER_RAW, zero_position_rad=-0.5, max_position_rad=-0.5))
-        assert not calibration.resolve().usable
+        assert any("行程" in p for p in info.problems)
 
     @pytest.mark.parametrize(
         "raw", [FACTORY_RAW, USER_RAW], ids=["factory", "user"]
@@ -280,7 +327,7 @@ class TestDirectionReversal:
         assert info.provenance == PROVENANCE_USER
         assert info.problems == ()
         assert info.limits is not None
-        assert not info.limits.is_reversed
+        assert not info.limits.reversed_mount
 
 
 class TestMotionAllowed:
@@ -312,8 +359,15 @@ class TestMotionAllowed:
         assert info.usable, "the numbers are still worth displaying"
         assert not info.motion_allowed
 
-    def test_a_reversed_calibration_does_not(self, env) -> None:
-        _write(env.user, UNCALIBRATED_RAW)
+    def test_a_reverse_mounted_calibration_does(self, env) -> None:
+        """The mounting direction is not a reason to refuse motion; it is a
+        reason to say which way round the gripper is."""
+        _write(env.user, REVERSED_RAW)
+        info = calibration.resolve()
+        assert info.usable and info.motion_allowed
+
+    def test_a_zero_travel_calibration_does_not(self, env) -> None:
+        _write(env.user, ZERO_TRAVEL_RAW)
         info = calibration.resolve()
         assert not info.usable and not info.motion_allowed
 
@@ -350,7 +404,7 @@ class TestMotionAllowed:
             PROVENANCE_USER: lambda: _write(env.user, USER_RAW),
             PROVENANCE_FACTORY: lambda: _write(env.factory, FACTORY_RAW),
             PROVENANCE_MEMORY: lambda: None,
-            PROVENANCE_INVALID: lambda: _write(env.user, UNCALIBRATED_RAW),
+            PROVENANCE_INVALID: lambda: _write(env.user, ZERO_TRAVEL_RAW),
             PROVENANCE_MISSING: lambda: None,
         }
         writers[provenance]()
@@ -505,13 +559,13 @@ class TestSilentFallbackDefence:
 
     @pytest.mark.parametrize(
         "setup",
-        ["missing", "corrupt", "reversed", "memory"],
+        ["missing", "corrupt", "zero_travel", "memory"],
     )
     def test_no_path_is_handed_when_motion_must_not_proceed(self, env, setup: str) -> None:
         if setup == "corrupt":
             _write(env.user, "{ truncated")
-        elif setup == "reversed":
-            _write(env.user, UNCALIBRATED_RAW)
+        elif setup == "zero_travel":
+            _write(env.user, ZERO_TRAVEL_RAW)
         elif setup == "memory":
             info = calibration.in_memory(1.775959, -0.064279, 65.21)
             assert info.provenance == PROVENANCE_MEMORY
@@ -530,11 +584,19 @@ class TestSilentFallbackDefence:
         assert info.limits is not None, "the numbers are still usable for display"
         assert any("尚未保存" in w for w in info.warnings)
 
-    def test_a_memory_calibration_of_a_reversed_probe_is_refused(self) -> None:
-        info = calibration.in_memory(0.0, 1.14, 65.21)
+    def test_a_memory_calibration_of_a_reverse_mounted_probe_is_displayable(self) -> None:
+        """Reverse-mounted or not, an unsaved result is held to the same rule:
+        shown, and gated until it is written to a file."""
+        info = calibration.in_memory(-0.300793, 1.421569, 49.93)
+        assert info.usable
+        assert info.limits is not None and info.limits.reversed_mount
+        assert not info.motion_allowed
+
+    def test_a_memory_calibration_of_a_zero_travel_probe_is_refused(self) -> None:
+        info = calibration.in_memory(0.5, 0.5, 65.21)
         assert not info.usable
         assert info.limits is None
-        assert any("方向与实机相反" in p for p in info.problems)
+        assert any("行程" in p for p in info.problems)
 
     def test_a_memory_calibration_carries_its_extra_fields(self) -> None:
         info = calibration.in_memory(1.775959, -0.064279, 65.21, source="guided")
@@ -620,9 +682,9 @@ class TestCrossCheck:
     def test_an_unusable_calibration_that_was_applied_anyway_is_caught(self, env) -> None:
         """Motion is refused here, so what the backend happens to hold is not
         just a mismatch — it is a config nobody vetted."""
-        _write(env.user, UNCALIBRATED_RAW)
+        _write(env.user, ZERO_TRAVEL_RAW)
         info = calibration.resolve()
-        applied = Limits(0.0, 1.14, 65.21)
+        applied = Limits(0.5, 0.5, 65.21)
         warnings = calibration.cross_check(info, applied)
         assert warnings and "运动已拒绝" in warnings[0]
 
@@ -676,7 +738,9 @@ class TestRoundTrip:
 # ── presentation ────────────────────────────────────────────────────────────
 class TestPresentation:
     @pytest.mark.parametrize(
-        "raw", [USER_RAW, FACTORY_RAW, UNCALIBRATED_RAW, None], ids=["user", "factory", "reversed", "missing"]
+        "raw",
+        [USER_RAW, FACTORY_RAW, UNCALIBRATED_RAW, None],
+        ids=["user", "factory", "reverse_mounted", "missing"],
     )
     def test_describe_and_as_table_never_raise(self, env, raw) -> None:
         """The status bar and the calibration page call these unconditionally,
@@ -728,11 +792,21 @@ class TestPresentation:
     def test_the_headline_is_a_sentence_not_a_dump(self, env) -> None:
         _write(env.user, USER_RAW)
         headline = calibration.resolve().headline()
-        assert headline == "用户标定：行程 85.0 mm"
+        # The mounting direction is in it because it is the one other thing that
+        # decides whether the operator's idea of 闭合 matches the gripper's.
+        assert headline == "用户标定：行程 85.0 mm · 正向装配（闭合角更大）"
         # The log line keeps the radians; the banner is read while deciding
         # whether to move, so it must not carry them.
         assert "rad" not in headline
         assert "rad" in calibration.resolve().describe()
+
+    def test_the_headline_says_a_reverse_mounting_is_one(self, env) -> None:
+        _write(env.user, REVERSED_RAW)
+        assert "反向装配（张开角更大）" in calibration.resolve().headline()
+
+    def test_the_table_carries_the_mounting_direction(self, env) -> None:
+        _write(env.user, REVERSED_RAW)
+        assert dict(calibration.resolve().as_table())["装配方向"] == "反向装配（张开角更大）"
 
     def test_every_provenance_has_a_chinese_label(self) -> None:
         for name in (

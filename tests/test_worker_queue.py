@@ -1304,6 +1304,20 @@ class TestCalibrationCommands:
         bench.send(cmd.StartGuidedCalibration())
         assert bench.loop.probe is first
 
+    def test_the_declared_mounting_reaches_the_probe(self) -> None:
+        """The page asks the operator which way the jaws open, and the answer
+        has to arrive at the probe: a worker that dropped it would run every
+        probe in the SDK's direction, which on a reverse-mounted gripper is the
+        inverted one — and the result it produces still validates and saves."""
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.StartGuidedCalibration(reversed_mount=True))
+        bench.tick()
+
+        assert bench.loop.probe is not None
+        assert bench.loop.probe.reversed_mount
+        assert bench.loop.probe.direction == 1.0
+
     def test_confirm_reaches_the_guided_probe(self) -> None:
         bench = Bench()
         bench.bring_up()

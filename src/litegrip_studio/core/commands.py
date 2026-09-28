@@ -215,12 +215,20 @@ class StartGuidedCalibration(Command):
 
     The only command in the set that authorises movement without a valid
     calibration, because it is the thing that produces one.
+
+    ``reversed_mount`` says which way the jaws open, and it has to come from the
+    operator: the probe is producing a calibration precisely because there is no
+    file to read it from, and a probe that steps the wrong way records the closed
+    stop as the open one — a result that validates, saves, and drives the gripper
+    inverted.
     """
 
+    reversed_mount: bool = False
     source: str = "guided"
 
     def describe(self) -> str:
-        return "开始引导式标定"
+        mounting = "（反向装配）" if self.reversed_mount else ""
+        return f"开始引导式标定{mounting}"
 
 
 @dataclass(frozen=True)

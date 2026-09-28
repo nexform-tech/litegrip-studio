@@ -234,16 +234,21 @@ class TestItsOwnCalibration:
         assert limits.rad_to_mm != pytest.approx(self.BENCH_RAW["rad_to_mm"])
 
     def test_an_unusable_file_of_its_own_is_not_papered_over(self, tmp_path) -> None:
-        """A reversed file must block, not quietly become the default.  A
-        fallback here would be the SDK's silent fallback wearing the simulator's
-        name, and it would mean the console could not tell a good file from a
-        bad one by looking at the gate."""
-        path = tmp_path / "reversed.json"
+        """A file with no travel in it must block, not quietly become the default.
+        A fallback here would be the SDK's silent fallback wearing the simulator's
+        name, and it would mean the console could not tell a good file from a bad
+        one by looking at the gate.
+
+        The unusable file chosen is one whose two extremes are the same angle,
+        rather than one whose angles come in the other order: the second is a
+        reverse-mounted gripper and is a perfectly good calibration.
+        """
+        path = tmp_path / "no_travel.json"
         path.write_text(
             json.dumps(
                 {
-                    "zero_position_rad": 0.0,
-                    "max_position_rad": 1.14,
+                    "zero_position_rad": 1.0,
+                    "max_position_rad": 1.0,
                     "rad_to_mm": 65.21,
                 }
             ),
@@ -258,6 +263,33 @@ class TestItsOwnCalibration:
         assert info.provenance == PROVENANCE_INVALID
         assert not info.motion_allowed
         assert evaluate_gate(info, allow_factory=True)[0] is GateState.BLOCKED
+
+    def test_a_reverse_mounted_file_of_its_own_is_applied(self, tmp_path) -> None:
+        """The other order of the same two angles, and it is not a defect: the
+        simulator has to be able to run on a gripper whose angle grows as the
+        jaws open, or the console cannot be exercised against one."""
+        path = tmp_path / "reversed.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "zero_position_rad": -0.300793,
+                    "max_position_rad": 1.421569,
+                    "rad_to_mm": 49.93,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        sim = SimBackend(clock=FakeClock(), calibration_path=path)
+        sim.connect()
+
+        assert sim.load_calibration(None) is True
+        info = sim.calibration_info()
+        assert info.provenance == PROVENANCE_USER
+        assert info.motion_allowed
+        limits = sim.limits()
+        assert limits.reversed_mount
+        assert limits.to_rad(0.0) == pytest.approx(-0.300793)
 
 
 class TestTheTravelSettingRescalesTheSimulator:
