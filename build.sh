@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+#
+# 打包成单文件可执行程序。
+#
+# 两个参数一虚一实，都是必须的：
+#
+#   --collect-data litegrip      把 factory_calibration.json 打进产物。SDK 用
+#                                dirname(litegrip.__file__) 找它，在 sys._MEIPASS
+#                                下也成立，但没有这个文件就无法回退出厂标定。
+#   --collect-submodules litegrip  否则只有直接 import 到的模块进包。
+#
+# --exclude-module zenoh / eclipse_zenoh：SDK 声明了但从未 import 的依赖，本机
+# 也没装；不打进产物，也省下 PyInstaller 找不到它时的告警。
+#
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+SDK="${LITEGRIP_SDK_PATH:-$HERE/../lite-grip}"
+
+cd "$HERE"
+
+# build.sh 自己也需要能 import litegrip，否则 --collect-* 无从下手。
+export PYTHONPATH="$HERE/src:$SDK${PYTHONPATH:+:$PYTHONPATH}"
+
+# ── 收尾 ─────────────────────────────────────────────────────────────────────
+# 构建期写进源码树的东西一律在退出时清掉，失败退出也要清。
+#
+# 版本戳尤其要清：它一旦留下，之后每次源码运行都会拿着上一次构建的号自称，而那个
+# 号里的 git hash 可能早就和工作区对不上了——版本读数于是变成一句谎话。
+# tests/test_cli.py 用「源码运行报 +source」钉着这条。它是构建的输入，不是源码的
+# 一部分；产物里已经有一份自己的副本，删掉这里的不影响任何东西。
+STAMP="src/litegrip_studio/_version.py"
+cleanup() {
+    rm -f "$STAMP"
+    if [ -n "${ENTRY_DIR:-}" ]; then
+        rm -rf "$ENTRY_DIR"
+    fi
+}
+trap cleanup EXIT
+
+# ── 版本戳 ───────────────────────────────────────────────────────────────────
+# base 号从 version.py 的 BASE_VERSION 提取，保持单一来源；这里生成的不是发布
+# 版本号，发布版本由 semantic-release 按提交历史算，git tag 才是唯一事实来源。
+BASE="$(sed -n 's/^BASE_VERSION *= *"\([^"]*\)".*/\1/p' src/litegrip_studio/version.py | head -1)"
+BASE="${BASE:-0.0.0}"
+if git rev-parse --git-dir >/dev/null 2>&1; then
+    COUNT="$(git rev-list --count HEAD 2>/dev/null || echo 0)"
+    SHORT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    DIRTY=""
+    [ -n "$(git status --porcelain 2>/dev/null)" ] && DIRTY=".dirty"
+    GITVER="+g${SHORT}${DIRTY}"
+else
+    COUNT="0"
+    GITVER="+nogit"
+fi
+FULLVER="${BASE}.${COUNT}${GITVER}.$(date +%Y%m%d)"
+
+printf '# 自动生成 —— 由 build.sh 写入，构建结束即删除，不必提交。\n__version__ = "%s"\n' \
+    "$FULLVER" > "$STAMP"
+echo "版本号：$FULLVER"
+
+# ── 入口 ─────────────────────────────────────────────────────────────────────
+# 交给 PyInstaller 的是这个绝对导入的小文件，而不是 src/litegrip_studio/__main__.py：
+# PyInstaller 把入口脚本当顶层模块执行，那份文件里的相对导入（from .cli import main）
+# 到了那里就没有父包可依。
+#
+# 目录随机、文件名固定：入口脚本的名字会进产物（它就是 __main__，回溯里显示的名
+# 字），随机名会让同一个 commit 两次构建出不同字节，也把 litegrip-entry-lrwBgA 这
+# 种东西写进报错信息。随机的是目录，于是并发的两次构建仍不会互相踩。
+ENTRY_DIR="$(mktemp -d -t litegrip-build-XXXXXX)"
+ENTRY="$ENTRY_DIR/litegrip_studio_main.py"
+cat > "$ENTRY" <<'PY'
+from litegrip_studio.cli import main
+
+raise SystemExit(main())
+PY
+
+echo "用 $PYTHON_BIN 打包 litegrip-studio …"
+# 不要在这里用 exec：exec 会用 PyInstaller 换掉本 shell 进程，上面那个 EXIT trap
+# 就再也不会执行，版本戳和临时目录于是一起留在磁盘上。让脚本挂着等它结束，
+# 退出码照样是它的（set -e 负责失败即退），收尾才有着落。
+"$PYTHON_BIN" -m PyInstaller \
+    --onefile \
+    --noconfirm \
+    --name "litegrip-studio" \
+    --paths src \
+    --paths "$SDK" \
+    --collect-submodules litegrip \
+    --collect-data litegrip \
+    --hidden-import litegrip_studio._version \
+    --exclude-module zenoh \
+    --exclude-module eclipse_zenoh \
+    --exclude-module matplotlib \
+    --exclude-module tkinter \
+    --exclude-module PySide2 \
+    --exclude-module PySide6 \
+    "$ENTRY"

@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "litegrip-studio"
+# Placeholder owned by semantic-release. Never edit, never treat as the
+# current version — the git tag is the only source of truth (AGENTS.md §3).
+version = "0.0.0-semantic-release"
+description = "PyQt5 operator console for the LiteGrip adaptive two-finger gripper"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+keywords = ["gripper", "litearm", "litegrip", "socketcan", "pyqt5", "robotics"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "PyQt5>=5.15",
+    "pyqtgraph>=0.13",
+    "numpy>=1.21",
+    # The LiteGrip SDK is deliberately NOT a resolved dependency: its only
+    # declared dep (eclipse-zenoh) is never imported by library code and is not
+    # installed here. Run via run_litegrip_studio.sh (PYTHONPATH), or install
+    # a sibling checkout explicitly:
+    #   python -m pip install -e ../lite-grip --no-deps
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+litegrip-studio = "litegrip_studio.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning:litegrip_studio.*"]
