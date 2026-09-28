@@ -11,6 +11,7 @@ is what a console with no calibration looks like.
 from __future__ import annotations
 
 import dataclasses
+from pathlib import Path
 
 import pytest
 from PyQt5.QtWidgets import QLabel, QScrollArea
@@ -36,15 +37,21 @@ from litegrip_studio.units import Limits
 USER_LIMITS = Limits(1.775959, -0.064279, 65.21, 120.0)
 FACTORY_LIMITS = Limits(0.114, -1.491, 74.8, 120.0)
 
+#: A stand-in for where the SDK was checked out.  The shortened form of a
+#: factory path is relative to that root, so the tests that assert on it
+#: point ``calibration.sdk_root`` here: they then say the same thing on a
+#: machine with the SDK installed and on one without it.
+SDK_ROOT = Path("/opt/litegrip")
+
 USER_CAL = CalibrationInfo(
     provenance=calibration.PROVENANCE_USER,
     limits=USER_LIMITS,
-    path="/home/qaz/.litegrip/litegrip_calibration.json",
+    path=str(Path.home() / ".litegrip" / "litegrip_calibration.json"),
 )
 FACTORY_CAL = CalibrationInfo(
     provenance=calibration.PROVENANCE_FACTORY,
     limits=FACTORY_LIMITS,
-    path="/home/qaz/lite-grip/litegrip/factory_calibration.json",
+    path=str(SDK_ROOT / "litegrip" / "factory_calibration.json"),
 )
 REVERSED_CAL = CalibrationInfo(
     provenance=calibration.PROVENANCE_INVALID,
@@ -176,11 +183,14 @@ class TestTheProvenanceIsShown:
         assert "用户标定" in summary
         assert "120.0 mm" in summary
 
-    def test_the_file_is_shown_relative_rather_than_absolute(self, page) -> None:
+    def test_the_file_is_shown_relative_rather_than_absolute(
+        self, page, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(calibration, "sdk_root", lambda: SDK_ROOT)
         page.set_calibration(FACTORY_CAL)
 
         assert "litegrip/factory_calibration.json" in page._file_label.text()
-        assert "/home/qaz/lite-grip" not in page._file_label.text()
+        assert str(SDK_ROOT) not in page._file_label.text()
 
     def test_reloading_does_not_leave_the_previous_table_behind(self, page) -> None:
         """Two calibrations on screen at once is the exact confusion this page

@@ -15,8 +15,8 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON_BIN="${PYTHON_BIN:-/home/qaz/pylitearm-new/.venv/bin/python3}"
-SDK="${LITEGRIP_SDK_PATH:-/home/qaz/lite-grip}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+SDK="${LITEGRIP_SDK_PATH:-$HERE/../lite-grip}"
 
 cd "$HERE"
 

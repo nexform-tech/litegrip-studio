@@ -19,7 +19,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
 SRC = REPO_ROOT / "src"
-SDK = Path(os.environ.get("LITEGRIP_SDK_PATH", "/home/qaz/lite-grip"))
+#: A checkout beside this one, which is where a workspace holding both
+#: repositories puts it; LITEGRIP_SDK_PATH overrides that.
+SDK = Path(os.environ.get("LITEGRIP_SDK_PATH") or REPO_ROOT.parent / "lite-grip")
 
 for _path in (str(SRC), str(SDK)):
     if _path not in sys.path:

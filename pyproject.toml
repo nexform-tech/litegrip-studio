@@ -28,12 +28,12 @@ dependencies = [
     # The LiteGrip SDK is deliberately NOT a resolved dependency: its only
     # declared dep (eclipse-zenoh) is never imported by library code and is not
     # installed here. Run via run_litegrip_studio.sh (PYTHONPATH), or install
-    # it explicitly:  python -m pip install -e /home/qaz/lite-grip --no-deps
+    # a sibling checkout explicitly:
+    #   python -m pip install -e ../lite-grip --no-deps
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
-sdk = ["litegrip @ file:///home/qaz/lite-grip"]
 
 [project.scripts]
 litegrip-studio = "litegrip_studio.cli:main"

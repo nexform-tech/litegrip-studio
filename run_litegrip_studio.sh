@@ -2,16 +2,17 @@
 #
 # 启动脚本。所有路径都加引号——这个仓库的目录名里带空格。
 #
-# 主路径不安装 SDK：它当前未安装，其唯一的声明依赖 eclipse-zenoh 库代码根本
-# 没有 import、本机也没装，所以把 /home/qaz/lite-grip 与 src/ 直接放进
-# PYTHONPATH，而不是 pip install。想改成安装路线也可以：
-#   python -m pip install -e /home/qaz/lite-grip --no-deps
+# 主路径不安装 SDK：它唯一的声明依赖 eclipse-zenoh 在库代码里根本没有 import，
+# 常常也没装，所以把 SDK 检出目录与 src/ 一起放进 PYTHONPATH，而不是 pip
+# install。SDK 默认取本仓库的同级目录 ../lite-grip，也可以用 LITEGRIP_SDK_PATH
+# 指到别处。想改成安装路线也可以：
+#   python -m pip install -e ../lite-grip --no-deps
 #
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON_BIN="${PYTHON_BIN:-/home/qaz/pylitearm-new/.venv/bin/python3}"
-SDK="${LITEGRIP_SDK_PATH:-/home/qaz/lite-grip}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+SDK="${LITEGRIP_SDK_PATH:-$HERE/../lite-grip}"
 
 export PYTHONPATH="$HERE/src:$SDK${PYTHONPATH:+:$PYTHONPATH}"
 

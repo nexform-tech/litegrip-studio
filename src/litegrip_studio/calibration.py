@@ -122,7 +122,7 @@ def friendly_path(path: str | os.PathLike[str] | None) -> str:
     The two paths that have a meaningful home are shown relative to it — the
     SDK's own file relative to the SDK, anything under the home directory with a
     leading ``~``.  ``litegrip/factory_calibration.json`` says where that file
-    lives; ``/home/qaz/lite-grip/litegrip/factory_calibration.json`` only says
+    lives; ``/opt/litegrip/litegrip/factory_calibration.json`` only says
     which machine it was checked out on.
     """
     if not path:

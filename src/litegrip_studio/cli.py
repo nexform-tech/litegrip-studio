@@ -19,12 +19,14 @@ import logging
 import os
 import signal
 import sys
+from pathlib import Path
 
 from . import constants, logging_setup, version
 
-#: Where the SDK lives when it is not installed.  Overridable from the
-#: environment so a checkout somewhere else needs no edit here.
-DEFAULT_SDK_PATH = "/home/qaz/lite-grip"
+#: Where the SDK lives when it is not installed: the sibling checkout, which
+#: is where a workspace holding both repositories puts it.  Overridable from
+#: the environment so a checkout somewhere else needs no edit here.
+DEFAULT_SDK_PATH = str(Path(__file__).resolve().parents[3] / "lite-grip")
 
 BACKENDS = ("sim", "real")
 
