@@ -280,6 +280,12 @@ class TestTheProbeButtons:
 
         assert isinstance(page.recorder.last(), cmd.StartManualCalibration)
 
+    def test_the_button_reads_the_same_as_the_log_line_it_writes(self, page) -> None:
+        """A probe writes its own name into the log when it starts, and the log
+        is read afterwards to find out which of the two was run.  A second name
+        for the same probe is a name nobody thinks to search for."""
+        assert page._guided_start.text() in cmd.StartGuidedCalibration().describe()
+
     def test_the_start_buttons_say_the_motor_has_to_be_enabled(self, page) -> None:
         """A click that is answered is still a click the operator could have
         been spared, and the probe is started by someone who is looking at the
@@ -679,6 +685,54 @@ def shown_page(page: CalibrationPage, qapp) -> CalibrationPage:
     page.show()
     qapp.processEvents()
     return page
+
+
+class TestWhatSitsWhere:
+    """Which box is where, which on this page is a decision rather than a
+    rendering detail.
+
+    The two probes are the page's actions, so they share the top row: one per
+    kind of calibration, neither of them the "other" one by position.  What they
+    are there to produce — the calibration in force and the file it came from —
+    is the row underneath them, which is where the eye already is when a probe
+    finishes.  It used to be one column of probes on the right and one column of
+    results on the left, so a finished probe was read across the page from the
+    button that started it.
+    """
+
+    @staticmethod
+    def _rows(page) -> list:
+        """The page's content rows, top to bottom, one layout per row."""
+        inner = page._banner.parentWidget().layout()
+        return [
+            inner.itemAt(index).layout()
+            for index in range(inner.count())
+            if inner.itemAt(index).layout() is not None
+        ]
+
+    def test_the_two_probes_share_the_top_row(self, page) -> None:
+        probes = self._rows(page)[0]
+
+        assert probes.indexOf(page._guided_start.parentWidget()) >= 0
+        assert probes.indexOf(page._manual_start.parentWidget()) >= 0
+
+    def test_the_automatic_probe_is_the_left_of_the_two(self, page) -> None:
+        """It is the one an operator runs first on a gripper nobody has
+        calibrated yet, and the left of a row is where that belongs."""
+        probes = self._rows(page)[0]
+
+        assert probes.indexOf(page._guided_start.parentWidget()) < probes.indexOf(
+            page._manual_start.parentWidget()
+        )
+
+    def test_the_calibration_in_force_is_the_row_under_the_probes(self, page) -> None:
+        """The result is read after pressing one of the two buttons, so it goes
+        below them rather than beside them."""
+        probes, current = self._rows(page)[:2]
+
+        assert current.indexOf(page._table_box) >= 0
+        assert current.indexOf(page._file_label.parentWidget()) >= 0
+        assert probes.indexOf(page._guided_start.parentWidget()) >= 0
 
 
 class TestThePageDoesNotDecideHowBigTheWindowIs:

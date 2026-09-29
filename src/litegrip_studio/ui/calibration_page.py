@@ -10,11 +10,12 @@ displayed with the two angles, the coefficient and the travel it implies.
 
 Two probes are offered and a third is not.
 
-*Guided* steps the jaws into each hard stop and records where they stopped.  It
-is a rewrite of the SDK's ``calibrate_guided``, which waits on ``stdin`` — which
-a GUI cannot answer, and which in a worker thread never receives anything at all
-— and whose motion loop has no abort hook.  The confirmation it waits for is a
-button here, and the button says which limit it is confirming.
+*Automatic* steps the jaws into each hard stop and records where they stopped.
+It is a rewrite of the SDK's ``calibrate_guided``, which waits on ``stdin`` —
+which a GUI cannot answer, and which in a worker thread never receives anything
+at all — and whose motion loop has no abort hook.  The confirmation it waits for
+is a button here, and the button says which limit it is confirming.  It is the
+one an operator runs first on a gripper nobody has calibrated.
 
 *Manual* holds the axis limp and records the two extremes the operator moves
 the jaws to, one labelled point each: open first, then closed, which is 0 mm.
@@ -24,9 +25,10 @@ anyone measured, and with the two points unnamed the result cannot say which end
 is 0 mm.  Here the operator says which point they are recording, so the mounting
 direction comes out of the labels rather than being assumed.
 
-*Automatic* (the SDK's ``calibrate``) is deliberately absent.  It moves the jaws
-for about twenty-four seconds with no way to interrupt it, and a stop button that
-does nothing for half a minute is worse than no automatic mode at all.
+The SDK's own ``calibrate()`` — one sweep, start to finish, with no way in — is
+deliberately absent.  It moves the jaws for about twenty-four seconds and cannot
+be interrupted, and a stop button that does nothing for half a minute is worse
+than not offering it.
 """
 
 from __future__ import annotations
@@ -181,7 +183,7 @@ class CalibrationPage(QWidget):
         self._position = QLabel("—")
         self._position.setStyleSheet(f"font-family: {theme.MONO_FAMILY};")
 
-        self._guided_start = QPushButton("开始引导式标定")
+        self._guided_start = QPushButton("开始自动标定")
         self._guided_confirm = QPushButton(CONFIRM_LABELS[GuidedPhase.OPEN_PROBE.value])
         self._guided_cancel = QPushButton("取消标定")
         self._guided_reversed = QCheckBox("反向装配（张开时角度更大）")
@@ -197,7 +199,7 @@ class CalibrationPage(QWidget):
 
     # ── construction ────────────────────────────────────────────────────────
     def _build(self) -> None:
-        """One scroll area, two columns, and the reasons for both.
+        """One scroll area, two rows, and the reasons for both.
 
         This page is the tallest thing in the window by a wide margin, and Qt
         will not let a window shrink below its tallest page's minimum size.  A
@@ -208,41 +210,40 @@ class CalibrationPage(QWidget):
         the content keeps whatever height it needs, and all the window has to
         fit is the frame around it.
 
-        The two columns then keep the content close to the size of the window it
-        is given, so that the scrollbar stays the exception rather than the
-        normal state.  They are split by *who reads them when*: on the left,
-        what the current calibration is and the file operations that change it;
-        on the right, the two probes that produce a new one and the progress of
-        whichever is running.  It used to be one stack of six group boxes, which
-        is most of why it stood 890 pixels tall before anyone had done anything.
+        The rows then keep the content close to the size of the window it is
+        given, so that the scrollbar stays the exception rather than the normal
+        state.  The split is by *what the operator is doing*: the top row is the
+        two probes — the actions, one per kind of calibration — and underneath
+        them is what they are there to answer, the calibration in force and the
+        file it came from.  Actions above their evidence, and the two of them
+        side by side so that neither is the "other" one by position.  It used to
+        be one stack of six group boxes, which is most of why it stood 890
+        pixels tall before anyone had done anything.
         """
         self._guided_start.setProperty("accent", True)
         self._guided_confirm.setProperty("accent", True)
         self._save.setProperty("accent", True)
 
-        left = QVBoxLayout()
-        left.setSpacing(10)
-        left.addWidget(self._build_table_box())
-        left.addWidget(self._build_file_box())
-        left.addStretch(1)
+        probes = QHBoxLayout()
+        probes.setSpacing(10)
+        probes.addWidget(self._build_guided_box(), 1)
+        probes.addWidget(self._build_manual_box(), 1)
 
-        right = QVBoxLayout()
-        right.setSpacing(10)
-        right.addWidget(self._build_guided_box())
-        right.addWidget(self._build_manual_box())
-        right.addStretch(1)
-
-        columns = QHBoxLayout()
-        columns.setSpacing(10)
-        columns.addLayout(left, 1)
-        columns.addLayout(right, 1)
+        current = QHBoxLayout()
+        current.setSpacing(10)
+        current.addWidget(self._build_table_box(), 1)
+        current.addWidget(self._build_file_box(), 1)
 
         content = QWidget()
         inner = QVBoxLayout(content)
         inner.setContentsMargins(10, 10, 10, 10)
         inner.setSpacing(10)
         inner.addWidget(self._banner)
-        inner.addLayout(columns)
+        inner.addLayout(probes)
+        inner.addLayout(current)
+        # Anything the window has over stays at the bottom, so the boxes keep
+        # their own heights rather than being stretched to fill it.
+        inner.addStretch(1)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -311,7 +312,7 @@ class CalibrationPage(QWidget):
         )
         text.setWordWrap(True)
 
-        box = QGroupBox("引导式标定（需要电机已使能）")
+        box = QGroupBox("自动标定（需要电机已使能）")
         layout = QVBoxLayout(box)
         layout.addWidget(text)
         layout.addWidget(self._guided_reversed)
@@ -323,9 +324,9 @@ class CalibrationPage(QWidget):
 
         Its buttons are in two rows rather than one.  Start has a row to itself,
         and the two record buttons sit together under it with the cancel — the
-        four of them on a single row made this the widest thing on the page,
-        which in a two-column layout would have pushed the window's minimum
-        width wider than the content above it needs.
+        four of them on a single row made this the widest thing on the page, and
+        this box sits in a row beside the other probe, so its half of the width
+        is what the window's minimum width has to fit.
 
         The two record buttons are separate and each is live only in its own
         step, rather than one button meaning "record whatever is due".  Which
