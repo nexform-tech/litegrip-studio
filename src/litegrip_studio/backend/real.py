@@ -382,19 +382,22 @@ class RealBackend(GripperBackend):
             raise NotReady("没有可保存的标定")
         target = path or self._calibration_path or str(calibration.default_user_path())
 
-        # The SDK's own file is data, not state: it ships with the package and
-        # describes whichever unit it was taken on.  Overwriting it would
+        # A factory file is data, not state: it ships with the package and
+        # describes whichever unit it was taken on.  Overwriting one would
         # replace the fallback every later install of this console relies on,
-        # and it is reachable without meaning to — the target is the stored
-        # path, which is whatever the console was told to load at launch.  The
-        # UI's own check is about the calibration in hand, not about where the
-        # write is going, and a finished probe writes itself out now, so the
-        # target needs a guard of its own.
-        if _same_file(target, calibration.factory_path()):
-            raise BackendError(
-                f"拒绝覆盖出厂标定文件 {target}：那是 SDK 自带的数据，"
-                "请把结果保存到用户标定路径"
-            )
+        # and they are reachable without meaning to — the target is the stored
+        # path, which is whatever the console was told to load at launch, and
+        # the console's own copy sits inside the installed package.  The UI's
+        # own check is about the calibration in hand, not about where the write
+        # is going, and a finished probe writes itself out now, so the target
+        # needs a guard of its own.  Both copies are guarded, not just the one
+        # currently in force: which of them is read depends on the machine.
+        for fallback in calibration.factory_candidates():
+            if _same_file(target, fallback):
+                raise BackendError(
+                    f"拒绝覆盖出厂标定文件 {target}：那是回退用的只读数据，"
+                    "请把结果保存到用户标定路径"
+                )
 
         # The SDK writes the file from its own config, so the config has to
         # carry our numbers first or we would save whatever was there before.

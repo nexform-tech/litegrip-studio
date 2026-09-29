@@ -97,22 +97,70 @@ def default_user_path() -> Path:
     return Path.home() / ".litegrip" / "litegrip_calibration.json"
 
 
-def factory_path() -> Path:
-    """The SDK's bundled, read-only factory calibration (gripper.py:33).
+def bundled_factory_path() -> Path:
+    """The copy of the same fallback that ships inside this package.
 
-    Resolved through ``litegrip.__file__`` so it is correct inside a PyInstaller
-    bundle (``sys._MEIPASS``), which is why the build must pass
-    ``--collect-data litegrip``.
+    The console carries its own copy so that a machine with no SDK checkout —
+    or one whose SDK data file never made it into the artifact — can still fall
+    back to real numbers instead of refusing to move.  Same content, one
+    console: see :func:`factory_candidates` for which is used when.
+
+    Resolved through ``__file__`` for the same reason the SDK's is resolved
+    through ``litegrip.__file__``: a frozen build puts it under ``sys._MEIPASS``.
+    """
+    return Path(__file__).resolve().parent / "factory_calibration.json"
+
+
+def _sdk_factory_path() -> Path | None:
+    """Where the installed SDK keeps its factory calibration (gripper.py:33).
+
+    ``None`` when there is no SDK to ask.  Resolved through ``litegrip.__file__``
+    so it is correct inside a PyInstaller bundle (``sys._MEIPASS``), which is why
+    the build must pass ``--collect-data litegrip``.
+    """
+    try:
+        import litegrip
+    except Exception:  # pragma: no cover - only without the SDK installed
+        return None
+
+    return Path(litegrip.__file__).resolve().parent / "factory_calibration.json"
+
+
+def factory_candidates() -> tuple[Path, ...]:
+    """Every path a fallback calibration can be read from, best first.
+
+    Two places, one file: the SDK's data file, which belongs to the SDK
+    installation, and the console's own copy, which travels with the console.
+    The SDK's comes first so that adding ours cannot change which numbers a
+    machine already works on — this console then only ever *gains* a fallback,
+    on the machines that had none.
+
+    ``LITEGRIP_FACTORY_CALIB`` replaces the whole list rather than joining it.
+    A path set on purpose and then absent is a mistake to report, not a reason
+    to load a different file behind the operator's back.
     """
     env = os.environ.get("LITEGRIP_FACTORY_CALIB")
     if env:
-        return Path(env).expanduser()
-    try:
-        import litegrip
+        return (Path(env).expanduser(),)
 
-        return Path(litegrip.__file__).resolve().parent / "factory_calibration.json"
-    except Exception:  # pragma: no cover - only without the SDK installed
-        return Path(__file__).resolve().parent / "factory_calibration.json"
+    sdk = _sdk_factory_path()
+    if sdk is None:
+        return (bundled_factory_path(),)
+    return (sdk, bundled_factory_path())
+
+
+def factory_path() -> Path:
+    """The fallback calibration in force, out of :func:`factory_candidates`.
+
+    The first candidate that exists.  When none does, the first is named anyway:
+    the message that says nothing could be loaded reads better pointing at the
+    file that is supposed to be there than at nothing at all.
+    """
+    candidates = factory_candidates()
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return candidates[0]
 
 
 def sdk_root() -> Path | None:
@@ -133,17 +181,18 @@ def friendly_path(path: str | os.PathLike[str] | None) -> str:
     under ``sys._MEIPASS``, neither of which survives being made relative.  So
     this exists to be *shown* and never to be opened.
 
-    The two paths that have a meaningful home are shown relative to it — the
-    SDK's own file relative to the SDK, anything under the home directory with a
+    The paths that have a meaningful home are shown relative to it — the SDK's
+    own file relative to the SDK, this package's own files relative to the
+    directory the package sits in, anything under the home directory with a
     leading ``~``.  ``litegrip/factory_calibration.json`` says where that file
     lives; ``/opt/litegrip/litegrip/factory_calibration.json`` only says
-    which machine it was checked out on.
+    which machine it was checked out on — and that matters here, because the two
+    fallback files are otherwise told apart by nothing on screen.
     """
     if not path:
         return "—"
     resolved = Path(path).expanduser()
-    root = sdk_root()
-    if root is not None:
+    for root in _shown_roots():
         try:
             return str(resolved.relative_to(root))
         except ValueError:
@@ -152,6 +201,15 @@ def friendly_path(path: str | os.PathLike[str] | None) -> str:
         return "~/" + str(resolved.relative_to(Path.home()))
     except ValueError:
         return str(resolved)
+
+
+def _shown_roots() -> tuple[Path, ...]:
+    """The directories a path can be said to live in, most specific first."""
+    sdk = sdk_root()
+    roots = [Path(__file__).resolve().parent.parent]
+    if sdk is not None:
+        roots.insert(0, sdk)
+    return tuple(roots)
 
 
 @dataclass(frozen=True)
@@ -516,7 +574,7 @@ def resolve(
             hard, soft = validate_limits(limits, max_stroke_mm, file_scale(raw))
             warn = [
                 f"未找到用户标定文件 {user_path}",
-                "正在使用 SDK 内置的出厂数据；若与本机夹爪不是同一台，"
+                f"正在使用出厂标定（{friendly_path(fact)}）；若与本机夹爪不是同一台，"
                 "所有 mm 与力的读数都会是错的",
             ] + list(soft)
             return CalibrationInfo(

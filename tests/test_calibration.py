@@ -26,6 +26,7 @@ reported and the operator is asked to confirm it; what refuses a file is the
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -215,6 +216,23 @@ class TestProvenance:
         joined = " ".join(info.warnings)
         assert "未找到用户标定文件" in joined
         assert "同一台" in joined, "the operator must be told the risk, not just the fact"
+
+    def test_a_machine_with_no_sdk_falls_back_to_what_the_console_ships(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """The case the bundled copy exists for, from the operator's side: no
+        user file and no SDK checkout used to mean 未标定 and a console that
+        refuses every move on a gripper that is running perfectly well."""
+        monkeypatch.setenv("LITEGRIP_CALIB", str(tmp_path / "no-user.json"))
+        monkeypatch.delenv("LITEGRIP_FACTORY_CALIB", raising=False)
+        monkeypatch.setitem(sys.modules, "litegrip", None)
+
+        info = calibration.resolve()
+
+        assert info.provenance == PROVENANCE_FACTORY
+        assert info.path == str(calibration.bundled_factory_path())
+        assert info.usable and info.motion_allowed
+        assert "同一台" in " ".join(info.warnings)
 
     def test_nothing_anywhere_is_missing_and_blocks(self, env) -> None:
         info = calibration.resolve()
@@ -852,6 +870,77 @@ class TestPaths:
         assert info.problems == ()
         assert info.usable
 
+    def test_the_console_ships_its_own_copy_of_the_fallback(self) -> None:
+        """The copy exists so a machine with no SDK checkout still has real
+        numbers to fall back on, and it is *data*, which is the part that gets
+        left out of a package: a wheel without its package data, a bundle built
+        without ``--collect-data``, both leave the code that reads it intact.
+        So this asserts on the file's content and not on its presence alone.
+        """
+        path = calibration.bundled_factory_path()
+        assert path.is_file(), f"控制台自带的出厂标定文件不见了：{path}"
+
+        raw, problems = calibration.parse_calibration_json(
+            path.read_text(encoding="utf-8")
+        )
+        assert problems == []
+        limits = calibration.limits_from_raw(raw, constants.DEFAULT_TRAVEL_MM)
+        hard, _soft = calibration.validate_limits(
+            limits, constants.DEFAULT_TRAVEL_MM, calibration.file_scale(raw)
+        )
+        assert hard == []
+
+    def test_the_console_s_copy_is_second_on_a_machine_that_has_an_sdk(
+        self, monkeypatch
+    ) -> None:
+        """Adding a fallback must not change which file a machine that already
+        had one is running on: the SDK's data file belongs to the SDK
+        installation and stays first, so this console only ever gains a
+        fallback, on the machines that had none."""
+        monkeypatch.delenv("LITEGRIP_FACTORY_CALIB", raising=False)
+        litegrip = pytest.importorskip("litegrip")
+        sdk = Path(litegrip.__file__).resolve().parent / "factory_calibration.json"
+        if not sdk.is_file():  # pragma: no cover - SDK without its data file
+            pytest.skip("the installed SDK ships no factory calibration")
+
+        assert calibration.factory_candidates() == (
+            sdk,
+            calibration.bundled_factory_path(),
+        )
+        assert calibration.factory_path() == sdk
+
+    def test_without_an_sdk_the_fallback_is_the_console_s_own_copy(
+        self, monkeypatch
+    ) -> None:
+        """``sys.modules['litegrip'] = None`` is how a machine with no SDK
+        installed answers ``import litegrip``."""
+        monkeypatch.delenv("LITEGRIP_FACTORY_CALIB", raising=False)
+        monkeypatch.setitem(sys.modules, "litegrip", None)
+
+        assert calibration.factory_candidates() == (calibration.bundled_factory_path(),)
+        assert calibration.factory_path() == calibration.bundled_factory_path()
+
+    def test_the_two_copies_say_the_same_thing_where_both_are_present(
+        self, monkeypatch
+    ) -> None:
+        """One default, two repositories.
+
+        Nothing on screen tells an operator which of the two was loaded beyond
+        the path, and the paths differ.  If the files drift apart, the same
+        console reads different millimetres depending on whether an SDK checkout
+        happens to sit beside it — so they are kept in step deliberately, and
+        this is what keeps them there.
+        """
+        monkeypatch.delenv("LITEGRIP_FACTORY_CALIB", raising=False)
+        litegrip = pytest.importorskip("litegrip")
+        sdk = Path(litegrip.__file__).resolve().parent / "factory_calibration.json"
+        if not sdk.is_file():  # pragma: no cover - SDK without its data file
+            pytest.skip("the installed SDK ships no factory calibration")
+
+        assert json.loads(sdk.read_text(encoding="utf-8")) == json.loads(
+            calibration.bundled_factory_path().read_text(encoding="utf-8")
+        ), "SDK 的出厂标定与控制台自带的那份已经不一致了，两份要一起改"
+
 
 class TestPathsAreShownRelative:
     """Display only.  Loading keeps the absolute path: the SDK finds its factory
@@ -862,6 +951,13 @@ class TestPathsAreShownRelative:
         pytest.importorskip("litegrip")
         assert calibration.friendly_path(calibration.factory_path()) == (
             "litegrip/factory_calibration.json"
+        )
+
+    def test_the_console_s_own_fallback_is_shown_relative_to_its_package(self) -> None:
+        """Both fallbacks are shown, and they are told apart by nothing but
+        this: one line of the page says which file the millimetres came from."""
+        assert calibration.friendly_path(calibration.bundled_factory_path()) == (
+            "litegrip_studio/factory_calibration.json"
         )
 
     def test_a_file_under_home_gets_a_tilde(self, tmp_path, monkeypatch) -> None:

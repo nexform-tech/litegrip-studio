@@ -194,13 +194,21 @@ this: its axis is scaled to the travel, so the same motion looks the same on any
 
 ## 📐 Calibration: where the file comes from
 
-This was confirmed against the source while designing, and the answer is not either/or. The SDK's
-`load_calibration()` has **two levels of fallback**:
+This was confirmed against the source while designing, and the answer is not either/or. The
+console resolves the calibration itself, best source first:
 
 1. **The user calibration file** (`$LITEGRIP_CALIB` or `~/.litegrip/litegrip_calibration.json`),
    written by `calibrate_*()` → `save_calibration()`. **This is the file that describes this
    gripper.**
-2. **The factory calibration file** (inside the SDK package, read-only) — the **fallback**.
+2. **The SDK's factory calibration file** (`litegrip/factory_calibration.json` inside the SDK
+   package, read-only).
+3. **The console's own copy of the same fallback** (`factory_calibration.json`, package data of
+   `litegrip_studio`, read-only) — what a machine with no SDK checkout still has. It sits last on
+   purpose: adding it can only give a fallback to a machine that had none, never change which
+   numbers a machine already works on.
+
+`LITEGRIP_FACTORY_CALIB` replaces 2 and 3 outright, for a bench that keeps its fallback elsewhere.
+Neither of the two is ever a save target.
 
 So: **the console uses the calibration result, and the factory file is only a fallback.** The
 process has several traps, which is why the console reads the files and decides the provenance
@@ -211,8 +219,8 @@ itself rather than trusting the SDK's return value:
   systematically wrong with nothing on screen to show it.
 - **The SDK does not require a calibration.** Neither `connect()` nor `enable()` loads one. Without
   it you get `GripperConfig`'s defaults, `pos_closed_rad=0.0 / pos_open_rad=1.14`, whereas on real
-  hardware the closed value is the **larger** one (factory `0.114 / -1.491`, example user file
-  `1.776 / -0.064`). The mapping `mm = (pos_closed_rad - position_rad) * rad_to_mm` then runs
+  hardware the closed value is the **larger** one (the fallback the console ships has
+  `0.052 / -1.357`). The mapping `mm = (pos_closed_rad - position_rad) * rad_to_mm` then runs
   **exactly backwards**, computing negative millimetres and driving into the hard stop.
 - **`load_calibration()` overwrites `kp` / `kd` / `grasp_torque_threshold`**, and reads its fields
   without protection: a bad file raises `KeyError`.
@@ -545,6 +553,11 @@ why a CI run reports a non-zero skip count.
 `dirname(litegrip.__file__)`, which still holds under `sys._MEIPASS`, but without that flag the
 file never enters the artifact and the factory fallback dies with it.
 
+`--collect-data litegrip_studio` is required for the same reason: the console's own copy of the
+fallback is package data, which only puts it into a wheel, not into a PyInstaller artifact — and
+without it a machine with no SDK checkout is left with no fallback at all. The console's selftest
+checks that this file is where the code reads it from.
+
 The version stamp is written into `_version.py` at build time and **removed from the source tree
 when the build ends** (it is git-ignored as well). Leaving it behind would make every later
 source run claim the number from the previous build, whose git hash may long since disagree with
@@ -564,8 +577,11 @@ semantic-release from the commit history, the git tag is the only source of trut
   offer only the two wizards on the calibration page (自动标定 and the two-point manual one) than a
   24-second window in which the emergency stop does nothing.
 - The factory calibration is a **fallback, not a substitute**: used on another gripper it does not
-  crash, it silently makes every millimetre wrong. The calibration page looks at the travel implied
-  by the file's own scale, but only warns when it is wrong by orders of magnitude (outside
+  crash, it silently makes every millimetre wrong. The console carries its own copy of that file so
+  a machine with no SDK checkout still has one, and on either copy the gate stops at `FACTORY`:
+  the machine does not move until the operator ticks the acknowledgement on the calibration page.
+  The page looks at the travel implied by the file's own scale, but only warns when it is wrong by
+  orders of magnitude (outside
   `STROKE_MIN_MM` / `STROKE_MAX_MM`). That test **cannot** be tightened into a comparison with the
   measured travel: files written by the SDK and by earlier versions of the console all carry
   "nominal travel ÷ span", and that nominal is the SDK's own default rather than a measurement of

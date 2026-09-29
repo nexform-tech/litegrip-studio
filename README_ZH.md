@@ -166,13 +166,17 @@ sudo ip link set can0 up
 
 ## 📐 标定：文件从哪来
 
-这是设计时专门确认过的一个问题，答案不是二选一。SDK 的 `load_calibration()` 是
-**两级回退**：
+这是设计时专门确认过的一个问题，答案不是二选一。上位机自己按优先级解析标定文件：
 
 1. **用户标定文件**（`$LITEGRIP_CALIB` 或 `~/.litegrip/litegrip_calibration.json`）
    ——由 `calibrate_*()` → `save_calibration()` 写出，**这才是这台夹爪的参数**。
-2. **出厂标定文件**（SDK 包内 `litegrip/factory_calibration.json`，只读）
-   ——**兜底**。
+2. **SDK 包内的出厂标定文件**（`litegrip/factory_calibration.json`，只读）。
+3. **上位机自带的那份同款兜底**（`litegrip_studio` 的 package data
+   `factory_calibration.json`，只读）——没有 SDK 源码树的机器靠它才有兜底。它排在最后是
+   故意的：加它只会给原本没有兜底的机器添上兜底，不会改变任何一台机器已经在用的数值。
+
+`LITEGRIP_FACTORY_CALIB` 直接顶掉第 2、3 两级，给把兜底放在别处的台架用；这两份都
+永远不会成为保存目标。
 
 所以：**上位机用的是标定结果文件，出厂文件只是兜底**。但这个过程有几个坑，上位机
 因此自己读文件判定来源，而不是只看 SDK 的返回值：
@@ -181,7 +185,7 @@ sudo ip link set can0 up
   能区分。对真机意味着毫米读数系统性错掉而界面看不出来。
 - **SDK 不强制标定**。`connect()` / `enable()` 都不会自动加载。不加载就用
   `GripperConfig` 默认值 `pos_closed_rad=0.0 / pos_open_rad=1.14`，而实机标定值是
-  **闭合数值更大**（出厂 `0.114 / -1.491`，示例用户文件 `1.776 / -0.064`）。映射式
+  **闭合数值更大**（上位机自带的那份兜底是 `0.052 / -1.357`）。映射式
   `mm = (pos_closed_rad - position_rad) * rad_to_mm` 方向**恰好相反**，会算出负毫米并
   朝错误方向顶到硬限位。
 - **`load_calibration()` 会覆盖 `kp` / `kd` / `grasp_torque_threshold`**，且字段读取
@@ -454,6 +458,10 @@ python -m pip install -e ../lite-grip --no-deps
 `--collect-data litegrip` 是必须的：SDK 用 `dirname(litegrip.__file__)` 找出厂标定
 文件，在 `sys._MEIPASS` 下也成立，但没有这个参数文件不会进产物，出厂回退随之失效。
 
+`--collect-data litegrip_studio` 同理：上位机自带的那份兜底是 package data，那条声明只
+管 wheel，不会把文件放进 PyInstaller 产物；少了这个参数，没有 SDK 源码树的机器就一层兜底
+也不剩。控制台自检里有一条专门查这个文件在不在它该在的地方。
+
 版本戳在构建时写进 `_version.py`，**构建结束即从源码树删除**（它也已 gitignore）。
 留着它会让之后每次源码运行都拿着上一次构建的号自称，而那个号里的 git hash 可能早就
 和工作区对不上了。戳只活在产物内部，所以源码运行一律报告 `+source`。
@@ -470,6 +478,8 @@ git tag 是唯一的事实来源，`pyproject.toml` 里的 `0.0.0-semantic-relea
   运动——与其提供一个急停无效的 24 秒窗口，不如只上标定页上那两个探针（自动标定与手动
   两点标定）。它不是「自动标定」按钮：那个按钮跑的是本仓库自己的导向探测，可以中断。
 - 出厂标定是**兜底而非替代**：出厂文件用在别的夹爪上不会崩，只会让毫米读数静默地错。
+  上位机自带一份同样的文件，没有 SDK 源码树的机器也有一层兜底；只要是靠兜底（无论哪一份）
+  起来的，闸门就停在 `FACTORY`：操作员在标定页勾选确认之前，机器不接受运动命令。
   标定页把「文件自带比例尺推出的行程」拿来看，但只在它连数量级都不对时告警
   （`STROKE_MIN_MM` / `STROKE_MAX_MM` 之外）。这条判定**不能**收紧到与实测行程比较：
   SDK 与旧版控制台写出的文件一律带「标称行程 ÷ 跨度」，那个标称是 SDK 自己的默认值而不是
