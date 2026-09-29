@@ -333,6 +333,12 @@ class WorkerLoop:
         self._uv_times: deque[float] = deque(maxlen=16)
         self._degraded = False
         self._reported_error = 0
+        #: What the alert in force on the operator's banner is about, and — for
+        #: a refusal — which refusal it was, so the loop can take it down when
+        #: the reason for it changes.  ``None`` means nothing is watching it.
+        #: See :meth:`_alert` and :meth:`_track_alert`.
+        self._alert_kind: str | None = None
+        self._alert_clause = ""
         self._zeroed_for_gate = False
         self._probe_pub_t = 0.0
         #: How long the current probe has gone without a frame reaching the
@@ -492,6 +498,10 @@ class WorkerLoop:
             out = FrameOut(None, 0.0, None, 0.0, 0.0, 0.0, False, "")
 
         self._service_faults(tele)
+        # Last, and after the faults: the alert in force describes a state the
+        # tick has just finished computing, and this is where that state is
+        # compared with the one the alert was raised on.
+        self._track_alert(tele)
         self._cycle_ms = (self._clock() - started) * 1000.0
         if self._cycle_ms > self._dt * 1500.0:
             self._overruns += 1
@@ -674,26 +684,40 @@ class WorkerLoop:
             f"标定不可用：已在 {measured_rad:.6f} rad 驻留（按实测角度，不经过毫米换算）",
         )
 
-    def _refusal(self) -> str:
-        """Why motion is refused right now, or ``""`` when it is allowed."""
+    def _refusal_clause(self) -> tuple[str, str]:
+        """``(a stable tag for why motion is refused, the sentence for the operator)``.
+
+        The tag exists so that an alert raised from one of these can be retired
+        when *that* clause stops being the answer (:meth:`_track_alert`), and it
+        is a tag rather than the sentence because one of the sentences quotes a
+        live number — how long the link has been quiet — and would differ from
+        itself a tick later.  ``("", "")`` means motion is allowed.
+
+        One ladder, in the order the causes explain each other; see
+        :meth:`_refusal` for why that order is what it is.
+        """
         if self._estop.is_set():
-            return f"急停已触发（{self._estop_reason}）；请先复位"
+            return "estop", f"急停已触发（{self._estop_reason}）；请先复位"
         if not self._connected:
-            return "尚未连接"
+            return "disconnected", "尚未连接"
         if not self._enabled:
-            return "电机未使能"
+            return "disabled", "电机未使能"
         if self._gate is not GateState.READY:
-            return self._gate_reason or "标定未就绪"
+            return "gate", self._gate_reason or "标定未就绪"
         if self._link_dead():
-            return f"链路已断：{self._stale_ms():.0f} ms 未收到状态帧"
+            return "link", f"链路已断：{self._stale_ms():.0f} ms 未收到状态帧"
         # Last, and deliberately: no measurement is *why* nothing can be
         # commanded, but a dead link or a shut gate is *why* there is no
         # measurement, and the cause is the half the operator can act on.
         if self._measured_mm() is None:
-            return "尚未读到位置；本次使能后还没收到过状态帧"
+            return "no_position", "尚未读到位置；本次使能后还没收到过状态帧"
         if self._tele.is_error:
-            return f"电机故障：{constants.describe_error(self._tele.error_code)}"
-        return ""
+            return "fault", f"电机故障：{constants.describe_error(self._tele.error_code)}"
+        return "", ""
+
+    def _refusal(self) -> str:
+        """Why motion is refused right now, or ``""`` when it is allowed."""
+        return self._refusal_clause()[1]
 
     # ── the gate ────────────────────────────────────────────────────────────
     def _evaluate_gate(self) -> None:
@@ -780,6 +804,10 @@ class WorkerLoop:
                 constants.describe_error(code),
                 constants.FAULT_HINTS.get(code, ""),
             )
+            # The fault signal is its own path to the banner, so the watching
+            # has to be set up here rather than in ``_alert``; the edge that
+            # retires it is the frame below that stops reporting an error.
+            self._note_alert("fault")
             if code == constants.ERROR_UV:
                 self._note_undervoltage()
         elif code == constants.ERROR_ENABLED:
@@ -904,7 +932,7 @@ class WorkerLoop:
         elif isinstance(command, cmd.Stop):
             self._end_probe_on_interrupt(command.describe())
             if self._estop.is_set():
-                self._alert("warn", "急停中：请先复位再操作")
+                self._alert("warn", "急停中：请先复位再操作", kind="refusal")
                 return
             # Allowed through without the gate: this is the button an operator
             # reaches for when something is wrong, and it is the one motion whose
@@ -922,7 +950,7 @@ class WorkerLoop:
             if command.on:
                 self._end_probe_on_interrupt(command.describe())
             if command.on and not self._enabled:
-                self._alert("warn", "电机未使能，无法进入零重力")
+                self._alert("warn", "电机未使能，无法进入零重力", kind="refusal")
                 return
             self._motion.zero_gravity(command.on, self._measured_mm(), command.source)
 
@@ -1045,11 +1073,13 @@ class WorkerLoop:
         # axis — and the queue is reachable without the window.
         if self._estop.is_set():
             self._alert(
-                "warn", f"急停中，无法使能（{self._estop_reason}）；请先复位"
+                "warn",
+                f"急停中，无法使能（{self._estop_reason}）；请先复位",
+                kind="refusal",
             )
             return
         if not self._connected:
-            self._alert("warn", "请先连接")
+            self._alert("warn", "请先连接", kind="refusal")
             return
         # The gate decides what may be *commanded*, never whether the axis may be
         # energised at all.  Refusing to enable on a console whose calibration is
@@ -1070,7 +1100,10 @@ class WorkerLoop:
         try:
             self.backend.enable()
         except Exception as exc:
-            self._alert("error", f"使能失败: {exc}")
+            # Watched, and by the same clause as any other "not enabled": what
+            # the operator has to do about this is make the axis answer, and the
+            # banner should go when it does.
+            self._alert("error", f"使能失败: {exc}", kind="refusal")
             code = getattr(exc, "code", None)
             if code is not None:
                 self._signals.fault.emit(
@@ -1093,6 +1126,7 @@ class WorkerLoop:
                 "warn",
                 f"标定不可用（{reason}）：轴按实测角度驻留，不能按毫米运动。"
                 "修好文件或重新标定后即可恢复",
+                kind="refusal",
             )
         measured = self._measured_mm()
         if measured is None:
@@ -1113,7 +1147,7 @@ class WorkerLoop:
 
     def _clear_fault(self) -> None:
         if not self._connected:
-            self._alert("warn", "请先连接")
+            self._alert("warn", "请先连接", kind="refusal")
             return
         self._signals.busy.emit(True, "正在清除故障…")
         try:
@@ -1137,7 +1171,10 @@ class WorkerLoop:
         # reason it latched.
         state, reason = evaluate_gate(self._info, self._allow_factory)
         if state is not GateState.READY:
-            self._alert("warn", f"无法复位急停：{reason}")
+            # Watched as a refusal, and the refusal in force while the latch is
+            # set is the latch itself: the operator's next move is to fix what
+            # this names and press 复位, and the banner goes when that works.
+            self._alert("warn", f"无法复位急停：{reason}", kind="refusal")
             return
         self._estop.clear()
         self._estop_engaged = False
@@ -1149,7 +1186,7 @@ class WorkerLoop:
     def _require_motion(self, what: str) -> bool:
         refusal = self._refusal()
         if refusal:
-            self._alert("warn", f"「{what}」被拒绝：{refusal}")
+            self._alert("warn", f"「{what}」被拒绝：{refusal}", kind="refusal")
             return False
         return True
 
@@ -1250,13 +1287,13 @@ class WorkerLoop:
         # first" — advice that cannot be taken until the E-stop is reset, and
         # which hides the actual cause from the operator.
         if self._estop.is_set():
-            self._alert("warn", "急停中，无法开始标定")
+            self._alert("warn", "急停中，无法开始标定", kind="refusal")
             return
         if not self._connected:
-            self._alert("warn", "请先连接")
+            self._alert("warn", "请先连接", kind="refusal")
             return
         if not self._enabled:
-            self._alert("warn", "标定需要电机使能；请先使能再开始")
+            self._alert("warn", "标定需要电机使能；请先使能再开始", kind="refusal")
             return
         if self._probe is not None and self._probe.is_active:
             self._alert("warn", "已有标定正在进行")
@@ -1526,15 +1563,21 @@ class WorkerLoop:
         if self._estop_engaged:
             return
         self._estop_engaged = True
-        self._abandon(f"急停：{self._estop_reason}")
+        self._abandon(f"急停：{self._estop_reason}", kind="refusal")
         self._signals.fault.emit(0, "急停已触发", "排除原因后按「复位急停」")
 
-    def _abandon(self, reason: str) -> None:
-        """Drop everything and leave the motor harmless."""
+    def _abandon(self, reason: str, *, kind: str | None = None) -> None:
+        """Drop everything and leave the motor harmless.
+
+        ``kind`` is the alert's, and it differs by caller: an E-stop is released
+        by the operator, so its banner should go when the latch does, while a
+        tick that has failed too many times ends this loop and leaves nothing to
+        recover to — that alert is the last word and stays.
+        """
         self._end_probe_on_interrupt("停止")
         self._probe = None
         self._motion.idle()
-        self._alert("error", reason)
+        self._alert("error", reason, kind=kind)
         self._safe_stop()
 
     def _safe_stop(self) -> None:
@@ -1572,7 +1615,7 @@ class WorkerLoop:
         else:
             log.debug(text)
 
-    def _alert(self, level: str, text: str) -> None:
+    def _alert(self, level: str, text: str, *, kind: str | None = None) -> None:
         """Show the operator something, and write it to the log file as well.
 
         The two channels answer different questions.  The alert is what the
@@ -1587,7 +1630,19 @@ class WorkerLoop:
         running commentary and belongs at DEBUG, while an ``info`` alert is
         something the operator was shown and belongs in the file at the level it
         was shown at.
+
+        ``kind`` is the condition the alert is *about*, for the alerts whose
+        condition the loop can watch go away, so that the banner does not go on
+        saying something that stopped being true (see :meth:`_track_alert`).
+        ``"refusal"`` is for an alert whose whole content is "the console will
+        not move, and why"; ``"fault"`` is set by :meth:`_service_faults`, which
+        alerts through its own signal.  Everything else — a command that raised,
+        a save that failed, a probe that ended — reports an *event*, which never
+        becomes untrue, and stays on the banner until the next alert replaces
+        it.  That is the default, so a new alert is sticky until someone decides
+        otherwise in so many words.
         """
+        self._note_alert(kind)
         self._signals.alert.emit(level, text)
         if level in ("error", "fatal"):
             log.error(text)
@@ -1595,6 +1650,61 @@ class WorkerLoop:
             log.warning(text)
         else:
             log.info(text)
+
+    def _note_alert(self, kind: str | None) -> None:
+        """Record what the alert that just went out is about.
+
+        The banner holds one line, so this is overwritten by every alert — that
+        is the point: whatever is on screen is what the loop must be able to
+        retract, and an alert that replaced a watched one takes over its
+        watching.
+        """
+        clause = ""
+        if kind == "refusal":
+            clause = self._refusal_clause()[0]
+            if not clause:
+                # Nothing is being refused, so there is no edge to watch for and
+                # a watched refusal would be wiped on the very next tick.  An
+                # untagged alert is the safe way to read this: it stays until
+                # something replaces it.
+                kind = None
+        self._alert_kind = kind
+        self._alert_clause = clause
+
+    def _track_alert(self, tele: Telemetry) -> None:
+        """Take the operator's alert down once the reason for it is gone.
+
+        The banner is the one thing here that speaks without being asked, and it
+        was the one thing nothing ever took back: a fault, an E-stop or a refused
+        move left its line on screen until the next alert happened to replace it,
+        so a console that had recovered still read as broken.  A recovery is
+        silent — nothing is emitted to say the fault cleared — so the falling
+        edge has to be looked for on the tick, by the only object that knows the
+        state.
+
+        Only the alerts that named a condition are watched (:meth:`_alert`), and
+        each kind has exactly one edge:
+
+        * ``fault`` — the frame stops reporting an error.  Deliberately not
+          "the code became ``ERROR_ENABLED``": a fault cleared by the operator
+          leaves the drive reporting *disabled*, and the red banner has to go
+          anyway.
+        * ``refusal`` — the reason motion is refused changes, which includes it
+          going away.  Compared by clause, not by sentence: see
+          :meth:`_refusal_clause`.
+        """
+        if self._alert_kind == "fault":
+            if not tele.is_error:
+                self._clear_alert()
+        elif self._alert_kind == "refusal":
+            if self._refusal_clause()[0] != self._alert_clause:
+                self._clear_alert()
+
+    def _clear_alert(self) -> None:
+        """Retract the banner.  Silent, and only ever about the line in force."""
+        self._alert_kind = None
+        self._alert_clause = ""
+        self._signals.alert_cleared.emit()
 
     # ── introspection, for the UI's first paint and for tests ───────────────
     @property
@@ -1697,6 +1807,9 @@ class GripperWorker(QThread):
     log = pyqtSignal(str, str)
     #: (level, text) — something the operator must see without opening the log.
     alert = pyqtSignal(str, str)
+    #: The alert in force has stopped being true; hide it.  See
+    #: :meth:`WorkerLoop._track_alert`.
+    alert_cleared = pyqtSignal()
     #: (busy, what) — a blocking call is in progress; the GUI must say so.
     busy = pyqtSignal(bool, str)
 

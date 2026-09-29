@@ -82,6 +82,7 @@ class FakeSignals(QObject):
     calib_progress = pyqtSignal(str, float, str)
     log = pyqtSignal(str, str)
     alert = pyqtSignal(str, str)
+    alert_cleared = pyqtSignal()
     busy = pyqtSignal(bool, str)
 
 
@@ -280,6 +281,39 @@ class TestTheWiring:
 
         assert window.alert_banner.severity == "warn"
         assert "欠压" in window.alert_banner.headline
+
+    def test_the_worker_can_take_its_alert_back(self, window, worker) -> None:
+        """The reported bug: an alert that stayed on screen after the console had
+        recovered.  The worker watches the condition now and says when it is
+        gone; the banner has to obey."""
+        worker.alert.emit("error", "「移动」被拒绝：电机未使能")
+        assert window.alert_banner.severity == "error"
+
+        worker.alert_cleared.emit()
+
+        assert window.alert_banner.severity is None
+        assert not window.alert_banner.isVisible()
+
+    def test_a_success_does_not_take_the_banner(self, window, worker) -> None:
+        """``info`` is how the worker reports something that went right.  There is
+        nothing to act on, and a strip saying the save worked is one more thing
+        between the operator and the alert that matters."""
+        worker.alert.emit("info", "标定已保存到 /home/qaz/.litegrip/calibration.json")
+
+        assert window.alert_banner.severity is None
+        assert any("标定已保存" in text for _level, text in window.lines)
+
+    def test_an_estop_notice_is_not_a_fault_to_redden_the_window_over(
+        self, window, worker
+    ) -> None:
+        """The latch has a banner of its own, with the reset button in it, and it
+        is cleared by the motion state.  Painting the notification red as well
+        left the E-stop's text up after the operator had reset it."""
+        worker.fault.emit(0, "急停已复位", "请确认现场安全后再使能")
+
+        assert window.alert_banner.severity is None
+        assert any("急停已复位" in text for _level, text in window.lines)
+        assert not window.estop_banner.isVisible()
 
     def test_a_probe_switches_to_the_page_that_can_be_watched(self, window, worker) -> None:
         """The slider is dead during a probe — there is no valid travel to span

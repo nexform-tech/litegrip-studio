@@ -2406,3 +2406,149 @@ class TestAlertsReachTheLogFile:
 
         assert bench.loop.gate is GateState.BLOCKED
         assert any("超出合理范围" in r.getMessage() for r in caplog.records)
+
+
+class TestTheAlertGoesWhenTheReasonDoes:
+    """The banner was a one-way channel: an alert went up and stayed until the
+    next one replaced it, so a console that had recovered from a fault, an
+    E-stop or a refused move still read as broken.
+
+    It is the one thing on screen that speaks without being asked, so the loop
+    watches the condition behind the alert it put up and retracts it.  Nothing is
+    emitted to say a recovery happened — that is the whole problem — so the edge
+    is looked for on the tick, by the object that knows the state.
+    """
+
+    def test_a_fault_that_clears_takes_its_banner_with_it(self) -> None:
+        bench = Bench()
+        bench.bring_up()
+        bench.backend.error_code = constants.ERROR_OC
+        bench.tick()
+        assert bench.signals.of("fault"), "the fault was reported at all"
+        assert not bench.signals.has("alert_cleared"), (
+            "the tick that reports the fault is not the tick that retires it"
+        )
+
+        bench.backend.error_code = constants.ERROR_ENABLED
+        bench.tick()
+
+        assert bench.signals.has("alert_cleared")
+        # Once, on the edge: the ticks after it have nothing left to retract.
+        count = len(bench.signals.of("alert_cleared"))
+        bench.tick(5)
+        assert len(bench.signals.of("alert_cleared")) == count
+
+    def test_clearing_a_fault_from_the_console_is_a_recovery_too(self) -> None:
+        """The button the operator actually presses.  It re-reads the drive rather
+        than waiting for the code to change by itself, so the retraction has to
+        come out of that path as well."""
+        bench = Bench()
+        bench.bring_up()
+        bench.backend.error_code = constants.ERROR_OC
+        bench.tick()
+
+        bench.send(cmd.ClearFault())
+
+        assert bench.signals.has("alert_cleared")
+
+    def test_a_fault_cleared_while_the_axis_is_still_disabled_goes_anyway(self) -> None:
+        """Which is why the edge is "the frame stopped reporting an error" and not
+        "motion is allowed again".  A fault can be cleared on a gripper nobody has
+        enabled yet, and that red line has to go even though the axis is still
+        sitting there unenergised and refusing to move."""
+        bench = Bench()
+        bench.send(cmd.Connect())
+        bench.backend.error_code = constants.ERROR_UV
+        bench.tick()
+        assert bench.signals.of("fault")
+
+        bench.backend.error_code = constants.ERROR_DISABLED
+        bench.tick()
+
+        assert "电机未使能" in bench.loop._refusal(), "the refusal never went away"
+        assert bench.signals.has("alert_cleared")
+
+    def test_the_estop_alert_goes_when_the_latch_does(self) -> None:
+        bench = Bench()
+        bench.bring_up()
+        bench.loop.estop("测试")
+        bench.tick()
+        assert "急停" in bench.signals.alerts()[-1]
+        assert not bench.signals.has("alert_cleared")
+
+        bench.send(cmd.ResetEStop())
+
+        assert bench.signals.has("alert_cleared")
+
+    def test_a_refused_move_stops_being_shown_once_the_gate_opens(self) -> None:
+        bench = Bench()
+        bench.bring_up()
+        bench.swap_calibration(BROKEN)
+        bench.send(cmd.MoveToMm(30.0))
+        assert "被拒绝" in bench.signals.alerts()[-1]
+        assert not bench.signals.has("alert_cleared")
+
+        bench.swap_calibration(USER_CAL)
+
+        assert bench.signals.has("alert_cleared")
+
+    def test_a_different_refusal_still_retires_the_one_on_screen(self) -> None:
+        """The banner holds the refusal it was raised with, and one refusal is as
+        good a reason to take it down as none: the line is no longer the answer to
+        "why can't it move", and the next press says the real one out loud."""
+        bench = Bench()
+        bench.send(cmd.Connect())
+        bench.send(cmd.SetZeroGravity(True))
+        assert "未使能" in bench.signals.alerts()[-1]
+
+        bench.send(cmd.Enable())
+        bench.swap_calibration(BROKEN)
+
+        assert "电机未使能" not in bench.loop._refusal()
+        assert bench.signals.has("alert_cleared")
+
+    def test_the_speed_cap_warning_survives_a_later_fault_clearing(self) -> None:
+        """It names a supply the operator has to go and look at, and the loop never
+        un-degrades itself: a fault clearing afterwards is a recovery for the alert
+        it belongs to, and must not take this one down with it."""
+        bench = Bench()
+        bench.bring_up()
+        for _ in range(constants.UV_FAULT_MAX):
+            bench.backend.error_code = constants.ERROR_UV
+            bench.tick()
+            bench.backend.error_code = constants.ERROR_ENABLED
+            bench.tick()
+        clears = len(bench.signals.of("alert_cleared"))
+
+        bench.backend.error_code = constants.ERROR_UV
+        bench.tick()  # the one too many: the cap goes on, and it is what is shown
+        assert "速度已限制" in bench.signals.alerts()[-1]
+        assert bench.loop.motion.params.speed_mm_s == constants.UV_DEGRADED_SPEED_MM_S
+
+        bench.backend.error_code = constants.ERROR_ENABLED
+        bench.tick()  # the fault clears: the edge that retires a plain fault banner
+
+        assert len(bench.signals.of("alert_cleared")) == clears
+
+    def test_an_alert_about_an_event_is_left_where_it_is(self) -> None:
+        """Not every alert names a condition.  A save that failed is a thing that
+        happened, and no amount of the console recovering afterwards makes it
+        untrue — so it stays until the next alert replaces it, which is what every
+        alert did before any of this."""
+        bench = Bench(RecordingBackend(fail=("save_calibration",)))
+        bench.send(cmd.Connect())
+        bench.send(cmd.SaveCalibration())
+        assert "保存标定失败" in bench.signals.alerts()[-1]
+
+        bench.send(cmd.Enable())
+
+        assert bench.loop.enabled, "the refusal really did go away"
+        assert not bench.signals.has("alert_cleared")
+
+    def test_a_console_with_nothing_to_say_retracts_nothing(self) -> None:
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.MoveToMm(30.0), count=20)
+
+        assert not bench.signals.alerts()
+        assert not bench.signals.has("alert_cleared")
