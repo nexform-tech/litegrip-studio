@@ -150,7 +150,7 @@ def evaluate_gate(
             return GateState.READY, "已确认使用出厂标定"
         return (
             GateState.FACTORY,
-            "正在使用 SDK 内置的出厂标定。若本机夹爪与出厂数据不是同一台，"
+            "正在使用出厂标定。若本机夹爪与出厂数据不是同一台，"
             "所有 mm 与力的读数都会是错的 —— 请先自行标定，或确认风险后勾选允许",
         )
 

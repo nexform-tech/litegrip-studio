@@ -4,9 +4,14 @@
 #
 # 两个参数一虚一实，都是必须的：
 #
-#   --collect-data litegrip      把 factory_calibration.json 打进产物。SDK 用
-#                                dirname(litegrip.__file__) 找它，在 sys._MEIPASS
-#                                下也成立，但没有这个文件就无法回退出厂标定。
+#   --collect-data litegrip      把 SDK 的 factory_calibration.json 打进产物。
+#                                SDK 用 dirname(litegrip.__file__) 找它，在
+#                                sys._MEIPASS 下也成立，但没有这个文件就少一层
+#                                回退。
+#   --collect-data litegrip_studio  同理，把控制台自带的同一份出厂标定打进产物：
+#                                没有 SDK 数据文件时的最后一层回退，缺了它机器上
+#                                只剩「未标定、拒绝运动」。控制台自检里有一条专门
+#                                查这个文件在不在（package-data 只管 wheel）。
 #   --collect-submodules litegrip  否则只有直接 import 到的模块进包。
 #
 # --exclude-module zenoh / eclipse_zenoh：SDK 声明了但从未 import 的依赖，本机
@@ -88,6 +93,7 @@ echo "用 $PYTHON_BIN 打包 litegrip-studio …"
     --paths "$SDK" \
     --collect-submodules litegrip \
     --collect-data litegrip \
+    --collect-data litegrip_studio \
     --hidden-import litegrip_studio._version \
     --exclude-module zenoh \
     --exclude-module eclipse_zenoh \

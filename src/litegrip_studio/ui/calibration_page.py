@@ -164,7 +164,7 @@ class CalibrationPage(QWidget):
 
         self._allow = QCheckBox("我了解风险，允许使用出厂标定值")
         self._allow.setToolTip(
-            "出厂标定随 SDK 分发，未必属于这台夹爪。勾选后所有读数都可能是错的"
+            "出厂标定随软件分发，未必属于这台夹爪。勾选后所有读数都可能是错的"
         )
         self._allow.toggled.connect(self._on_allow_toggled)
 
