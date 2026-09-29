@@ -103,6 +103,14 @@ direction from the labels the operator presses instead. If the calibration page 
 Four tabs, plus the connection bar that is always visible (connect / disconnect / enable /
 disable / clear fault / reset emergency stop), the emergency-stop button, and the log dock.
 
+Above the tabs sits one **alert banner**, and it carries the alert in force rather than a
+history. The worker takes it down again when the condition behind it stops holding — a fault
+that cleared, an emergency stop that was reset, a refusal whose reason no longer applies — so
+a console that has recovered stops reading as a broken one. What it does not retract is the
+report of a single event (a save that failed, a probe that ended): those stay until the next
+alert replaces them. Successes do not reach the banner at all. The log has all of it either
+way.
+
 | Page | Contents |
 | --- | --- |
 | Control | Position slider, open all / close all, stop (hold position), zero gravity (back-drivable), speed, grasp force, grasp / let go |

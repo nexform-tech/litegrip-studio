@@ -17,7 +17,11 @@ moving — and the button is on screen at all times, so the key is a convenience
 rather than the only way to reach it.
 
 *The alert banner*, because an alert is by definition something the operator has
-to see without knowing which page to open.
+to see without knowing which page to open.  It shows the alert *in force* and no
+history: the worker retracts it when the condition it named stops holding
+(``alert_cleared``), and the ones it does not retract are the reports of a single
+event — a save that failed, a probe that ended — which the next alert replaces.
+The log is the record either way.
 
 *The log*, and the log is worth a word.  Every command the console sends is
 logged by the worker at debug level with its source, and the file gets
@@ -170,6 +174,7 @@ class MainWindow(QMainWindow):
         worker.calib_progress.connect(self._on_calib_progress)
         worker.log.connect(self._on_log)
         worker.alert.connect(self._on_alert)
+        worker.alert_cleared.connect(self._on_alert_cleared)
         worker.busy.connect(self._on_busy)
 
         self._heartbeat = QTimer(self)
@@ -233,7 +238,22 @@ class MainWindow(QMainWindow):
         self.calibration_page.set_conn_state(state, detail)
 
     def _on_fault(self, code: int, message: str, hint: str) -> None:
-        self._alert("error", f"{message}（{hint}）" if hint else message)
+        """A fault code, or — with code 0 — a notice that is not a fault.
+
+        The worker sends both down this signal because both are about the drive,
+        but only one of them is a thing to redden the window over.  A code of 0
+        is the notice sentinel (``ERROR_DISABLED``), and the two notices that use
+        it are the E-stop engaging and being released: the latch has its own
+        banner with the reset button in it, set and cleared by the motion state,
+        so painting these red as well would leave the E-stop's text up after the
+        operator had dealt with it.  They go to the log, which is where the
+        timeline of an E-stop is read anyway.
+        """
+        text = f"{message}（{hint}）" if hint else message
+        if code == constants.ERROR_DISABLED:
+            self._append("warn", text)
+            return
+        self._alert("error", text)
 
     def _on_gate_state(self, state: str, reason: str) -> None:
         gate = GateState(state)
@@ -270,6 +290,10 @@ class MainWindow(QMainWindow):
 
     def _on_alert(self, level: str, text: str) -> None:
         self._alert(level, text)
+
+    def _on_alert_cleared(self) -> None:
+        """The worker has decided the line it put up is no longer true."""
+        self.alert_banner.set(None)
 
     def _on_busy(self, busy: bool, what: str) -> None:
         self.calibration_page.set_busy(busy, what)
@@ -317,6 +341,17 @@ class MainWindow(QMainWindow):
             self._write(level, text)
 
     def _alert(self, level: str, text: str) -> None:
+        """Put one line on the banner — except a success, which is not one.
+
+        ``info`` is what the worker uses for something that went *right* (a
+        calibration that was written out), and a banner is for what the operator
+        has to act on: a strip saying the save worked is a thing to dismiss
+        rather than to read, and it never went away by itself.  It goes to the
+        dock instead, where the record is, so the banner carries ``warn`` and up.
+        """
+        if level == "info":
+            self._append("info", text)
+            return
         severity = "error" if level in ("error", "fatal") else "warn"
         self.alert_banner.set(severity, text)
 
