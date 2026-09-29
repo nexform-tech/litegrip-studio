@@ -28,13 +28,14 @@ It classified ``zero_position_rad <= max_position_rad`` as the signature of the
 uncalibrated defaults and refused it as a problem.  That test does separate the
 defaults ``(0.0, 1.14)`` from the real files on this bench — but it separates them
 for a reason that has nothing to do with whether they are calibrated: those files
-happen to come from grippers whose fingers are mounted so that the encoder angle
-*shrinks* as the jaws open.  A gripper mounted the other way round has the
-identical signature and is perfectly calibrated, and refusing it made such a unit
-impossible to calibrate at all.  So the ordering is reported and the file-only
-guess is gone; what refuses a calibration now is
+happen to come from grippers whose fingers are assembled so that the encoder angle
+*shrinks* as the jaws open.  A file whose two angles were recorded the other way
+round has the identical signature and can be perfectly calibrated, and refusing it
+made that unit impossible to calibrate at all.  So the ordering is neither a
+verdict nor a question put to the operator any more: it is read from the two
+angles the calibration was recorded at, and what refuses a calibration is
 :func:`~litegrip_studio.units.frame_mismatch`, which compares the file against
-the encoder and cannot be fooled by a mounting direction.
+the encoder and never looks at the ordering.
 
 Pure layer: no Qt, no SDK at import time, no I/O beyond reading the JSON files
 it is pointed at.
@@ -267,7 +268,7 @@ class CalibrationInfo:
             f"{self.label} | 闭合 {lim.closed_rad:.6f} rad / 张开 {lim.open_rad:.6f} rad "
             f"| 可命令行程 {lim.max_stroke_mm:.1f} mm "
             f"| 记录极限跨度 {lim.stroke_mm:.1f} mm ({lim.rad_to_mm:.2f} mm/rad) "
-            f"| {mounting_label(lim)} | 来源 {self.path or '—'}"
+            f"| 来源 {self.path or '—'}"
         )
 
     def headline(self) -> str:
@@ -279,17 +280,11 @@ class CalibrationInfo:
         turns on — and it says the commanded travel rather than the span the file
         implies, because that is the number the slider spans and the one the
         operator set.
-
-        The mounting direction earns its place on this line for the same reason
-        the travel is here: it is the one other fact that decides whether 闭合
-        means what the operator thinks it means, it is invisible everywhere else
-        on the page, and a gripper whose two ends are recorded the wrong way round
-        looks exactly like a correctly calibrated one from the outside.
         """
         lim = self.limits
         if lim is None:
             return self.label
-        return f"{self.label}：行程 {lim.max_stroke_mm:.1f} mm · {mounting_label(lim)}"
+        return f"{self.label}：行程 {lim.max_stroke_mm:.1f} mm"
 
     def summary(self) -> list[tuple[str, str]]:
         """The rows an operator acts on, always on screen.
@@ -323,7 +318,6 @@ class CalibrationInfo:
             ("zero_position_rad (闭合)", _fmt(lim.closed_rad) if lim else "—"),
             ("max_position_rad (张开)", _fmt(lim.open_rad) if lim else "—"),
             ("travel_range_rad", _fmt(lim.travel_rad) if lim else "—"),
-            ("装配方向", mounting_label(lim) if lim else "—"),
             ("rad_to_mm (按行程推导)", _fmt(lim.rad_to_mm) if lim else "—"),
             ("rad_to_mm (文件自带)", _fmt(file_scale(raw))),
             ("记录极限跨度", f"{lim.stroke_mm:.2f} mm" if lim else "—"),
@@ -340,24 +334,6 @@ class CalibrationInfo:
 
 def _fmt(value: float | None) -> str:
     return "—" if value is None else f"{value:.6f}"
-
-
-def mounting_label(limits: Limits) -> str:
-    """How the linkage is assembled, in words.
-
-    Shown wherever an operator decides whether to trust a millimetre reading,
-    because it is the one property of a calibration that no amount of looking at
-    the numbers can settle: the same two angles, read in the same order, describe
-    a correct gripper and a gripper whose ends were recorded the wrong way round,
-    and only the hardware can say which.  Naming the case at least makes the
-    question visible; it is what turns "闭合 and 张开 are swapped" from a mystery
-    into a one-line fix on the calibration page.
-    """
-    if limits.travel_rad <= 0:
-        return "装配方向未知（两个角相同）"
-    if limits.reversed_mount:
-        return "反向装配（张开角更大）"
-    return "正向装配（闭合角更大）"
 
 
 def _fmt_hex(value: Any) -> str:
@@ -461,19 +437,6 @@ def validate_limits(
     """
     problems: list[str] = []
     warnings: list[str] = []
-
-    # Not a problem, and deliberately not silent either.  This is the one
-    # property of a calibration that a file alone can neither confirm nor refute:
-    # a reverse-mounted gripper and a file whose angles came from somewhere else
-    # look exactly alike here.  What settles it is the encoder — see
-    # ``frame_mismatch`` — so all this does is say which case was recorded, in
-    # the one place an operator reads before commanding a move.
-    if limits.reversed_mount:
-        warnings.append(
-            f"闭合角 ({limits.closed_rad:.6f} rad) 小于张开角 ({limits.open_rad:.6f} rad)："
-            "按反向装配解释 —— 张开时角度变大。若本机其实是正向装配，"
-            "说明这份标定把两个极限记反了，请用实测位置确认后再运动"
-        )
 
     if limits.travel_rad <= 0:
         problems.append("行程 (travel_range_rad) 必须为正")

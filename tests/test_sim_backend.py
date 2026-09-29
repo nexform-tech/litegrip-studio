@@ -264,11 +264,11 @@ class TestItsOwnCalibration:
         assert not info.motion_allowed
         assert evaluate_gate(info, allow_factory=True)[0] is GateState.BLOCKED
 
-    def test_a_reverse_mounted_file_of_its_own_is_applied(self, tmp_path) -> None:
+    def test_a_file_recording_the_other_ordering_is_applied(self, tmp_path) -> None:
         """The other order of the same two angles, and it is not a defect: the
         simulator has to be able to run on a gripper whose angle grows as the
         jaws open, or the console cannot be exercised against one."""
-        path = tmp_path / "reversed.json"
+        path = tmp_path / "flipped.json"
         path.write_text(
             json.dumps(
                 {
@@ -288,7 +288,7 @@ class TestItsOwnCalibration:
         assert info.provenance == PROVENANCE_USER
         assert info.motion_allowed
         limits = sim.limits()
-        assert limits.reversed_mount
+        assert limits.direction == 1.0
         assert limits.to_rad(0.0) == pytest.approx(-0.300793)
 
 

@@ -86,12 +86,13 @@ class TestTheChecksAreNotVacuous:
         self, monkeypatch
     ) -> None:
         """The SDK's formulas assume the angle shrinks as the jaws open, and a
-        console that inherits that assumption drives a reverse-mounted gripper
-        inverted — silently, since every number stays self-consistent."""
+        console that inherits that assumption converts a pair of angles recorded
+        the other way round upside down — silently, since every number stays
+        self-consistent."""
         monkeypatch.setattr(Limits, "direction", property(lambda self: -1.0))
 
         with pytest.raises(AssertionError, match="反方向"):
-            selftest.check_the_mounting_direction_is_read_from_the_angles()
+            selftest.check_the_direction_is_read_from_the_two_angles()
 
     def test_the_direction_check_fails_if_the_encoder_check_is_defeated(
         self, monkeypatch
@@ -102,7 +103,7 @@ class TestTheChecksAreNotVacuous:
         monkeypatch.setattr(selftest, "frame_mismatch", lambda limits, rad: "")
 
         with pytest.raises(AssertionError, match="SDK 默认值"):
-            selftest.check_the_mounting_direction_is_read_from_the_angles()
+            selftest.check_the_direction_is_read_from_the_two_angles()
 
     def test_the_travel_check_fails_when_the_file_scale_is_used(
         self, monkeypatch

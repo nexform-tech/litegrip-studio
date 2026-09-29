@@ -94,7 +94,6 @@ class TestDescribe:
             LoadCalibration("/tmp/x.json"),
             SaveCalibration(),
             StartGuidedCalibration(),
-            StartGuidedCalibration(reversed_mount=True),
             ConfirmProbeLimit(),
             StartManualCalibration(),
             StartManualCalibration(source="button"),
@@ -137,12 +136,12 @@ class TestDescribe:
     def test_a_bare_load_says_it_is_the_default_path(self) -> None:
         assert "默认路径" in LoadCalibration().describe()
 
-    def test_a_probe_says_which_way_it_believes_the_jaws_open(self) -> None:
-        """The direction is the operator's answer to a question, and the log is
-        where it is checked afterwards — the two probes that produce mirror
-        images of each other are identical in the log without it."""
-        assert "反向装配" in StartGuidedCalibration(reversed_mount=True).describe()
-        assert "反向" not in StartGuidedCalibration().describe()
+    def test_the_guided_probe_names_only_itself(self) -> None:
+        """It takes no arguments at all, so there is nothing else the line could
+        carry.  A mounting declaration used to be in here, and it was the log's
+        answer to a question the page asked the operator: with the question gone,
+        the line names the action and nothing more."""
+        assert StartGuidedCalibration().describe() == "开始自动标定"
 
     def test_a_manual_record_says_which_end_it_records(self) -> None:
         """The button the operator pressed is the whole of the answer to "which

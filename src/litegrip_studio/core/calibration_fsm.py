@@ -95,7 +95,7 @@ class CalibResult:
 
     ``zero_rad`` is the closed position (0 mm) and ``open_rad`` the open one
     (full stroke).  Which of the two is numerically the larger depends on the
-    mounting and is not this class's business — see
+    assembly and is not this class's business — see
     :attr:`~litegrip_studio.units.Limits.direction` — so the travel below is a
     magnitude and the ordering is preserved rather than normalised.  Angles are
     rounded to 6 decimal places and the conversion factor to 2, the same shape
@@ -219,18 +219,21 @@ class GuidedCalibFSM:
     advances its target from the previous target, so a jammed axis accumulates
     0.08 rad of error per iteration for up to 40 iterations.
 
-    Which way the jaws open has to be given, not assumed — see
-    ``reversed_mount``: this is the one probe that produces a calibration out of
-    nothing, so it has no file to read the mounting from, and a probe that steps
-    the wrong way records the closed stop as the open one.  The result would
-    still validate, still be saved, and drive the gripper inverted.
+    Which way the jaws open is fixed rather than declared: this is the one probe
+    that produces a calibration out of nothing, so it has no file to read the
+    ordering from, and a declaration is a second opinion that can be wrong in a
+    way nothing downstream can see — a probe that steps the wrong way records the
+    closed stop as the open one, and the result still validates, still saves, and
+    drives the gripper inverted.  The direction is the one these units have (the
+    encoder angle shrinks as the jaws open); a unit that behaves differently is
+    calibrated with the two-point probe, where the operator's two labels *are*
+    the direction — see :class:`TwoPointCalibFSM`.
     """
 
     def __init__(
         self,
         max_stroke_mm: float = constants.DEFAULT_TRAVEL_MM,
         *,
-        reversed_mount: bool = False,
         kp: float = constants.GUIDED_KP,
         kd: float = constants.KD_DEFAULT,
         step_rad: float = constants.GUIDED_STEP_RAD,
@@ -243,13 +246,14 @@ class GuidedCalibFSM:
         max_jump_rad: float = constants.PROBE_MAX_JUMP_RAD_PER_TICK,
     ) -> None:
         self.max_stroke_mm = float(max_stroke_mm)
-        # The mounting, in the terms the rest of the console names it
-        # (``Limits.reversed_mount``), and the one sign every step below is taken
-        # in.  The conversion happens here and nowhere else: further down, a
-        # second opinion about which way is open is how a probe ends up driving
-        # the jaws into the stop it is not looking for.
-        self.reversed_mount = bool(reversed_mount)
-        self.direction = 1.0 if self.reversed_mount else -1.0
+        # The one sign every step below is taken in, and it is a constant rather
+        # than a parameter: the probe is the only thing that can produce a
+        # calibration from nothing, so the direction cannot be read from a file,
+        # and taking it from the operator is how a probe ends up driving the jaws
+        # into the stop it is not looking for.  It is the direction of the units
+        # this console drives — the angle shrinks as the jaws open, which is the
+        # sign the SDK's own formulas assume.
+        self.direction = -1.0
         self.kp = float(kp)
         self.kd = float(kd)
         # The one derivation that matters: at a stall the torque is kp × step, so
@@ -307,10 +311,7 @@ class GuidedCalibFSM:
         self._confirmed = False
         self._prev_rad = None
         self._notes = []
-        # The direction is said out loud while the first stop is being
-        # approached, because that is the moment the operator can see whether the
-        # jaws are opening or closing and cancel a probe that has it backwards.
-        self.note = f"正在探测张开极限{self._mounting}"
+        self.note = "正在探测张开极限"
         return True
 
     def confirm(self) -> None:
@@ -417,18 +418,13 @@ class GuidedCalibFSM:
     # ── internals ───────────────────────────────────────────────────────────
     @property
     def _sign(self) -> float:
-        """+1 toward closed, -1 toward open — on this mounting.
+        """+1 toward closed, -1 toward open.
 
         The open probe steps the way the jaws open and the close probe the other
-        way, so the two are each other's negation whichever way round the
-        encoder runs; :attr:`direction` is the one fact they are derived from.
+        way, so the two are each other's negation; :attr:`direction` is the one
+        fact they are derived from.
         """
         return self.direction if self.phase is GuidedPhase.OPEN_PROBE else -self.direction
-
-    @property
-    def _mounting(self) -> str:
-        """The mounting direction, in words, for a status line."""
-        return "（反向装配：张开时角度变大）" if self.reversed_mount else ""
 
     @property
     def progress(self) -> float:
@@ -610,10 +606,10 @@ class TwoPointCalibFSM:
 
     What it asks for is two *labelled* points, in the order a calibration file
     stores them: the open extreme first, then the closed one, which is 0 mm.
-    Both labels come from the operator, so — unlike the guided probe — this flow
-    needs no mounting declaration.  The direction is not assumed and then
-    checked; it is the answer.  A gripper assembled either way round records
-    correctly, and the mounting is whatever the two angles turn out to be.
+    Both labels come from the operator, so nothing has to be declared before the
+    probe starts and nothing is assumed: the direction is not checked against an
+    answer given beforehand, it *is* the answer, and it is whatever the two
+    recorded angles turn out to be.
 
     Nothing is sampled in the background, so nothing else can be mistaken for a
     limit.  The angle recorded is the one the encoder reports on the tick after

@@ -26,9 +26,9 @@ from litegrip_studio.units import (
 
 # The three calibrations the SDK ships or produces on this bench.  The third is
 # ``GripperConfig``'s untouched default pair, which the ordering alone used to
-# disqualify; here it is kept as what it looks like from the numbers — a
-# reverse-mounted unit, valid in its own right, and one whose range the real
-# bench's encoder readings fall outside of.
+# disqualify; here it is kept as what it looks like from the numbers — a pair of
+# angles recorded the other way round, and one whose range the real bench's
+# encoder readings fall outside of.
 REVERSED = Limits(0.0, 1.14, 104.6)  # GripperConfig defaults
 FACTORY = Limits(0.114, -1.491, 74.8)  # litegrip/factory_calibration.json
 BENCH = Limits(1.775959, -0.064279, 65.21)  # example user calibration
@@ -62,8 +62,8 @@ class TestRoundTrip:
         """The sign of this slope is the whole reason mm_to_rad_per_s negates."""
         assert BENCH.to_rad(10.0) < BENCH.to_rad(0.0)
 
-    def test_angle_increases_as_the_jaws_open_on_a_reverse_mounting(self) -> None:
-        """Same mapping, opposite slope — and the formulas above are its
+    def test_angle_increases_as_the_jaws_open_when_recorded_the_other_way(self) -> None:
+        """Same mapping, opposite slope — the formulas above are its
         ``direction == -1`` case, not the only case they can describe."""
         assert REVERSED.to_rad(10.0) > REVERSED.to_rad(0.0)
 
@@ -112,39 +112,35 @@ class TestDirectionCheck:
 
     The SDK's two formulas pin "the angle shrinks as the jaws open", which is how
     the units it was written for are assembled — an assembly detail, not a
-    property of a calibration.  A gripper whose fingers are mounted the other way
-    round has the closed stop at the *smaller* angle and is entirely valid; what
-    refuses a file that does not belong to the hardware is
-    :func:`frame_mismatch`, which reads the encoder and never looks at the
-    ordering at all.
+    property of a calibration.  A pair of angles recorded the other way round is
+    entirely valid and is converted by what it says; what refuses a file that
+    does not belong to the hardware is :func:`frame_mismatch`, which reads the
+    encoder and never looks at the ordering at all.
     """
 
-    def test_the_classic_mounting_has_the_closed_stop_at_the_larger_angle(self) -> None:
+    def test_the_real_calibrations_have_the_closed_stop_at_the_larger_angle(self) -> None:
         for lim in (FACTORY, BENCH):
             assert lim.direction == -1.0
-            assert not lim.reversed_mount
 
-    def test_the_defaults_read_as_a_reverse_mounted_gripper(self) -> None:
+    def test_the_defaults_read_as_the_ordering_they_have(self) -> None:
         assert REVERSED.direction == 1.0
-        assert REVERSED.reversed_mount
 
-    def test_equal_angles_are_degenerate_and_fall_back_to_the_classic_case(self) -> None:
+    def test_equal_angles_are_degenerate_and_fall_back_to_one_case(self) -> None:
         equal = Limits(0.5, 0.5, 65.0)
         assert equal.travel_rad == 0.0
-        assert equal.direction == -1.0
-        assert equal.reversed_mount, "no travel means no ordering to trust"
+        assert equal.direction == -1.0, "no travel means no ordering to read"
         assert not frame_mismatch(equal, 0.5), "0.5 is inside the collapsed range"
 
     def test_the_direction_is_the_sign_of_the_conversion_slope(self) -> None:
-        """Both orientations agree with their own recorded angles, which is the
-        only thing that makes the reversed branch safe to drive."""
+        """Both orderings agree with their own recorded angles, which is the only
+        thing that makes the other one safe to drive."""
         for lim in (FACTORY, BENCH, REVERSED):
             assert lim.to_rad(0.0) == pytest.approx(lim.closed_rad)
             step = lim.to_rad(10.0) - lim.to_rad(0.0)
             assert math.copysign(1.0, step) == lim.direction
             assert math.copysign(1.0, lim.to_mm(lim.open_rad)) == 1.0
 
-    def test_the_range_check_is_blind_to_the_mounting(self) -> None:
+    def test_the_range_check_is_blind_to_which_way_they_were_recorded(self) -> None:
         """Which is what lets it be the guard.  The same two angles, recorded
         either way round, both contain the readings they were taken from — and
         only the encoder knows which of the two this gripper has."""
@@ -153,8 +149,8 @@ class TestDirectionCheck:
         for lim in (classic, flipped):
             for measured in (MEASURED_CLOSED_RAD, MEASURED_OPEN_RAD):
                 assert not frame_mismatch(lim, measured)
-        assert classic.direction == -1.0 and not classic.reversed_mount
-        assert flipped.direction == 1.0 and flipped.reversed_mount
+        assert classic.direction == -1.0
+        assert flipped.direction == 1.0
 
     def test_a_file_that_does_not_match_the_encoder_is_caught_by_its_range(self) -> None:
         """The check that replaced the refusal.  Whatever the ordering, readings
@@ -193,7 +189,7 @@ class TestVelocityFeedForward:
     def test_closing_gives_a_positive_angular_velocity(self) -> None:
         assert mm_to_rad_per_s(-50.0, 65.21, direction=-1.0) > 0.0
 
-    def test_opening_gives_a_positive_angular_velocity_on_a_reverse_mounting(self) -> None:
+    def test_opening_gives_a_positive_angular_velocity_on_the_other_ordering(self) -> None:
         assert mm_to_rad_per_s(50.0, 65.21, direction=1.0) > 0.0
         assert mm_to_rad_per_s(-50.0, 65.21, direction=1.0) < 0.0
 
@@ -207,8 +203,8 @@ class TestVelocityFeedForward:
 
         This is the check that matters: the velocity term and the position term
         are two branches of one mapping, and a sign error between them pins the
-        jaws against a stop at full speed.  Both mountings, or the reversed
-        branch is only ever tested by a formula that shares its mistake.
+        jaws against a stop at full speed.  Both orderings, or the other branch
+        is only ever tested by a formula that shares its mistake.
         """
         mm0, mm1, dt = 40.0, 40.1, 0.005
         dq_measured = (lim.to_rad(mm1) - lim.to_rad(mm0)) / dt

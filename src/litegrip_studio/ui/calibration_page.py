@@ -22,8 +22,8 @@ the jaws to, one labelled point each: open first, then closed, which is 0 mm.
 The SDK's version sweeps the axis for a fixed duration with the motor and takes
 the extremes it passed through — an extreme a hand swept past is not a limit
 anyone measured, and with the two points unnamed the result cannot say which end
-is 0 mm.  Here the operator says which point they are recording, so the mounting
-direction comes out of the labels rather than being assumed.
+is 0 mm.  Here the operator says which point they are recording, so the direction
+comes out of the labels rather than being declared beforehand or assumed.
 
 The SDK's own ``calibrate()`` — one sweep, start to finish, with no way in — is
 deliberately absent.  It moves the jaws for about twenty-four seconds and cannot
@@ -186,7 +186,6 @@ class CalibrationPage(QWidget):
         self._guided_start = QPushButton("开始自动标定")
         self._guided_confirm = QPushButton(CONFIRM_LABELS[GuidedPhase.OPEN_PROBE.value])
         self._guided_cancel = QPushButton("取消标定")
-        self._guided_reversed = QCheckBox("反向装配（张开时角度更大）")
         self._manual_start = QPushButton("开始手动标定")
         self._manual_open = QPushButton("记录张开极限")
         self._manual_close = QPushButton("记录闭合极限")
@@ -296,15 +295,6 @@ class CalibrationPage(QWidget):
         buttons.addWidget(self._guided_confirm)
         buttons.addWidget(self._guided_cancel)
 
-        self._guided_reversed.setToolTip(
-            "这台夹爪的编码器角度是张开时变大还是变小。\n"
-            "怎么判断：失能（或零重力）后用手把两片手指分开，看下面「实测位置」"
-            "里的角度 —— 变大就是反向装配。\n"
-            "必须先确认再开始：探针只能朝一个方向顶，顶错方向就会把闭合极限记成"
-            "张开极限，而这样的结果照样能通过校验、照样能保存，却会把整台夹爪的方向"
-            "反过来。开始后会先朝张开极限移动，此时若看到夹爪在闭合，请点「取消标定」。"
-        )
-
         text = QLabel(
             "分别顶向张开与闭合两个硬限位，记录停住的位置。"
             "每一步都会重新锚定在实测位置，因此顶住时的力矩有上限；"
@@ -315,7 +305,6 @@ class CalibrationPage(QWidget):
         box = QGroupBox("自动标定（需要电机已使能）")
         layout = QVBoxLayout(box)
         layout.addWidget(text)
-        layout.addWidget(self._guided_reversed)
         layout.addLayout(buttons)
         return box
 
@@ -461,12 +450,10 @@ class CalibrationPage(QWidget):
     def update_frame(self, frame: TelemetryFrame) -> None:
         """The live reading, in millimetres *and* in radians.
 
-        The radians are normally the number nobody needs, and they are here for
-        one question the millimetres cannot answer: which way the encoder runs.
-        The mounting direction has to be declared before a guided probe, and the
-        only way to find out is to move the jaws by hand and watch this number —
-        which cannot be the mm one, since that is computed with the very
-        calibration under suspicion.
+        The radians are normally the number nobody needs, and they are here
+        because the millimetres cannot be used to check the calibration they came
+        from: the mm reading is computed with the very numbers under suspicion,
+        while the angle is what the encoder reports.
         """
         measured = UNKNOWN if frame.position_mm is None else f"{frame.position_mm:>7.2f} mm"
         angle = (
@@ -588,9 +575,6 @@ class CalibrationPage(QWidget):
         any_running = guided_running or manual_running
 
         self._guided_start.setEnabled(ready and not any_running)
-        # Locked while a probe is running: a direction that changes halfway
-        # through a probe is two directions in one file.
-        self._guided_reversed.setEnabled(not any_running)
         self._guided_cancel.setEnabled(guided_running)
         self._guided_confirm.setEnabled(guided_running and self._phase in CONFIRM_LABELS)
         self._guided_confirm.setText(
@@ -637,9 +621,7 @@ class CalibrationPage(QWidget):
         self._submit(cmd.CancelCalibration())
 
     def _on_guided_start(self) -> None:
-        self._submit(
-            cmd.StartGuidedCalibration(reversed_mount=self.reversed_mount)
-        )
+        self._submit(cmd.StartGuidedCalibration())
 
     def _on_manual_start(self) -> None:
         self._submit(cmd.StartManualCalibration())
@@ -667,8 +649,3 @@ class CalibrationPage(QWidget):
     @property
     def allows_factory(self) -> bool:
         return self._allow.isChecked()
-
-    @property
-    def reversed_mount(self) -> bool:
-        """The mounting, as the operator declared it for the guided probe."""
-        return self._guided_reversed.isChecked()

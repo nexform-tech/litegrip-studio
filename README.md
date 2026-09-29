@@ -90,11 +90,8 @@ sudo ip link set can0 up
 ```
 
 **On a real gripper, run 自动标定 from the calibration page before touching the
-slider.** The result is written out as soon as the probe finishes. If the fingers are mounted the
-other way round — the encoder angle growing
-as the jaws open — tick 反向装配 first, or use the manual two-point wizard, which takes the
-direction from the labels the operator presses instead. If the calibration page shows `FACTORY` or
-`BLOCKED`, calibrate first rather than overriding the gate.
+slider.** The result is written out as soon as the probe finishes. If the calibration page shows
+`FACTORY` or `BLOCKED`, calibrate first rather than overriding the gate.
 
 ---
 
@@ -226,13 +223,12 @@ itself rather than trusting the SDK's return value:
   without protection: a bad file raises `KeyError`.
 
 The ordering `zero_rad <= open_rad` is what the SDK's defaults look like — `(0.0, 1.14)` — and it
-is still the signature the console recognises them by. But an ordering is not a verdict: the same
-two numbers, read in the same order, describe a reverse-mounted gripper and a file whose limits
-were recorded the wrong way round, and no amount of arithmetic can tell those apart. So the
-console *reads* the mounting direction out of the two angles (`Limits.direction`) and every
-conversion, clamp and velocity feed-forward uses it, which makes a reverse-mounted unit work end
-to end; a reversed file is a **warning** to be confirmed against the live reading rather than a
-refusal. What refuses a file is `frame_mismatch`, below, which never looks at the ordering.
+is still the signature the console recognises them by. But an ordering is not a defect: the same
+two numbers, read in the same order, are a file whose angles were recorded with the encoder reading
+*growing* as the jaws open, and every number derived from that file stays self-consistent. So the
+console *reads* the direction out of the two angles (`Limits.direction`) and every conversion,
+clamp and velocity feed-forward uses it, which makes either ordering work end to end. What refuses
+a file is `frame_mismatch`, below, which never looks at the ordering.
 
 All of the above is decided by **reading files**, and a file can be perfectly self-consistent while
 describing a different gripper — as long as it was calibrated against another encoder zero (a
@@ -341,10 +337,9 @@ bad — was refused by the gate it was there to work around.
 
 The probe also has to know **which way the jaws open**, and it cannot read that from a file: it is
 the thing producing the file. It walks the jaws into the open stop and then into the closed one,
-and walking a reverse-mounted gripper the SDK's way drives it into the wrong stop and records the
-two ends the wrong way round — a result that validates, saves, and moves inverted. So the direction
-is declared before the probe starts (反向装配 on the calibration page, carried as
-`StartGuidedCalibration.reversed_mount`), and the page shows the raw encoder angle beside the
+and the units this console drives have the open stop at the *smaller* angle, so the direction is a
+constant of the machine rather than an answer to collect — one direction, and therefore nothing an
+operator can get wrong before the probe starts. The page shows the raw encoder angle beside the
 millimetres, because the millimetres are computed through the calibration under suspicion.
 
 The probe decides it has reached a stop when the angle it reads stops changing, and that same
@@ -386,10 +381,10 @@ the axis to itself to do it.
   keeping the extremes, which is what the SDK's zero-gravity mode does, measures the travel the hand
   happened to sweep: a gripper released halfway still looks like a calibration, and neither end is
   named, so the file cannot say which one is 0 mm.
-- **It needs no mounting declaration.** The labels supply the direction, so a gripper assembled
-  either way round records correctly and the mounting is whatever the two angles turn out to be.
-  Both points recorded in the same place is reported, not adopted — a file built from it would put
-  every millimetre of the travel at one angle.
+- **It needs no declaration of any kind.** The two labelled presses say which end is which, so the
+  direction is whatever the two recorded angles turn out to be rather than anything agreed
+  beforehand. Both points recorded in the same place is reported, not adopted — a file built from
+  it would put every millimetre of the travel at one angle.
 - **Readings are checked before they are believed.** A value outside the SDK's own plausibility
   bound, or one that moved further in one tick than the mechanism can, is dropped rather than
   recorded: a lost frame leaves the SDK's cached position at `0.0`, which is inside that bound and

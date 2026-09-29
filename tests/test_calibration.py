@@ -289,43 +289,39 @@ class TestProvenance:
 
 
 # ── the direction check ─────────────────────────────────────────────────────
-class TestMountingDirection:
-    """The ordering of the two angles is reported, not judged.
+class TestTheDirectionTheAnglesWereRecordedIn:
+    """The ordering of the two angles is read, not judged and not asked about.
 
     ``closed <= open`` used to be a hard problem here: it is the signature of the
     SDK's uncalibrated defaults, and every conversion downstream assumes the
-    classic ordering.  It is also the signature of a gripper whose fingers are
-    mounted the other way round, which is entirely valid and cannot be told apart
-    from the defaults by the angles alone — so the check made such a unit
-    impossible to calibrate, which is the deadlock this replaces.  The
-    operator is told which case was recorded; the encoder has the final say, in
-    ``frame_mismatch``.
+    ordering of the units on this bench.  A file whose two angles were recorded
+    the other way round cannot be told apart from the defaults by the angles
+    alone — so the check made such a file impossible to load, which is the
+    deadlock this replaces.  The ordering is now simply read out of the pair, and
+    the encoder has the final say, in ``frame_mismatch``.
     """
 
-    def test_the_uncalibrated_defaults_are_read_as_a_reverse_mounting(self, env) -> None:
+    def test_the_uncalibrated_defaults_are_loaded_and_read_as_given(self, env) -> None:
         _write(env.user, UNCALIBRATED_RAW)
         info = calibration.resolve()
         assert info.usable, "the angles are self-consistent; only the encoder can refute them"
-        assert info.limits is not None and info.limits.reversed_mount
-        assert info.limits.direction == 1.0
+        assert info.limits is not None and info.limits.direction == 1.0
         assert info.problems == ()
-        assert any("反向装配" in w for w in info.warnings)
+        assert not info.warnings, "the ordering is not something to warn about any more"
 
-    def test_a_reverse_mounted_calibration_may_be_moved_under(self, env) -> None:
+    def test_a_calibration_recorded_the_other_way_round_may_be_moved_under(self, env) -> None:
         """The whole point: after the two-point capture on a unit whose angle
-        shrinks as the jaws open, the operator is not left with a dead console."""
+        grows as the jaws open, the operator is not left with a dead console."""
         _write(env.user, dict(REVERSED_RAW))
         info = calibration.resolve()
         assert info.usable and info.motion_allowed
-        assert info.limits is not None and info.limits.reversed_mount
-        assert "反向装配" in info.headline()
+        assert info.limits is not None and info.limits.direction == 1.0
 
-    def test_the_classic_mounting_is_named_and_does_not_warn(self, env) -> None:
+    def test_the_real_files_are_read_the_other_way_and_do_not_warn(self, env) -> None:
         _write(env.user, USER_RAW)
         info = calibration.resolve()
-        assert info.limits is not None and not info.limits.reversed_mount
-        assert not any("反向装配" in w for w in info.warnings)
-        assert "正向装配" in info.headline()
+        assert info.limits is not None and info.limits.direction == -1.0
+        assert not info.warnings
 
     def test_equal_angles_are_refused(self, env) -> None:
         """Zero travel is a problem whichever way it is read: the scale derived
@@ -345,7 +341,7 @@ class TestMountingDirection:
         assert info.provenance == PROVENANCE_USER
         assert info.problems == ()
         assert info.limits is not None
-        assert not info.limits.reversed_mount
+        assert info.limits.direction == -1.0
 
 
 class TestMotionAllowed:
@@ -602,12 +598,12 @@ class TestSilentFallbackDefence:
         assert info.limits is not None, "the numbers are still usable for display"
         assert any("尚未保存" in w for w in info.warnings)
 
-    def test_a_memory_calibration_of_a_reverse_mounted_probe_is_displayable(self) -> None:
-        """Reverse-mounted or not, an unsaved result is held to the same rule:
-        shown, and gated until it is written to a file."""
+    def test_a_memory_calibration_of_a_probe_recorded_either_way_is_displayable(self) -> None:
+        """Which way the two angles came out does not change the rule for an
+        unsaved result: shown, and gated until it is written to a file."""
         info = calibration.in_memory(-0.300793, 1.421569, 49.93)
         assert info.usable
-        assert info.limits is not None and info.limits.reversed_mount
+        assert info.limits is not None and info.limits.direction == 1.0
         assert not info.motion_allowed
 
     def test_a_memory_calibration_of_a_zero_travel_probe_is_refused(self) -> None:
@@ -810,21 +806,22 @@ class TestPresentation:
     def test_the_headline_is_a_sentence_not_a_dump(self, env) -> None:
         _write(env.user, USER_RAW)
         headline = calibration.resolve().headline()
-        # The mounting direction is in it because it is the one other thing that
-        # decides whether the operator's idea of 闭合 matches the gripper's.
-        assert headline == "用户标定：行程 85.0 mm · 正向装配（闭合角更大）"
+        assert headline == "用户标定：行程 85.0 mm"
         # The log line keeps the radians; the banner is read while deciding
         # whether to move, so it must not carry them.
         assert "rad" not in headline
         assert "rad" in calibration.resolve().describe()
 
-    def test_the_headline_says_a_reverse_mounting_is_one(self, env) -> None:
+    def test_neither_the_headline_nor_the_table_names_a_mounting(self, env) -> None:
+        """The declaration is gone, and so is every word it used to put on
+        screen: a row that says 正向装配 is a question the operator is no longer
+        asked, and an answer nothing reads."""
         _write(env.user, REVERSED_RAW)
-        assert "反向装配（张开角更大）" in calibration.resolve().headline()
-
-    def test_the_table_carries_the_mounting_direction(self, env) -> None:
-        _write(env.user, REVERSED_RAW)
-        assert dict(calibration.resolve().as_table())["装配方向"] == "反向装配（张开角更大）"
+        info = calibration.resolve()
+        rows = dict(info.as_table())
+        assert "方向" not in info.headline()
+        assert not [key for key in rows if "方向" in key or "装配" in key]
+        assert not [value for value in rows.values() if "装配" in value]
 
     def test_every_provenance_has_a_chinese_label(self) -> None:
         for name in (

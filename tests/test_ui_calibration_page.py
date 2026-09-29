@@ -14,7 +14,7 @@ import dataclasses
 from pathlib import Path
 
 import pytest
-from PyQt5.QtWidgets import QLabel, QScrollArea
+from PyQt5.QtWidgets import QLabel, QScrollArea, QWidget
 
 from litegrip_studio import calibration
 from litegrip_studio.calibration import CalibrationInfo
@@ -62,17 +62,14 @@ INVALID_CAL = CalibrationInfo(
         "由行程 0.000000 rad 与设定行程 120.0 mm 推出的 mm/rad 无效；请检查标定页上的行程设定",
     ),
 )
-#: A good calibration for a gripper whose angle grows as the jaws open.  The
-#: banner has to say so: it is the one fact, besides the stroke, that decides
-#: whether the operator's idea of 闭合 is the gripper's.
-REVERSE_MOUNTED_LIMITS = Limits(-0.300793, 1.421569, 49.93, 85.0)
-REVERSE_MOUNTED_CAL = CalibrationInfo(
+#: A good calibration whose two angles were recorded the other way round.  It is
+#: the case the page must not make anything of: the file is usable, the banner
+#: carries the stroke, and no word about a mounting appears anywhere.
+FLIPPED_LIMITS = Limits(-0.300793, 1.421569, 49.93, 85.0)
+FLIPPED_CAL = CalibrationInfo(
     provenance=calibration.PROVENANCE_USER,
-    limits=REVERSE_MOUNTED_LIMITS,
+    limits=FLIPPED_LIMITS,
     path=str(Path.home() / ".litegrip" / "litegrip_calibration.json"),
-    warnings=(
-        "闭合角 (-0.300793 rad) 小于张开角 (1.421569 rad)：按反向装配解释 —— 张开时角度变大",
-    ),
 )
 MEMORY_CAL = CalibrationInfo(
     provenance=calibration.PROVENANCE_MEMORY,
@@ -160,14 +157,14 @@ class TestTheProvenanceIsShown:
         assert page._banner.severity == "error"
         assert "行程" in page._banner.detail
 
-    def test_a_reverse_mounted_calibration_is_shown_as_one(self, page) -> None:
-        """Not an error, and not silent either: it is a good calibration, and
-        the one fact about it that decides what 闭合 means for this operator."""
-        page.set_calibration(REVERSE_MOUNTED_CAL)
+    def test_a_calibration_recorded_the_other_way_is_shown_without_comment(self, page) -> None:
+        """Not an error, and not a mounting question either: the file is usable
+        and self-consistent, and the direction is read from its two angles."""
+        page.set_calibration(FLIPPED_CAL)
 
         assert page._banner.severity == "info"
-        assert "反向装配" in page._banner.headline
-        assert "反向装配" in page._banner.detail
+        assert page._banner.headline == "用户标定：行程 85.0 mm"
+        assert "装配" not in page._banner.detail
 
     def test_the_acknowledgement_is_hidden_when_it_is_moot(self, page) -> None:
         page.set_calibration(FACTORY_CAL)
@@ -190,7 +187,7 @@ class TestTheProvenanceIsShown:
         the stroke and the provenance and nothing else."""
         page.set_calibration(USER_CAL)
 
-        assert page._banner.headline == "用户标定：行程 120.0 mm · 正向装配（闭合角更大）"
+        assert page._banner.headline == "用户标定：行程 120.0 mm"
 
     def test_the_expert_numbers_are_not_on_screen_by_default(self, page) -> None:
         page.set_calibration(USER_CAL)
@@ -365,54 +362,47 @@ class TestTheConfirmation:
         assert isinstance(page.recorder.last(), cmd.ConfirmProbeLimit)
 
 
-class TestTheMountingQuestion:
-    """The one thing about a guided probe the operator has to supply.
+class TestTheDirectionIsNotAskedFor:
+    """The guided probe takes no mounting declaration, and the page asks for none.
 
-    The probe is being run because no usable file exists, so there is nothing to
-    read the direction from — and a probe that goes the wrong way records the
-    closed stop as the open one and produces a calibration that validates, saves
-    and moves the gripper inverted.  Hence a checkbox, and hence it is locked
-    once the probe has started: a direction that changed halfway through would
-    be two directions in one file.
+    A declaration is a second opinion about what the probe is on its way to
+    measure, and a wrong one is caught nowhere downstream: it records the closed
+    stop as the open one and produces a file that validates, saves and runs the
+    gripper inverted.  The direction is read from the two angles that were
+    recorded, and a unit that behaves differently is what manual two-point
+    calibration is for.
     """
 
-    def test_it_is_sent_with_the_probe(self, page) -> None:
-        page._guided_reversed.setChecked(True)
+    def test_the_command_carries_nothing_else(self, page) -> None:
         page.recorder.commands.clear()
 
         page._guided_start.click()
 
-        sent = page.recorder.of(cmd.StartGuidedCalibration)[-1]
-        assert sent.reversed_mount  # type: ignore[attr-defined]
+        assert page.recorder.of(cmd.StartGuidedCalibration)[-1] == (
+            cmd.StartGuidedCalibration()
+        )
 
-    def test_the_classic_mounting_is_the_default(self, page) -> None:
-        page.recorder.commands.clear()
+    def test_the_page_has_no_such_control(self, page) -> None:
+        assert not hasattr(page, "reversed_mount")
+        assert not hasattr(page, "_guided_reversed")
 
-        page._guided_start.click()
+    def test_no_widget_on_the_page_mentions_a_mounting(self, page) -> None:
+        """Read off the widgets rather than the source: a wording that crept back
+        into a label or a tooltip is what the operator would actually see."""
 
-        assert not page.reversed_mount
-        assert not page.recorder.of(cmd.StartGuidedCalibration)[-1].reversed_mount  # type: ignore[attr-defined]
+        def said(widget: QWidget) -> list[str]:
+            found = [widget.toolTip()]
+            for name in ("text", "title"):
+                value = getattr(widget, name, None)
+                if callable(value):
+                    found.append(value())
+                elif isinstance(value, str):
+                    found.append(value)
+            return found
 
-    def test_it_is_locked_while_a_probe_runs(self, page) -> None:
-        assert page._guided_reversed.isEnabled()
+        texts = [text for widget in page.findChildren(QWidget) for text in said(widget)]
 
-        page.set_progress(GuidedPhase.OPEN_PROBE.value, 0.1)
-        assert not page._guided_reversed.isEnabled()
-
-        page.set_progress(GuidedPhase.DONE.value, 1.0)
-        assert page._guided_reversed.isEnabled()
-
-    def test_the_question_is_explained_where_it_is_asked(self, page) -> None:
-        """Nothing on this page can answer it: the millimetre reading is
-        computed *through* the calibration under suspicion.  The tooltip has to
-        say so, and say how to read the answer off the live angle instead."""
-        tip = page._guided_reversed.toolTip()
-
-        assert "实测位置" in tip, "没说去哪里看角度"
-        assert "角度" in tip and "反向装配" in tip
-        # And the reason it is a question rather than a checkbox to tick
-        # casually: the wrong answer is not rejected anywhere downstream.
-        assert "保存" in tip
+        assert not [text for text in texts if "装配" in text or "反向" in text]
 
 
 class TestTheCommandsItSends:

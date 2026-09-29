@@ -11,10 +11,11 @@ subtly wrong is how a gripper drives into a hard stop:
 
 Both of those hardcode the sign of the mapping, and the SDK has no other form: as
 written it can only describe a gripper whose encoder angle *shrinks* as the jaws
-open, which is how the units it was written for are assembled.  That is an
-assembly detail rather than a property of the calibration, so here it is read
-from the recorded angles — :attr:`Limits.direction` — and the two formulas above
-are the case of it where the closed stop is the larger angle.
+open, which is how the units it was written for are assembled.  The console does
+not take that on trust either: it reads the sign out of the two recorded angles,
+:attr:`Limits.direction`, so a file whose angles came out the other way round is
+converted by what it says rather than by what the SDK expects.  The two formulas
+above are the case of it where the closed stop is the larger angle.
 
 The other thing the SDK's formulas are fed is ``rad_to_mm``, and that one is not
 taken from a file at all.  It is derived from the calibration's angles and the
@@ -38,10 +39,9 @@ class Limits:
 
     ``closed_rad`` is the motor angle at 0 mm and ``open_rad`` the angle at full
     stroke.  Which of the two is numerically larger depends on how the linkage
-    was assembled — the units the SDK was written for have the closed stop at the
-    larger angle, a reverse-mounted one has it at the smaller — and both are
-    valid.  :attr:`direction` is that fact, and every conversion below reads it;
-    :attr:`reversed_mount` names the case.
+    was assembled, and neither ordering is refused: :attr:`direction` is that
+    fact, read from the two angles themselves, and every conversion below reads
+    it rather than assuming the SDK's sign.
 
     ``rad_to_mm`` is DERIVED rather than read from the file — see
     :func:`derive_scale` — because the file's copy of it is the SDK's nominal
@@ -86,35 +86,18 @@ class Limits:
     def direction(self) -> float:
         """+1 when the angle grows toward open, -1 when it shrinks toward open.
 
-        A property of the assembly, not a measure of the calibration's quality:
-        the classic mounting has the closed stop at the larger angle (−1), a
-        reverse-mounted one has it at the smaller (+1).  Every conversion that is
-        not symmetric in the two angles reads this instead of assuming either.
+        The sign is read from the two recorded angles, not declared anywhere and
+        not assumed: the units this console drives have the closed stop at the
+        larger angle (−1), and a file whose angles were recorded the other way
+        round (+1) is converted by what it says rather than by what is expected.
+        Every conversion that is not symmetric in the two angles reads this.
 
         Equal angles are degenerate — :func:`derive_scale` gives them a zero
         scale and :func:`~litegrip_studio.calibration.validate_limits` reports
-        that as a problem — and are answered here as the classic case.
+        that as a problem — and are answered here as the closed-at-the-larger
+        case.
         """
         return 1.0 if self.open_rad > self.closed_rad else -1.0
-
-    @property
-    def reversed_mount(self) -> bool:
-        """True when the closed stop is the numerically smaller angle.
-
-        Reported, never refused.  This used to be the console's whole verdict on
-        a file: ``closed <= open`` was read as the signature of the SDK's
-        uncalibrated defaults ``(0.0, 1.14)`` and blocked motion outright.  It is
-        the same signature in a file that is entirely correct, though, and a
-        gripper whose fingers are mounted the other way round cannot be told
-        apart from it by the angles alone — so a reverse-mounted unit was
-        uncalibratable, which is the deadlock this property replaces.
-
-        What actually guards the axis is not this: it is
-        :func:`frame_mismatch`, which compares the calibration against the angle
-        the encoder is reporting right now, and which cannot be fooled by a
-        mounting direction because it never looks at the ordering at all.
-        """
-        return self.closed_rad <= self.open_rad
 
     # ── conversions ─────────────────────────────────────────────────────────
     def to_rad(self, mm: float) -> float:
