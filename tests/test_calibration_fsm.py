@@ -170,8 +170,8 @@ class TestSummarise:
         # and the commanded range ends at the measured travel".
         assert result.as_raw()["rad_to_mm"] > 120.0 / result.travel_rad
 
-    def test_a_reversed_pair_is_recorded_as_given(self) -> None:
-        """The other mounting, and the one the two-point capture produces on it.
+    def test_a_flipped_pair_is_recorded_as_given(self) -> None:
+        """The other ordering, and the one the two-point capture produces on it.
 
         Nothing here may normalise the two angles into the SDK's ordering: the
         file is the record of where the jaws stopped, and swapping them to look
@@ -183,11 +183,11 @@ class TestSummarise:
         assert result.open_rad == round(CLOSED_RAD, 6)
         assert result.travel_rad == result.open_rad - result.zero_rad
         assert result.travel_rad > 0.0
-        assert Limits(OPEN_RAD, CLOSED_RAD, result.rad_to_mm).reversed_mount
+        assert Limits(OPEN_RAD, CLOSED_RAD, result.rad_to_mm).direction == 1.0
 
     def test_the_same_two_angles_either_way_round_differ_only_in_order(self) -> None:
         """So the ordering carries no information the numbers do not already have,
-        which is why refusing one of the two orderings refused a real gripper."""
+        which is why refusing one of the two orderings refused a real file."""
         classic = summarise(CLOSED_RAD, OPEN_RAD, 120.0, ())
         flipped = summarise(OPEN_RAD, CLOSED_RAD, 120.0, ())
         assert isinstance(classic, CalibResult) and isinstance(flipped, CalibResult)
@@ -586,76 +586,38 @@ class TestGuidedProbe:
         assert out.q_rad is None or math.isfinite(out.q_rad)
 
 
-class TestTheDeclaredMounting:
-    """Which way the jaws open is the operator's to state, and it is the one
-    input the probe cannot read.
+class TestTheDirectionIsNotSomethingTheOperatorCanGetWrong:
+    """The probe has one direction and takes no argument for it.
 
-    It has nothing to read it from: the probe exists because there is no usable
-    file, and the stops it is walking toward are indistinguishable from each
-    other until it has pressed one.  So the flag is not a hint the probe may
-    second-guess — it is the sign every step is taken in, and a probe that
-    assumed the SDK's direction instead would walk a reverse-mounted gripper
-    into the stop it is not looking for, record the closed end as the open one,
-    and produce a result that validates, saves, and drives the gripper inverted.
+    It used to be a flag the page sent, and the flag was the whole hazard: the
+    probe exists because there is no usable file to read the ordering from, so a
+    direction given wrongly walked the probe into the stop it was not looking
+    for, recorded the closed end as the open one, and produced a result that
+    validated, saved, and drove the gripper inverted.  There is nothing left to
+    give wrongly — the direction belongs to the unit the probe is built for, and
+    a unit that opens the other way is calibrated with the two-point probe.
     """
 
-    def test_the_open_probe_steps_the_way_the_declared_mounting_opens(self) -> None:
-        """Both directions, from the same starting reading, or the test would
-        pass on a probe that stepped one way regardless."""
-        classic = GuidedCalibFSM()
-        classic.start(0.5)
-        reversed_ = GuidedCalibFSM(reversed_mount=True)
-        reversed_.start(0.5)
+    def test_it_takes_no_mounting_argument(self) -> None:
+        with pytest.raises(TypeError):
+            GuidedCalibFSM(reversed_mount=True)  # type: ignore[call-arg]
 
-        toward_classic = classic.tick(0.5, DT).q_rad
-        toward_reversed = reversed_.tick(0.5, DT).q_rad
+    def test_the_first_step_goes_toward_the_open_stop(self) -> None:
+        """The angle shrinks as the jaws open on this unit, so the open probe
+        steps *down* from wherever it starts — and the close probe, later, steps
+        the other way.  Either sign being wrong is a probe that presses the stop
+        it is not looking for."""
+        fsm = GuidedCalibFSM()
+        fsm.start(0.5)
 
-        assert toward_classic is not None and toward_reversed is not None
-        assert toward_classic < 0.5 < toward_reversed, (
-            "两个声明下第一步都朝同一个方向，说明方向没有真的被采用"
-        )
+        first = fsm.tick(0.5, DT).q_rad
 
-    def test_the_flag_is_the_direction_it_says_it_is(self) -> None:
-        """``+1`` means the angle grows toward open, which is the convention the
-        rest of the console names ``Limits.reversed_mount``."""
-        assert GuidedCalibFSM(reversed_mount=True).direction == 1.0
-        assert GuidedCalibFSM().direction == -1.0
-        # Defaults to the classic mounting, so every caller that has nothing to
-        # say about it gets the SDK's own direction rather than an error.
-        assert not GuidedCalibFSM().reversed_mount
-
-    def test_the_status_line_names_the_mounting(self) -> None:
-        """The operator has to be able to see, while it runs, which way the
-        probe believes it is going — it is the one input they supplied."""
-        fsm = GuidedCalibFSM(reversed_mount=True)
-        fsm.start(0.0)
-
-        assert "反向" in fsm.note
-
-    def test_a_wrong_declaration_is_not_something_the_probe_can_notice(self) -> None:
-        """Pinned as a limitation rather than left implied, because it is what
-        the mounting question on the page is for: declared reversed on a
-        classic gripper, the probe walks to the *closed* stop first, records it
-        as the open one, and finishes with a complete, self-consistent,
-        inverted result.  Nothing in the angles gives it away."""
-        fsm = GuidedCalibFSM(reversed_mount=True)
-        assert fsm.start(0.9)
-        plant = Plant(0.9)  # the classic mounting: closed at the larger angle
-        run_to_terminal(fsm, plant, seconds=120.0)
-
-        assert fsm.phase is GuidedPhase.DONE, fsm.note
-        result = fsm.result
-        assert result is not None
-        # "Open" is the closed stop and "closed" is the open one — the mirror
-        # image of the right answer, and indistinguishable from it by inspection.
-        assert result.open_rad > result.zero_rad
-        assert Limits(
-            result.zero_rad, result.open_rad, result.rad_to_mm
-        ).reversed_mount, "错的方向应当产出一份反向标定，这正是它危险的地方"
+        assert first is not None and first < 0.5
+        assert fsm.note == "正在探测张开极限"
 
 
 class TestGuidedAgainstTheSimulatedStops:
-    """The probe against the plant's real hard stops, both directions."""
+    """The probe against the plant's real hard stops."""
 
     @pytest.mark.parametrize("start_rad", [1.5, 0.9, 0.5, 0.0, -0.05])
     def test_it_records_the_travel_from_any_starting_point(self, start_rad: float) -> None:
@@ -668,40 +630,6 @@ class TestGuidedAgainstTheSimulatedStops:
         assert result is not None
         assert result.travel_rad > 1.5
         assert OPEN_RAD <= result.open_rad < result.zero_rad <= CLOSED_RAD
-
-    @pytest.mark.parametrize("start_rad", [1.0, 0.5, 0.0, -0.2])
-    def test_a_reverse_mounted_gripper_is_probed_the_other_way_up(
-        self, start_rad: float
-    ) -> None:
-        """The whole point of the flag: on a gripper whose angle grows as the
-        jaws open, the probe has to record the *larger* angle as the open one,
-        and that is the same probe with one sign flipped."""
-        fsm = GuidedCalibFSM(reversed_mount=True)
-        assert fsm.start(start_rad)
-        plant = Plant(
-            start_rad, open_rad=REVERSED_OPEN_RAD, closed_rad=REVERSED_CLOSED_RAD
-        )
-        run_to_terminal(fsm, plant, seconds=120.0)
-
-        assert fsm.phase is GuidedPhase.DONE, fsm.note
-        result = fsm.result
-        assert result is not None
-        assert result.travel_rad > 1.5
-        # Both stops were found, and each on the right side of the other.
-        assert result.zero_rad <= REVERSED_CLOSED_RAD + 0.05
-        assert result.open_rad >= REVERSED_OPEN_RAD - 0.05
-        # And the result is a reverse-mounted calibration, which is what the
-        # console has to be able to save and move by.
-        limits = Limits(result.zero_rad, result.open_rad, result.rad_to_mm)
-        assert limits.reversed_mount
-        assert limits.to_rad(0.0) == pytest.approx(result.zero_rad)
-        assert limits.rad_to_mm > 0.0
-        assert limits.stroke_mm == pytest.approx(
-            fsm.max_stroke_mm + constants.SPAN_INSET_MM, abs=0.5
-        )
-        # Commanding the top of the range drives *up* in angle here, and the
-        # jaws end up open — the check that the saved file is not inverted.
-        assert limits.to_rad(limits.max_stroke_mm) > result.zero_rad
 
     @pytest.mark.parametrize("travel_mm", [85.0, 120.0, 200.0, 60.0])
     def test_the_coefficient_follows_the_configured_travel(self, travel_mm: float) -> None:
@@ -778,16 +706,16 @@ class TestTheTwoPointProbe:
         # And 0 mm is the end that was labelled closed, which is the whole
         # content of the operator's answer.
         assert result.zero_rad == pytest.approx(CLOSED_RAD)
-        assert not Limits(result.zero_rad, result.open_rad, result.rad_to_mm).reversed_mount
+        assert Limits(result.zero_rad, result.open_rad, result.rad_to_mm).direction == -1.0
 
-    def test_a_reverse_mounted_gripper_needs_no_declaration(self) -> None:
+    def test_a_gripper_that_opens_the_other_way_needs_no_declaration(self) -> None:
         """The property the guided probe cannot have, and the reason this flow
-        survives a gripper the SDK's formulas do not describe.
+        survives a unit the SDK's formulas do not describe.
 
         Nothing here is told which way the jaws open.  The operator labels the
         two points as they record them, so the direction is not an assumption
-        that has to be checked afterwards — it is the answer, and a gripper
-        assembled either way round records correctly through the same buttons.
+        that has to be checked afterwards — it is the answer, and a unit whose
+        angle runs the other way records correctly through the same buttons.
         """
         fsm = TwoPointCalibFSM()
         assert fsm.start(REVERSED_CLOSED_RAD)
@@ -802,10 +730,10 @@ class TestTheTwoPointProbe:
         result = fsm.result
         assert result is not None
         limits = Limits(result.zero_rad, result.open_rad, result.rad_to_mm)
-        assert limits.reversed_mount
+        assert limits.direction == 1.0
         assert limits.to_rad(0.0) == pytest.approx(REVERSED_CLOSED_RAD)
         # The angle grows toward open on this one, and the travel is a magnitude
-        # either way: the two mountings differ in the sign of the conversion,
+        # either way: the two orderings differ in the sign of the conversion,
         # not in the numbers the operator recorded.
         assert result.travel_rad == pytest.approx(REVERSED_OPEN_RAD - REVERSED_CLOSED_RAD)
         assert limits.to_rad(limits.max_stroke_mm) > limits.to_rad(0.0)
@@ -826,7 +754,7 @@ class TestTheTwoPointProbe:
         wrong_limits = Limits(wrong.zero_rad, wrong.open_rad, wrong.rad_to_mm)
         assert right_limits.to_rad(0.0) == pytest.approx(closed)
         assert wrong_limits.to_rad(0.0) == pytest.approx(opened)
-        assert right_limits.reversed_mount is not wrong_limits.reversed_mount
+        assert right_limits.direction is not wrong_limits.direction
 
     def test_an_out_of_turn_record_is_refused(self) -> None:
         """Pressing the wrong button must do nothing at all.  Taking it as

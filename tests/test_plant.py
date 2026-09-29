@@ -328,16 +328,16 @@ class TestDegenerateInputs:
         assert not math.isfinite(plant.q), "if this ever fails, the guard moved"
 
     def test_the_default_config_is_a_usable_calibration(self) -> None:
-        """The simulator's own travel is the classic mounting, with travel in it.
+        """The simulator's own travel is the ordering this bench has, with travel
+        in it.
 
-        Not the SDK's untouched defaults: those describe a reverse-mounted unit,
-        which is a valid calibration but not this plant's, and a simulator whose
-        limits are a different gripper's would exercise the console against
-        numbers no bench produces.
+        Not the SDK's untouched defaults: those are a pair of angles recorded the
+        other way round, which is a valid calibration but not this plant's, and a
+        simulator whose limits are a different gripper's would exercise the
+        console against numbers no bench produces.
         """
         cfg = PlantConfig()
         limits = Plant(cfg).limits
-        assert not limits.reversed_mount
         assert limits.direction == -1.0
         assert limits.travel_rad > 0.0
         assert limits.to_mm(limits.open_rad) == pytest.approx(limits.stroke_mm)

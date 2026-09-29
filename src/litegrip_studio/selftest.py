@@ -25,7 +25,7 @@ from .units import Limits, frame_mismatch
 
 #: The three calibrations this console has to get right, as (closed, open,
 #: file_scale, description).  The first is the SDK's shipped default pair, whose
-#: ordering reads as a reverse-mounted gripper and whose range this bench's
+#: two angles are ordered the other way round and whose range this bench's
 #: encoder readings fall outside of — the two facts the checks below turn on.
 #:
 #: ``file_scale`` is the millimetres per rad the *file* carries, which on both
@@ -34,7 +34,7 @@ from .units import Limits, frame_mismatch
 #: and the measured travel — so it is kept here as the witness of that: the
 #: travel check is defeated by putting the file's number back.
 KNOWN_CALIBRATIONS = (
-    (0.0, 1.14, 120.0 / 1.14, "SDK 默认值（反向装配读数，且在实测角度之外）"),
+    (0.0, 1.14, 120.0 / 1.14, "SDK 默认值（两个角次序相反，且在实测角度之外）"),
     (0.114, -1.491, 74.8, "出厂标定"),
     (1.775959, -0.064279, 65.21, "用户标定（示例）"),
 )
@@ -131,18 +131,19 @@ def check_units_round_trip() -> None:
             assert abs(back - mm) < 1e-6, f"{mm} mm 往返后成了 {back} mm"
 
 
-def check_the_mounting_direction_is_read_from_the_angles() -> None:
+def check_the_direction_is_read_from_the_two_angles() -> None:
     """Which way the jaws open is a fact about the assembly, and it is read from
-    the two recorded angles rather than assumed.
+    the two recorded angles rather than declared or assumed.
 
-    The SDK's formulas only describe a unit whose angle shrinks as the jaws open.
-    A gripper whose fingers are mounted the other way round has its closed stop at
-    the *smaller* angle, which is also what the SDK's uncalibrated default pair
-    looks like — so the ordering cannot decide whether a calibration is good, and
-    refusing one of the two orderings refuses a real gripper.  Two things have to
+    The SDK's formulas only describe a unit whose angle shrinks as the jaws open,
+    which is how the units here are assembled — but the console does not take
+    even that on trust: the sign comes out of the recorded pair, so a file whose
+    two angles were recorded the other way round is converted by what it says.
+    That ordering is also what the SDK's uncalibrated default pair looks like, so
+    it cannot decide whether a calibration is good either.  Two things have to
     hold instead, and both are checked here on all three datasets: every
-    conversion agrees with the recorded direction, and the calibration's range
-    contains the angles its own gripper is standing at.
+    conversion agrees with the ordering the angles have, and the calibration's
+    range contains the angles its own gripper is standing at.
     """
     for closed, open_, _file_scale, label in KNOWN_CALIBRATIONS:
         limits = _limits(closed, open_)
@@ -159,15 +160,15 @@ def check_the_mounting_direction_is_read_from_the_angles() -> None:
     uncalibrated = _limits(*KNOWN_CALIBRATIONS[0][:2])
     factory = _limits(*KNOWN_CALIBRATIONS[1][:2])
     user = _limits(*KNOWN_CALIBRATIONS[2][:2])
-    assert uncalibrated.reversed_mount, "SDK 默认值不是反向装配读数"
-    assert not factory.reversed_mount, "出厂标定被误判为反向"
-    assert not user.reversed_mount, "用户标定被误判为反向"
+    assert uncalibrated.direction == 1.0, "SDK 默认值的两个角次序被读成了别的方向"
+    assert factory.direction == -1.0, "出厂标定的方向读错了"
+    assert user.direction == -1.0, "用户标定的方向读错了"
 
     # And the answer has to come from something other than the ordering: both
-    # orderings of the same pair describe a gripper, so what refuses a file that
+    # orderings of a pair describe a gripper, so what refuses a file that
     # belongs to another one is the encoder reading.
     bench = _limits(MEASURED_CLOSED_RAD, MEASURED_OPEN_RAD)
-    assert bench.reversed_mount, "本机的两个极限不是反向装配"
+    assert bench.direction == 1.0, "本机两个极限的次序被读成了别的方向"
     for measured in (MEASURED_CLOSED_RAD, MEASURED_OPEN_RAD):
         assert frame_mismatch(uncalibrated, measured), (
             f"实测角度 {measured:.4f} rad 落在 SDK 默认值的行程里，这份零点不属于本机"
@@ -188,8 +189,8 @@ def check_the_travel_is_derived_from_the_recorded_angles() -> None:
     which is what this check exists to catch.
 
     All three are stated without a sign, and the first dataset is the one that
-    needs that: it is the reversed mounting, where every one of them holds with
-    both angles the other way up.
+    needs that: its two angles are the other way up, and every one of them holds
+    anyway.
     """
     travel = constants.DEFAULT_TRAVEL_MM
     inset = constants.SPAN_INSET_MM
@@ -373,7 +374,7 @@ def check_the_bundled_fallback_is_usable() -> None:
 
 CHECKS = (
     Check("单位换算往返一致", check_units_round_trip),
-    Check("装配方向取自记录的两个角度", check_the_mounting_direction_is_read_from_the_angles),
+    Check("方向取自记录的两个角度", check_the_direction_is_read_from_the_two_angles),
     Check("标定零点不属于本机时被拦下", check_a_calibration_from_another_frame_is_refused),
     Check("三份标定的 0 点与量程顶端正确", check_the_travel_is_derived_from_the_recorded_angles),
     Check("被控对象在阶跃下收敛且不过冲", check_plant_settles_on_a_step),

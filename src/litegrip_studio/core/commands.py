@@ -76,7 +76,7 @@ class ResetEStop(Command):
 
     A command rather than an event, because it must go through the same gate
     re-check as any other motion: releasing the latch on a gripper whose
-    calibration is missing or reversed would undo the reason it latched.
+    calibration is missing or unusable would undo the reason it latched.
     """
 
     source: str = "gui"
@@ -230,19 +230,17 @@ class StartGuidedCalibration(Command):
     The only command in the set that authorises movement without a valid
     calibration, because it is the thing that produces one.
 
-    ``reversed_mount`` says which way the jaws open, and it has to come from the
-    operator: the probe is producing a calibration precisely because there is no
-    file to read it from, and a probe that steps the wrong way records the closed
-    stop as the open one — a result that validates, saves, and drives the gripper
-    inverted.
+    It carries no mounting declaration: the probe steps the way these units
+    open, and a direction taken from the operator could be given wrongly without
+    anything downstream seeing it — a probe that steps the wrong way records the
+    closed stop as the open one, a result that validates, saves, and drives the
+    gripper inverted.
     """
 
-    reversed_mount: bool = False
     source: str = "guided"
 
     def describe(self) -> str:
-        mounting = "（反向装配）" if self.reversed_mount else ""
-        return f"开始自动标定{mounting}"
+        return "开始自动标定"
 
 
 @dataclass(frozen=True)
@@ -275,10 +273,10 @@ class RecordOpenLimit(Command):
     """The jaws are at the open extreme, and the operator says so.
 
     Two commands rather than one carrying a label, because the label is the
-    whole content of the command and the console's mounting direction comes out
-    of it: whichever point is recorded as the closed one is 0 mm.  A flow that
-    could carry the label as a string could carry it wrong, and the result would
-    be a complete, plausible, inverted calibration.
+    whole content of the command and the console's direction comes out of it:
+    whichever point is recorded as the closed one is 0 mm.  A flow that could
+    carry the label as a string could carry it wrong, and the result would be a
+    complete, plausible, inverted calibration.
     """
 
     source: str = "manual"

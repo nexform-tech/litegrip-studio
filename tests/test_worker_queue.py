@@ -482,18 +482,25 @@ class TestEvaluateGate:
         assert state is GateState.BLOCKED
         assert why
 
-    def test_a_reversed_calibration_blocks_and_says_why(self) -> None:
-        """The uncalibrated default state.  Never surmountable."""
-        reversed_ = Limits(0.0, 1.14, 74.8, 120.0)
-        info = calibration.CalibrationInfo(
-            provenance=calibration.PROVENANCE_INVALID,
-            limits=None,
-            problems=("闭合角 (0.000000 rad) 不大于张开角 (1.140000 rad)，方向与实机相反",),
+    def test_a_calibration_with_no_travel_blocks_and_says_why(self) -> None:
+        """The one shape a pair of recorded angles can have that is unusable:
+        both the same, so there is no travel to derive a scale from.
+
+        Deliberately not the other ordering of two different angles — that is a
+        good calibration for a unit whose angle grows as the jaws open, and it
+        opens the gate like any other.  The problems are taken from the
+        validator rather than written out here, so this test cannot go on
+        passing against a message the console no longer produces.
+        """
+        problems, _warnings = calibration.validate_limits(Limits(1.0, 1.0, 65.21, 120.0))
+
+        state, why = evaluate_gate(
+            self._info(calibration.PROVENANCE_INVALID, limits=None, problems=problems)
         )
-        state, why = evaluate_gate(info)
+
         assert state is GateState.BLOCKED
         assert GateState.READY != state
-        assert "方向与实机相反" in why
+        assert "行程" in why
 
     def test_the_factory_file_is_gated_until_acknowledged(self) -> None:
         info = self._info(calibration.PROVENANCE_FACTORY)
@@ -1727,19 +1734,22 @@ class TestCalibrationCommands:
         bench.send(cmd.StartGuidedCalibration())
         assert bench.loop.probe is first
 
-    def test_the_declared_mounting_reaches_the_probe(self) -> None:
-        """The page asks the operator which way the jaws open, and the answer
-        has to arrive at the probe: a worker that dropped it would run every
-        probe in the SDK's direction, which on a reverse-mounted gripper is the
-        inverted one — and the result it produces still validates and saves."""
+    def test_the_probe_opens_the_way_this_console_does(self) -> None:
+        """A guided probe runs in one direction and is told nothing about it.
+
+        There is no file to read a direction from — the probe is running because
+        there is none — so it goes toward the stop the units this console drives
+        have at the smaller angle, and the travel it measures is what the file
+        ends up describing.
+        """
         bench = Bench()
         bench.bring_up()
-        bench.send(cmd.StartGuidedCalibration(reversed_mount=True))
+        bench.send(cmd.StartGuidedCalibration())
         bench.tick()
 
         assert bench.loop.probe is not None
-        assert bench.loop.probe.reversed_mount
-        assert bench.loop.probe.direction == 1.0
+        assert bench.loop.probe.direction == -1.0
+        assert not hasattr(bench.loop.probe, "reversed_mount")
 
     def test_confirm_reaches_the_guided_probe(self) -> None:
         bench = Bench()

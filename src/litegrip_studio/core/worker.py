@@ -97,9 +97,8 @@ class GateState(str, Enum):
     Three states rather than two because the factory case is not the same kind of
     thing as an uncalibrated one.  It is *surmountable*: the numbers are
     self-consistent, they simply may belong to a different unit, and the operator
-    is the only one who can know.  A reversed, missing, or wrong-frame
-    calibration is never surmountable — no acknowledgement makes those numbers
-    describe this gripper.
+    is the only one who can know.  A missing or wrong-frame calibration is never
+    surmountable — no acknowledgement makes those numbers describe this gripper.
     """
 
     READY = "READY"
@@ -966,7 +965,7 @@ class WorkerLoop:
         elif isinstance(command, cmd.SaveCalibration):
             self._save_calibration(command.path)
         elif isinstance(command, cmd.StartGuidedCalibration):
-            self._start_probe(guided=True, reversed_mount=command.reversed_mount)
+            self._start_probe(guided=True)
         elif isinstance(command, cmd.StartManualCalibration):
             self._start_probe(guided=False)
         elif isinstance(command, cmd.ConfirmProbeLimit):
@@ -1280,7 +1279,7 @@ class WorkerLoop:
         else:
             self._log("warn", f"当前步骤不在记录{wanted}极限，已忽略这次按键")
 
-    def _start_probe(self, *, guided: bool, reversed_mount: bool = False) -> None:
+    def _start_probe(self, *, guided: bool) -> None:
         # The E-stop is checked first because it is the reason that explains the
         # others: the E-stop latches and disables the motor, so a probe attempted
         # while it is latched would otherwise be refused with "enable the motor
@@ -1306,7 +1305,7 @@ class WorkerLoop:
         stroke = constants.DEFAULT_TRAVEL_MM
         probe: GuidedCalibFSM | TwoPointCalibFSM
         if guided:
-            probe = GuidedCalibFSM(stroke, reversed_mount=reversed_mount)
+            probe = GuidedCalibFSM(stroke)
         else:
             probe = TwoPointCalibFSM(stroke)
 
