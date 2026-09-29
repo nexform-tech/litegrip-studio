@@ -973,7 +973,7 @@ class WorkerLoop:
             if isinstance(self._probe, GuidedCalibFSM):
                 self._probe.confirm()
             else:
-                self._alert("warn", "当前没有正在进行的引导式探测")
+                self._alert("warn", "当前没有正在进行的自动标定")
         elif isinstance(command, (cmd.RecordOpenLimit, cmd.RecordCloseLimit)):
             self._record_manual_limit(isinstance(command, cmd.RecordOpenLimit))
         elif isinstance(command, cmd.CancelCalibration):
@@ -1345,7 +1345,7 @@ class WorkerLoop:
                 "已进入零重力：用手把两片手指分别推到张开和闭合极限，"
                 "每到一个按一次对应的「记录」；标定结束时自动退出零重力并驻留",
             )
-        kind = "引导式" if guided else "手动两点"
+        kind = "自动" if guided else "手动两点"
         self._log("warn", f"开始{kind}标定，入口位置 {self._tele.position_rad:.6f} rad")
 
     def _tick_probe(self, tele: Telemetry, dt: float) -> FrameOut:

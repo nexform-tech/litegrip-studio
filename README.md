@@ -89,7 +89,7 @@ sudo ip link set can0 up
 ./run_litegrip_studio.sh gui
 ```
 
-**On a real gripper, run the guided calibration from the calibration page before touching the
+**On a real gripper, run 自动标定 from the calibration page before touching the
 slider.** The result is written out as soon as the probe finishes. If the fingers are mounted the
 other way round — the encoder angle growing
 as the jaws open — tick 反向装配 first, or use the manual two-point wizard, which takes the
@@ -116,7 +116,7 @@ way.
 | Control | Position slider, open all / close all, stop (hold position), zero gravity (back-drivable), speed, grasp force, grasp / let go |
 | Status | Telemetry table, temperature, faults and clearing them, link health |
 | Plots | pyqtgraph position and force plots (the force axis autoscales) |
-| Calibration | Provenance banner, file actions, guided and manual two-point wizards, the gate |
+| Calibration | Provenance banner, the 自动标定 and manual two-point wizards, the file actions, the gate |
 
 **Esc is an application-level shortcut**: it works with a spinbox focused and with a modal dialog
 open.
@@ -306,7 +306,7 @@ The liveness counter `_rx_frames` is deliberately conservative — the SDK's own
 internally, and the frame it receives is one we never see — so the window may last a few ticks
 longer than strictly necessary. Erring towards refusing motion is the only correct way to err.
 
-### Two rules for the guided probe
+### Two rules for the automatic probe
 
 The probe is the only action in the application allowed to do two things no other action may, and
 both follow from what it is for:
@@ -361,12 +361,12 @@ numerator is the travel the operator measured — see "Known limitations".
 
 ### The two-point manual probe
 
-The guided probe needs the stops to be reachable and detectable. When they are not — a stiff
+The automatic probe needs the stops to be reachable and detectable. When they are not — a stiff
 linkage, a travel that is not where the SDK expects it, a drive that will not take a probe step at
 all — the manual wizard takes over: the axis is held limp and the operator works the jaws to each
 extreme by hand. **Starting it puts the axis in zero gravity and says so**, and finishing it takes
 the axis back — on every way out, including a cancel, because the operator's hands are on the jaws
-for all of it. The guided probe is left alone: it drives the jaws into the stops itself and needs
+for all of it. The automatic probe is left alone: it drives the jaws into the stops itself and needs
 the axis to itself to do it.
 
 - **Two labelled buttons, not one.** The open extreme is recorded first, then the closed one, which
@@ -559,10 +559,10 @@ semantic-release from the commit history, the git tag is the only source of trut
 
 ## ⚠️ Known limitations
 
-- **Automatic calibration (`calibrate()`) is not offered in this version.** It has no stdin
+- **The SDK's own `calibrate()` is not offered in this version.** It has no stdin
   dependency, but it cannot be interrupted and drives the motors for about 24 seconds — better to
-  offer only the guided and two-point manual wizards than a 24-second window in which the emergency
-  stop does nothing.
+  offer only the two wizards on the calibration page (自动标定 and the two-point manual one) than a
+  24-second window in which the emergency stop does nothing.
 - The factory calibration is a **fallback, not a substitute**: used on another gripper it does not
   crash, it silently makes every millimetre wrong. The calibration page looks at the travel implied
   by the file's own scale, but only warns when it is wrong by orders of magnitude (outside

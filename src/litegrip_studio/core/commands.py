@@ -242,7 +242,7 @@ class StartGuidedCalibration(Command):
 
     def describe(self) -> str:
         mounting = "（反向装配）" if self.reversed_mount else ""
-        return f"开始引导式标定{mounting}"
+        return f"开始自动标定{mounting}"
 
 
 @dataclass(frozen=True)

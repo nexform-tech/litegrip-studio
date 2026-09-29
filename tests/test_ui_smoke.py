@@ -251,7 +251,7 @@ class TestTheWiring:
         """Connected and enabled are two signals, and the probe needs both.
 
         The page accepted them all along; what was missing was the window
-        passing the first one on, which left 引导式标定 greyed out on a console
+        passing the first one on, which left 自动标定 greyed out on a console
         that was connected and enabled — the whole of the reported bug, in one
         assertion."""
         worker.conn_state.emit(CONN_CONNECTED, "已连接")
