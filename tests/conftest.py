@@ -1,7 +1,8 @@
-"""Fixtures shared by the suite.
+"""Fixtures shared by the suite, and the home directory the suite runs in.
 
 The path bootstrap and the offscreen Qt setting live in the repository-root
-``conftest.py``, which runs before any of this.
+``conftest.py``, which runs before any of this.  The home directory is moved
+aside here, next to the fixtures that would otherwise reach the operator's.
 
 Two things make these tests runnable with no hardware and no installed SDK: the
 simulated backend is driven by an injected clock, so a 120-second thermal run
@@ -12,6 +13,12 @@ it with a plain session-scoped ``QApplication``.
 
 from __future__ import annotations
 
+import atexit
+import os
+import shutil
+import tempfile
+from pathlib import Path
+
 import pytest
 
 from litegrip_studio import constants
@@ -21,6 +28,37 @@ from litegrip_studio.core.motion import MotionFSM, MotionParams, MotionState
 from litegrip_studio.units import Limits
 
 CTRL_DT = constants.CTRL_DT
+
+# ── the home the suite runs in ─────────────────────────────────────────────
+# Everything the console owns lives under ``Path.home()``: the bench gripper's
+# calibration, the simulator's, the preferences, the log.  Most tests name the
+# file they mean, but several construct a backend with no path at all — the
+# ``Rig`` below does, and so does every test that builds a ``SimBackend`` to
+# exercise the physics — and those resolve the defaults.
+#
+# On a machine where a console has been run, resolving the defaults means
+# reading the operator's data, and a test whose numbers come out of it stops
+# being a statement about the code.  That is not hypothetical: a simulated
+# calibration saved from a console running alongside the suite was picked up
+# this way and moved the millimetres per rad far enough to fail
+# ``test_motion_fsm``, a file in which no calibration is mentioned at all.
+#
+# Pointing ``HOME`` at a directory of the suite's own closes every one of those
+# doors at once, including the SDK's ``DEFAULT_CALIB`` (gripper.py:39), and it
+# does so without stubbing the functions that compute the paths: a test may
+# still assert that a default resolves to ``~/.litegrip/...``, because that is
+# still exactly what it does.  The two environment variables are dropped for the
+# same reason — they point the same two files outside the redirect, so an
+# operator who exported one in their shell would otherwise still be testing
+# against their own gripper.
+#
+# ``OPERATOR_HOME`` is kept so a test can say what it must not be reading.
+OPERATOR_HOME = Path.home()
+TEST_HOME = Path(tempfile.mkdtemp(prefix="litegrip-studio-tests-"))
+atexit.register(shutil.rmtree, TEST_HOME, ignore_errors=True)
+os.environ["HOME"] = str(TEST_HOME)
+for _var in ("LITEGRIP_CALIB", "LITEGRIP_FACTORY_CALIB"):
+    os.environ.pop(_var, None)
 
 
 class FakeClock:

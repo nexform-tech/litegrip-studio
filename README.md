@@ -519,6 +519,13 @@ QT_QPA_PLATFORM=offscreen python3 -m pytest tests/ -q
 fixture and `PyQt5.QtTest`, under `QT_QPA_PLATFORM=offscreen`. `conftest.py` puts both the SDK and
 `src/` on `sys.path`, so the SDK does not have to be installed for the suite to run.
 
+`tests/conftest.py` also points `HOME` at a temporary directory of the session's own, so no test
+reads or writes the operator's `~/.litegrip/` — the calibration, the preferences or the log. A test
+that needs one of those files makes its own, and an exported `LITEGRIP_CALIB` /
+`LITEGRIP_FACTORY_CALIB` is dropped for the same reason. Without it, a calibration saved from a
+console running next to the suite is read by the tests that build a simulator with no path of their
+own, and their numbers move with it.
+
 The `--selftest` mode runs pure logic only (unit conversions, calibration direction checks,
 wrong-zero rejection, plant convergence, arrival, torque limits, emergency-stop disable) and
 **imports no Qt at all** — the machine that needs it most is the one where Qt is broken. A
