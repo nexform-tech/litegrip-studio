@@ -87,9 +87,13 @@ MANUAL_ACTIVE_PHASES = frozenset(
 #: waits for the Enter key, which tells the operator nothing about what they are
 #: agreeing to.
 CONFIRM_LABELS = {
-    GuidedPhase.OPEN_PROBE.value: "✔ 已到张开极限，确认",
-    GuidedPhase.CLOSE_PROBE.value: "✔ 已到闭合极限，确认",
+    GuidedPhase.OPEN_PROBE.value: "已到张开极限，确认",
+    GuidedPhase.CLOSE_PROBE.value: "已到闭合极限，确认",
 }
+
+#: What the confirmation button says between probes, when there is no limit to
+#: name.
+CONFIRM_DEFAULT = "已到极限，确认"
 
 PHASE_LABELS = {
     GuidedPhase.IDLE.value: "未开始",
@@ -137,6 +141,12 @@ class CalibrationPage(QWidget):
         self._phase = GuidedPhase.IDLE.value
         self._connected = False
         self._busy = False
+        self._gate: GateState | None = None
+        self._gate_reason = ""
+        self._frame: TelemetryFrame | None = None
+        #: The progress note as plain text, kept because ``_note`` holds it as
+        #: markup and a repaint cannot read the plain words back out of it.
+        self._note_text = ""
 
         self._banner = Banner()
         self._file_label = QLabel("—")
@@ -181,7 +191,7 @@ class CalibrationPage(QWidget):
         self._note.setTextFormat(Qt.RichText)
         self._note.setWordWrap(True)
         self._position = QLabel("—")
-        self._position.setStyleSheet(f"font-family: {theme.MONO_FAMILY};")
+        self._position.setProperty("role", "readout")
 
         self._guided_start = QPushButton("开始自动标定")
         self._guided_confirm = QPushButton(CONFIRM_LABELS[GuidedPhase.OPEN_PROBE.value])
@@ -195,6 +205,7 @@ class CalibrationPage(QWidget):
         self._wire()
         self._load_settings()
         self._refresh()
+        theme.subscribe(self.restyle)
 
     # ── construction ────────────────────────────────────────────────────────
     def _build(self) -> None:
@@ -224,19 +235,19 @@ class CalibrationPage(QWidget):
         self._save.setProperty("accent", True)
 
         probes = QHBoxLayout()
-        probes.setSpacing(10)
+        probes.setSpacing(theme.GAP)
         probes.addWidget(self._build_guided_box(), 1)
         probes.addWidget(self._build_manual_box(), 1)
 
         current = QHBoxLayout()
-        current.setSpacing(10)
+        current.setSpacing(theme.GAP)
         current.addWidget(self._build_table_box(), 1)
         current.addWidget(self._build_file_box(), 1)
 
         content = QWidget()
         inner = QVBoxLayout(content)
-        inner.setContentsMargins(10, 10, 10, 10)
-        inner.setSpacing(10)
+        inner.setContentsMargins(0, theme.GAP, 0, theme.GAP + 4)
+        inner.setSpacing(theme.GAP)
         inner.addWidget(self._banner)
         inner.addLayout(probes)
         inner.addLayout(current)
@@ -261,7 +272,9 @@ class CalibrationPage(QWidget):
         layout.addWidget(scroll, 1)
         layout.addWidget(rule)
         layout.addWidget(self._build_progress_strip())
-        self._note.setVisible(False)
+        # Paint the idle state once, so the strip opens saying "未开始" with the
+        # live reading rather than as a blank label above an empty bar.
+        self._render_progress()
 
     def _build_table_box(self) -> QGroupBox:
         """What the calibration in force actually is."""
@@ -273,7 +286,7 @@ class CalibrationPage(QWidget):
     def _build_file_box(self) -> QGroupBox:
         """Where that calibration came from, and how to change it."""
         files = QGridLayout()
-        files.setSpacing(6)
+        files.setSpacing(8)
         files.addWidget(self._reload, 0, 0)
         files.addWidget(self._load, 0, 1)
         files.addWidget(self._save, 0, 2)
@@ -290,7 +303,7 @@ class CalibrationPage(QWidget):
     def _build_guided_box(self) -> QGroupBox:
         """The probe that finds both hard stops by itself."""
         buttons = QHBoxLayout()
-        buttons.setSpacing(6)
+        buttons.setSpacing(8)
         buttons.addWidget(self._guided_start)
         buttons.addWidget(self._guided_confirm)
         buttons.addWidget(self._guided_cancel)
@@ -324,13 +337,13 @@ class CalibrationPage(QWidget):
         is one that can save an inverted calibration that looks perfect.
         """
         start_row = QHBoxLayout()
-        start_row.setSpacing(6)
+        start_row.setSpacing(8)
         start_row.addWidget(self._manual_start)
         start_row.addWidget(self._manual_cancel)
         start_row.addStretch(1)
 
         record_row = QHBoxLayout()
-        record_row.setSpacing(6)
+        record_row.setSpacing(8)
         record_row.addWidget(self._manual_open)
         record_row.addWidget(self._manual_close)
         record_row.addStretch(1)
@@ -380,7 +393,7 @@ class CalibrationPage(QWidget):
         """
         strip = QWidget()
         layout = QVBoxLayout(strip)
-        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setContentsMargins(0, 8, 0, 8)
         layout.setSpacing(6)
 
         head = QHBoxLayout()
@@ -426,17 +439,42 @@ class CalibrationPage(QWidget):
         self._refresh()
 
     def set_gate(self, state: GateState, reason: str) -> None:
-        if state is GateState.READY:
+        self._gate = state
+        self._gate_reason = reason
+        self._render_gate()
+        self._refresh()
+
+    def _render_gate(self) -> None:
+        """Paint the gate line: ready in the measured green, the two closed
+        states in the colour of how bad they are."""
+        if self._gate is None:
+            return
+        if self._gate is GateState.READY:
             self._gate_label.setText(
-                f'<span style="color:{theme.OK}">运动闸门：就绪</span>'
+                f'<span style="color:{theme.OK};font-weight:600">运动闸门：就绪</span>'
             )
             return
-        colour = theme.ERROR if state is GateState.BLOCKED else theme.WARN
+        colour = theme.ERROR if self._gate is GateState.BLOCKED else theme.WARN
         self._gate_label.setText(
-            f'<span style="color:{colour}">运动闸门：'
-            f'{"已阻断" if state is GateState.BLOCKED else "待确认"}'
-            f"</span><br><span style=\"color:{theme.TEXT_MUTED}\">{reason}</span>"
+            f'<span style="color:{colour};font-weight:600">运动闸门：'
+            f'{"已阻断" if self._gate is GateState.BLOCKED else "待确认"}'
+            f"</span><br><span style=\"color:{theme.TEXT_MUTED}\">{self._gate_reason}</span>"
         )
+
+    def restyle(self) -> None:
+        """Repaint this page's coloured markup in the current palette.
+
+        Four labels carry a colour inside their text — the gate line, the phase,
+        the provenance line and the live reading — and the provenance banner
+        repaints itself.  The two probe summaries and the detail table are plain
+        text with a role, so the stylesheet reaches them on its own.
+        """
+        self._render_gate()
+        if self._info is not None:
+            self._render_banner(self._info)
+        if self._frame is not None:
+            self.update_frame(self._frame)
+        self._render_progress()
         self._refresh()
 
     def set_conn_state(self, state: str, detail: str = "") -> None:
@@ -455,6 +493,7 @@ class CalibrationPage(QWidget):
         from: the mm reading is computed with the very numbers under suspicion,
         while the angle is what the encoder reports.
         """
+        self._frame = frame
         measured = UNKNOWN if frame.position_mm is None else f"{frame.position_mm:>7.2f} mm"
         angle = (
             UNKNOWN
@@ -471,23 +510,38 @@ class CalibrationPage(QWidget):
     def set_progress(self, phase: str, progress: float, note: str = "") -> None:
         """The worker's ``calib_progress`` signal."""
         self._phase = phase
+        self._note_text = note
         self._progress.setValue(int(max(0.0, min(1.0, progress)) * 100))
-        label = PHASE_LABELS.get(phase, phase)
+        self._render_progress()
+        self._refresh()
+
+    def _render_progress(self) -> None:
+        """Draw the probe strip for whatever phase is in force.
+
+        Split out from :meth:`set_progress` so that a theme change can repaint
+        the strip without also re-setting a progress the worker owns.
+        """
+        label = PHASE_LABELS.get(self._phase, self._phase)
         colour = {
             GuidedPhase.DONE.value: theme.OK,
             TwoPointPhase.DONE.value: theme.OK,
             GuidedPhase.FAILED.value: theme.ERROR,
             TwoPointPhase.FAILED.value: theme.ERROR,
-        }.get(phase, theme.TEXT)
+        }.get(self._phase, theme.TEXT)
         self._phase_label.setText(
-            f'<span style="color:{colour}">{label}</span>'
+            f'<span style="color:{colour};font-weight:600">{label}</span>'
         )
-        self._note.setText(note)
+        # An empty bar is a claim that something is nought per cent done, and
+        # before any probe has run there is nothing for that claim to be about.
+        # It sat across the page as an unlabelled grey slab that a reviewer had
+        # to ask about; with no probe running, the strip carries the live
+        # reading and nothing else.
+        self._progress.setVisible(self._phase != GuidedPhase.IDLE.value)
+        self._note.setText(self._note_text)
         # An empty note is a blank line reserved at the bottom of a strip whose
         # whole purpose is to stay small, so it is only given room when there is
         # something in it to read.
-        self._note.setVisible(bool(note))
-        self._refresh()
+        self._note.setVisible(bool(self._note_text))
 
     # ── rendering ───────────────────────────────────────────────────────────
     def _rebuild_table(self, info: CalibrationInfo | None) -> None:
@@ -522,12 +576,14 @@ class CalibrationPage(QWidget):
 
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignLeft)
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(6)
         for key, value in rows:
             value_label = QLabel(value)
             value_label.setTextFormat(Qt.PlainText)
             value_label.setWordWrap(True)
             if mono:
-                value_label.setStyleSheet(f"font-family: {theme.MONO_FAMILY};")
+                value_label.setProperty("role", "mono")
             form.addRow(QLabel(key), value_label)
         target.addLayout(form)
         return form
@@ -578,7 +634,7 @@ class CalibrationPage(QWidget):
         self._guided_cancel.setEnabled(guided_running)
         self._guided_confirm.setEnabled(guided_running and self._phase in CONFIRM_LABELS)
         self._guided_confirm.setText(
-            CONFIRM_LABELS.get(self._phase, "✔ 已到极限，确认")
+            CONFIRM_LABELS.get(self._phase, CONFIRM_DEFAULT)
         )
         self._manual_start.setEnabled(ready and not any_running)
         self._manual_cancel.setEnabled(manual_running)

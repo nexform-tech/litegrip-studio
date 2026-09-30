@@ -76,6 +76,8 @@ class StatusPage(QWidget):
         super().__init__(parent)
         self._values: dict[str, QLabel] = {}
         self._frame: TelemetryFrame | None = None
+        self._gate: GateState | None = None
+        self._gate_reason = ""
 
         # Only the fault drives this one.  Alerts from the worker go to the
         # window's banner: a note painted here would be erased by the next
@@ -89,35 +91,55 @@ class StatusPage(QWidget):
         health = self._panel("链路与回路", _HEALTH_ROWS)
 
         columns = QHBoxLayout()
-        columns.setSpacing(10)
+        columns.setSpacing(theme.GAP)
         columns.addWidget(readings, 1)
         columns.addWidget(health, 1)
 
         state = QGroupBox("连接与故障")
-        state_layout = QVBoxLayout(state)
+        state_layout = QHBoxLayout(state)
+        state_layout.setSpacing(8)
         state_layout.addWidget(self._link_dot)
         state_layout.addWidget(self._fault_dot)
+        state_layout.addStretch(1)
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(10)
+        layout.setSpacing(theme.GAP)
+        layout.setContentsMargins(*theme.PAGE_MARGINS)
         layout.addWidget(self._gate_banner)
         layout.addWidget(self._fault_banner)
         layout.addLayout(columns)
         layout.addWidget(state)
         layout.addStretch(1)
+        theme.subscribe(self.restyle)
 
     def _panel(self, title: str, rows) -> QGroupBox:
         box = QGroupBox(title)
         form = QFormLayout(box)
         form.setLabelAlignment(Qt.AlignLeft)
         form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(7)
         for label, _render in rows:
+            key = QLabel(label)
+            key.setProperty("role", "field")
             value = QLabel("—")
             value.setTextFormat(Qt.RichText)
-            value.setStyleSheet(f"font-family: {theme.MONO_FAMILY};")
             self._values[label] = value
-            form.addRow(QLabel(label), value)
+            form.addRow(key, value)
         return box
+
+    def restyle(self) -> None:
+        """Repaint everything this page holds in the current palette.
+
+        The values are written as an inline stylesheet because the colour is a
+        *decision made per frame* — a temperature past its threshold is red —
+        and that decision is re-made here against the new palette.  The banners
+        and the chips repaint themselves, so they are not re-driven here.
+        """
+        if self._frame is not None:
+            self.update_frame(self._frame)
+        if self._gate is not None:
+            self.set_gate(self._gate, self._gate_reason)
 
     # ── slots ───────────────────────────────────────────────────────────────
     def update_frame(self, frame: TelemetryFrame) -> None:
@@ -127,7 +149,10 @@ class StatusPage(QWidget):
             self._values[label].setText(text)
             colour = self._colour(label, frame)
             self._values[label].setStyleSheet(
-                f"font-family: {theme.MONO_FAMILY}; color: {colour};"
+                f"font-family: {theme.MONO_FAMILY};"
+                f" font-size: {theme.FONT_PX}px;"
+                f" font-weight: 600;"
+                f" color: {colour};"
             )
 
         state, text = link_state(frame)
@@ -135,6 +160,8 @@ class StatusPage(QWidget):
         self._refresh_fault(frame)
 
     def set_gate(self, state: GateState, reason: str) -> None:
+        self._gate = state
+        self._gate_reason = reason
         if state is GateState.READY:
             self._gate_banner.set(None)
             return

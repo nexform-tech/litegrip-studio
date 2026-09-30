@@ -601,6 +601,27 @@ class TestTheProgress:
 
         assert page._progress.value() == 40
 
+    def test_an_empty_bar_is_not_shown_before_any_probe_has_run(self, page) -> None:
+        """An empty bar is a claim that something is nought per cent done, and
+        before a probe runs there is nothing for that claim to be about.  It sat
+        across the page as an unlabelled grey slab until a reviewer asked what it
+        was — which is the test: nobody should have to ask."""
+        assert not page._progress.isVisibleTo(page)
+        assert page._phase_label.text(), "the strip still says what state it is in"
+
+    def test_the_bar_comes_back_when_a_probe_runs(self, page) -> None:
+        page.set_progress(GuidedPhase.OPEN_PROBE.value, 0.1)
+
+        assert page._progress.isVisibleTo(page)
+
+    def test_a_finished_probe_leaves_its_bar_up(self, page) -> None:
+        """100% is worth seeing: it is how the operator knows the probe finished
+        rather than stopped."""
+        page.set_progress(GuidedPhase.DONE.value, 1.0)
+
+        assert page._progress.isVisibleTo(page)
+        assert page._progress.value() == 100
+
     def test_the_phase_is_named_in_words(self, page) -> None:
         page.set_progress(GuidedPhase.CLOSE_PROBE.value, 0.6)
 

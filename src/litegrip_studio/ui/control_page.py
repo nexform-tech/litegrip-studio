@@ -61,6 +61,8 @@ class ControlPage(QWidget):
         self._settings = settings
         self._echo = ECHO_FRAMES
         self._gate = GateState.BLOCKED
+        self._frame: TelemetryFrame | None = None
+        self._note = ""
 
         self.slider = StrokeSlider()
         self.readout = PositionReadout()
@@ -88,6 +90,7 @@ class ControlPage(QWidget):
         # too — a slider that accepts a drag before the console knows whether
         # there is a calibration is a slider that can move an uncalibrated motor.
         self.set_gate(GateState.BLOCKED, "尚未收到标定信息")
+        theme.subscribe(self.restyle)
 
     # ── construction ────────────────────────────────────────────────────────
     def _build(self) -> None:
@@ -106,15 +109,21 @@ class ControlPage(QWidget):
         # is the calibration's, which arrives after this runs.
         for button in (self._open, self._close):
             button.setMinimumWidth(96)
-            button.setMinimumHeight(30)
+            button.setMinimumHeight(32)
+        # Every button on the page is the same height, so the three columns under
+        # the bar read as one row of controls rather than as three stacks that
+        # happen to sit side by side.
+        for button in (self._stop, self._release, self._grasp, self._back_off):
+            button.setMinimumHeight(32)
 
         actions = QVBoxLayout()
-        actions.setSpacing(6)
+        actions.setSpacing(8)
         actions.addWidget(self._stop)
         actions.addWidget(self._release)
 
         action_box = QGroupBox("动作")
         action_layout = QVBoxLayout(action_box)
+        action_layout.setSpacing(8)
         action_layout.addLayout(actions)
         action_layout.addWidget(self._state_label)
         action_layout.addStretch(1)
@@ -125,9 +134,21 @@ class ControlPage(QWidget):
         self._speed.setToolTip(
             f"移动速度 {constants.SPEED_MIN_MM_S:.0f}–{constants.SPEED_MAX_MM_S:.0f} mm/s"
         )
+        speed_ends = QHBoxLayout()
+        speed_ends.setContentsMargins(0, 0, 0, 0)
+        low = QLabel(f"{constants.SPEED_MIN_MM_S:.0f}")
+        low.setProperty("role", "caption")
+        high = QLabel(f"{constants.SPEED_MAX_MM_S:.0f} mm/s")
+        high.setProperty("role", "caption")
+        speed_ends.addWidget(low, 0)
+        speed_ends.addStretch(1)
+        speed_ends.addWidget(high, 0)
+
         speed_box = QGroupBox("速度")
         speed_layout = QVBoxLayout(speed_box)
+        speed_layout.setSpacing(8)
         speed_layout.addWidget(self._speed)
+        speed_layout.addLayout(speed_ends)
         speed_layout.addWidget(self._speed_value)
         speed_layout.addStretch(1)
 
@@ -141,6 +162,7 @@ class ControlPage(QWidget):
         )
         force_box = QGroupBox("夹持力")
         force_layout = QVBoxLayout(force_box)
+        force_layout.setSpacing(8)
         force_layout.addWidget(self._force)
         force_layout.addWidget(self._grasp)
         # 放开 goes directly under 夹取 because the two are one gesture: the
@@ -152,7 +174,7 @@ class ControlPage(QWidget):
         force_layout.addStretch(1)
 
         lower = QHBoxLayout()
-        lower.setSpacing(10)
+        lower.setSpacing(theme.GAP)
         lower.addWidget(action_box, 2)
         lower.addWidget(speed_box, 2)
         lower.addWidget(force_box, 1)
@@ -164,18 +186,20 @@ class ControlPage(QWidget):
         )
 
         position = QHBoxLayout()
-        position.setSpacing(12)
+        position.setSpacing(14)
         position.addWidget(self._close)
         position.addWidget(self.slider, 1)
         position.addWidget(self.readout, 0)
         position.addWidget(self._open)
         position_box = QGroupBox("位置（拖动即控制，松手执行）")
         position_layout = QVBoxLayout(position_box)
+        position_layout.setSpacing(8)
         position_layout.addLayout(position)
         position_layout.addWidget(self._live)
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(10)
+        layout.setSpacing(theme.GAP)
+        layout.setContentsMargins(*theme.PAGE_MARGINS)
         layout.addWidget(position_box)
         layout.addLayout(lower)
         layout.addStretch(1)
@@ -264,6 +288,8 @@ class ControlPage(QWidget):
         # operator reaches for when there is no travel to command.
 
     def update_frame(self, frame: TelemetryFrame) -> None:
+        self._frame = frame
+        self._note = ""
         self._echo += 1
         # Ownership is settled *before* the measurement is handed to the slider,
         # so a frame that releases the handle moves it in the same frame rather
@@ -273,10 +299,36 @@ class ControlPage(QWidget):
         self.readout.update_position(
             frame.position_mm, frame.cmd_mm, grasping=frame.grasped
         )
+        self._render_state()
+
+    def _render_state(self) -> None:
+        """Say what the axis is doing, in the colour that matches the state."""
+        if self._note:
+            self._state_label.setText(
+                f'<span style="color:{theme.WARN}">{self._note}</span>'
+            )
+            return
+        frame = self._frame
+        if frame is None:
+            self._state_label.clear()
+            return
         self._state_label.setText(
             f'<span style="color:{theme.TEXT_MUTED}">状态 </span>'
-            f'<span style="color:{self._state_colour(frame)}">{frame.motion_state}</span>'
+            f'<span style="color:{self._state_colour(frame)};font-weight:600">'
+            f"{frame.motion_state}</span>"
         )
+
+    def restyle(self) -> None:
+        """Repaint this page's own markup in the current palette.
+
+        The widgets are styled by the application stylesheet; what has to be
+        re-rendered here is the handful of strings that carry a colour inside
+        them, plus the readout, which holds the last frame's numbers.
+        """
+        self.readout.restyle()
+        self._render_state()
+        self._render_speed(self._speed.value())
+        self._render_force(self._force.value())
 
     def _track(self, frame: TelemetryFrame) -> None:
         """Decide who owns the handle on this frame — see the module docstring."""
@@ -309,9 +361,8 @@ class ControlPage(QWidget):
 
     def set_status_note(self, text: str) -> None:
         """A line for something the page should say — a UV cap, typically."""
-        self._state_label.setText(
-            f'<span style="color:{theme.WARN}">{text}</span>'
-        )
+        self._note = text
+        self._render_state()
 
     # ── issuing commands ────────────────────────────────────────────────────
     def _on_drag_committed(self, mm: float) -> None:
@@ -351,18 +402,44 @@ class ControlPage(QWidget):
     # ── speed and force ─────────────────────────────────────────────────────
     def _on_speed_changed(self, value: int) -> None:
         self._submit(cmd.SetSpeed(speed_mm_s=float(value)))
+        self._render_speed(value)
+
+    def _render_speed(self, value: int) -> None:
+        """The speed in force, named.
+
+        The card is titled 速度, but so is the row of range ends above this —
+        "5" and "150 mm/s" — and an unlabelled "50 mm/s" sitting under them is
+        the third millimetre-per-second figure in the same box with nothing to
+        say which of the three the machine is actually running at.  The
+        position panel already names its readings the same way (实际位置,
+        目标, 误差); this is that convention applied where it was missing.
+        """
         self._speed_value.setText(
-            f'<span style="color:{theme.TEXT};font-family:{theme.MONO_FAMILY}">'
-            f"{value:>3d} mm/s</span>"
+            f'<span style="color:{theme.TEXT_MUTED}">当前速度：</span>'
+            f'<span style="color:{theme.TEXT};font-family:{theme.MONO_FAMILY};'
+            f'font-size:{theme.FONT_PX + 1}px;font-weight:600">'
+            # No width padding: the caption ahead of it fixes where the number
+            # starts, and the padded form now reads as a gap after the colon.
+            f"{value} mm/s</span>"
         )
 
     def _on_force_changed(self, value: float) -> None:
         self._submit(cmd.SetForce(force_n=float(value)))
+        self._render_force(value)
+
+    def _render_force(self, value: float) -> None:
+        """Colour the force field by how close it is to the mechanism's rating.
+
+        Separated from :meth:`_on_force_changed` because the two have different
+        callers: a value the operator set is a command, and a repaint after a
+        theme change is not.  Sending a ``SetForce`` from the repaint would mean
+        switching the console to light mode re-commanded the gripper.
+        """
         self._grasp.setText(f"夹取 {value:.1f} N")
         if value >= constants.FORCE_MAX_N:
-            self._force.setStyleSheet(f"color: {theme.ERROR};")
+            self._force.setStyleSheet(f"color: {theme.ERROR}; font-weight: 600;")
         elif value > constants.FORCE_SOFT_WARN_N:
-            self._force.setStyleSheet(f"color: {theme.WARN};")
+            self._force.setStyleSheet(f"color: {theme.WARN}; font-weight: 600;")
         else:
             self._force.setStyleSheet("")
 

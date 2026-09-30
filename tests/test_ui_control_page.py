@@ -421,6 +421,17 @@ class TestSpeedAndForce:
 
         assert page.recorder.of(cmd.SetSpeed)[-1].speed_mm_s == pytest.approx(77.0)
 
+    def test_the_speed_in_force_is_named(self, page) -> None:
+        """The card holds three millimetre-per-second figures — the two range
+        ends and this one — and only this one is what the machine is running
+        at.  Unlabelled it was the third number in the box with nothing to say
+        which of the three it was."""
+        page._speed.setValue(77)
+
+        text = page._speed_value.text()
+        assert "当前速度" in text
+        assert "77 mm/s" in text
+
     def test_the_force_spinbox_commands_the_worker(self, page) -> None:
         page.recorder.commands.clear()
         page._force.setValue(18.0)

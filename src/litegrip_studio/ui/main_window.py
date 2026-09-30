@@ -28,6 +28,13 @@ logged by the worker at debug level with its source, and the file gets
 everything; the dock shows the same stream with debug hidden behind a checkbox
 and state transitions interleaved, so that what is on screen after an unexpected
 movement is enough to reconstruct what was asked for and when.
+
+*The theme switch* is here for the same reason the E-stop is: it changes how
+everything looks, so it belongs where it is reachable from every page, and it
+belongs to the window rather than to a page that would then have to be revisited
+to change it back.  The window is also the one object that outlives every page,
+which makes it the natural place to hold the subscription that tells them the
+palette moved.
 """
 
 from __future__ import annotations
@@ -37,14 +44,18 @@ import logging
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
+    QApplication,
     QCheckBox,
     QDockWidget,
+    QFrame,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QPlainTextEdit,
     QPushButton,
     QShortcut,
+    QSizePolicy,
     QStatusBar,
     QTabWidget,
     QVBoxLayout,
@@ -62,7 +73,7 @@ from .connect_bar import ConnectBar
 from .control_page import ControlPage
 from .plots_page import PlotsPage
 from .status_page import StatusPage
-from .widgets import UNKNOWN, Banner
+from .widgets import UNKNOWN, Banner, ThemeSwitch
 
 #: Lines kept in the dock.  The file has everything; this is what a person can
 #: scroll through after something surprising happened.
@@ -80,6 +91,7 @@ class MainWindow(QMainWindow):
         self.worker = worker
         self._settings = settings
         self._estopped = False
+        self._gate: GateState | None = None
         self._lines: list[tuple[str, str]] = []
 
         self.tabs = QTabWidget()
@@ -94,37 +106,72 @@ class MainWindow(QMainWindow):
         self.alert_banner = Banner()
         self.estop_banner = Banner()
         self.estop_button = QPushButton("急停 (Esc)")
+        self.theme_switch = ThemeSwitch()
         self._log = QPlainTextEdit()
         self._log_dock = QDockWidget("日志")
         self._show_debug = QCheckBox("显示调试信息")
         self._status_position = QLabel("—")
         self._status_gate = QLabel("—")
+        self._status_message = QLabel("")
 
         self._build()
         self._wire()
         self._restore()
+        self.restyle()
+        theme.subscribe(self.restyle)
 
     # ── construction ────────────────────────────────────────────────────────
     def _build(self) -> None:
         self.estop_button.setProperty("danger", True)
+        # The type size comes from the stylesheet, under this role; the size
+        # policy is here because a QPushButton is vertically Fixed by default
+        # and would ignore the card's stretch, leaving the button its natural
+        # height in a mostly empty panel.
+        self.estop_button.setProperty("role", "estop")
+        self.estop_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.estop_button.setMinimumHeight(52)
         self.estop_button.setMinimumWidth(150)
         self.estop_button.setToolTip("立即零力矩并失能，闩锁；复位前拒绝一切运动")
 
+        # The E-stop gets a card of its own, filling the height of the row.
+        #
+        # It used to float beside the connection card as a lone button, and it
+        # read as an afterthought: two controls centred against a card four
+        # times their height, with dead space above and below.  A card makes the
+        # right-hand end of the header deliberate, and a tall target is the
+        # right shape for the one control that has to be hit without looking.
+        safety = QGroupBox("安全")
+        safety_layout = QVBoxLayout(safety)
+        safety_layout.setSpacing(theme.GAP)
+        safety_layout.addWidget(self.estop_button, 1)
+
         top = QHBoxLayout()
-        top.setSpacing(10)
+        top.setSpacing(theme.GAP)
         top.addWidget(self.connect_bar, 1)
-        top.addWidget(self.estop_button, 0)
+        top.addWidget(safety, 0)
 
         for page, name in zip(
             (self.control_page, self.status_page, self.plots_page, self.calibration_page),
             TAB_NAMES,
         ):
             self.tabs.addTab(page, name)
+        # Document mode drops the pane's bevel, which is the difference between
+        # a tab strip and a segmented control; the base line is the groove a
+        # classic tab bar is seated in, and a segmented control has no groove.
+        self.tabs.setDocumentMode(True)
+        self.tabs.tabBar().setDrawBase(False)
 
         central = QWidget()
+        central.setObjectName("Shell")
         layout = QVBoxLayout(central)
-        layout.setSpacing(8)
+        # The gutter belongs to the *window*, not to the central widget: a
+        # QDockWidget is a child of the window rather than of the central
+        # widget, so a gutter set here inset every card and the log panel did
+        # not follow — the log's frame started 10px left of everything else.
+        # One gutter, in one place, is what keeps the header, the pages and the
+        # dock on the same two vertical lines.
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.GAP)
         layout.addLayout(top)
         layout.addWidget(self.estop_banner)
         layout.addWidget(self.alert_banner)
@@ -133,26 +180,105 @@ class MainWindow(QMainWindow):
 
         self._log.setReadOnly(True)
         self._log.setMaximumBlockCount(LOG_LINES)
-        self._log.setStyleSheet(f"font-family: {theme.MONO_FAMILY}; font-size: 11px;")
-        dock_body = QWidget()
+        # The header and the body are two widgets, and the card they belong to
+        # is the pair of them: QFrame rather than QWidget because a plain
+        # QWidget does not paint a stylesheet background unless it is told to,
+        # and these two carry the panel the log sits on.
+        dock_body = QFrame()
+        dock_body.setObjectName("LogBody")
+        dock_body.setFrameShape(QFrame.NoFrame)
         dock_layout = QVBoxLayout(dock_body)
-        dock_layout.setContentsMargins(4, 4, 4, 4)
-        dock_layout.addWidget(self._show_debug)
+        dock_layout.setContentsMargins(theme.PAD + 2, theme.PAD, theme.PAD + 2, theme.PAD + 2)
         dock_layout.addWidget(self._log, 1)
         self._log_dock.setWidget(dock_body)
+        self._log_dock.setTitleBarWidget(self._build_log_title())
         self._log_dock.setFeatures(
             QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable
         )
         self.addDockWidget(Qt.BottomDockWidgetArea, self._log_dock)
+        self.setContentsMargins(theme.GAP, theme.GAP, theme.GAP, theme.GAP)
+        # The dock opens shallow.  Its default height comes from the text
+        # area's size hint, which is a good deal taller than a log usually has
+        # anything to say — and every pixel of it comes off the calibration
+        # page, which is the one page that is taller than the window.
+        self.resizeDocks([self._log_dock], [150], Qt.Vertical)
 
+        # A status bar is the only thing QMainWindow puts *below* the dock area,
+        # so the row lives in one — but as a single expanding permanent widget,
+        # not through addWidget.  Everything the status bar offers for content
+        # (addWidget, showMessage) is pinned to its left end, and the left end is
+        # exactly where this console does not want the message.
         bar = QStatusBar()
-        bar.addPermanentWidget(QLabel("位置"))
-        bar.addPermanentWidget(self._status_position)
-        bar.addPermanentWidget(QLabel("闸门"))
-        bar.addPermanentWidget(self._status_gate)
+        bar.setSizeGripEnabled(False)
+        bar.addPermanentWidget(self._build_state_line(), 1)
         self.setStatusBar(bar)
-        self.resize(1000, 720)
+        self.resize(1120, 780)
         self.setWindowTitle("LiteGrip 夹爪控制台")
+
+    def _build_state_line(self) -> QWidget:
+        """The row along the bottom: the switch, the readouts, then the message.
+
+        Inside a status bar, but not *of* one: the message is a label of this
+        row's own rather than ``QStatusBar.showMessage``, because everything the
+        status bar lays out for content is pinned to its left end, and the left
+        end is exactly where this console does not want the message.  What the
+        operator set and what the machine is doing come first; "正在使能…" goes
+        after them.
+        """
+        def field(caption: str) -> QLabel:
+            label = QLabel(caption)
+            label.setProperty("role", "field")
+            return label
+
+        self._status_message.setProperty("role", "field")
+
+        line = QWidget()
+        line.setObjectName("StateLine")
+        row = QHBoxLayout(line)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(theme.GAP)
+        # The switch carries no caption.  Its two names are the label — that is
+        # the whole reason it is a pair of pills and not one button — and a
+        # "主题" in front of 深色/浅色 only says a third time what the two of
+        # them already say.
+        row.addWidget(self.theme_switch)
+        for caption, widget in (
+            ("位置", self._status_position),
+            ("闸门", self._status_gate),
+        ):
+            row.addWidget(field(caption))
+            row.addWidget(widget)
+        row.addStretch(1)
+        row.addWidget(self._status_message)
+        self.theme_switch.chosen.connect(self._on_choose_theme)
+        return line
+
+    def _build_log_title(self) -> QWidget:
+        """The log dock's header: its name, and the filter that belongs to it.
+
+        A custom title bar rather than the default one, because the default is
+        drawn by the style and cannot hold a widget.  That is why the debug
+        filter used to sit on a row of its own *inside* the body, where it
+        started 10px to the left of the title above it — the title bar carries
+        its own padding and the body did not.  A control about the log belongs
+        on the log's header; putting it there removes both the orphan row and
+        the misalignment that made it look like an overflow.
+        """
+        bar = QFrame()
+        bar.setObjectName("LogTitle")
+        bar.setFrameShape(QFrame.NoFrame)
+        layout = QHBoxLayout(bar)
+        # The same inset as the body below it, so the header's label starts in
+        # the column the log panel starts in.  The vertical room is what makes
+        # it read as a header rather than as a caption.
+        layout.setContentsMargins(theme.PAD + 2, theme.PAD, theme.PAD + 2, theme.PAD)
+        layout.setSpacing(theme.GAP)
+        caption = QLabel("日志")
+        caption.setProperty("role", "title")
+        layout.addWidget(caption)
+        layout.addStretch(1)
+        layout.addWidget(self._show_debug)
+        return bar
 
     def _wire(self) -> None:
         worker = self.worker
@@ -200,6 +326,35 @@ class MainWindow(QMainWindow):
         description = getattr(self.worker.backend, "describe", None)
         if callable(description):
             self.connect_bar.set_backend_description(description())
+
+    # ── the theme ───────────────────────────────────────────────────────────
+    def _on_choose_theme(self, name: str) -> None:
+        """Switch the palette — on the application as well as in the tokens.
+
+        ``app=`` is what pushes the new stylesheet and palette out to every
+        widget; without it the tokens move and only the widgets that repaint
+        themselves follow.  Nothing else happens here: this window is a
+        subscriber, so :meth:`restyle` puts the switch's own highlight, the
+        log's colours and the status bar's gate word right on its own.
+        """
+        theme.set_theme(name, app=QApplication.instance())
+        if self._settings is not None:
+            self._settings.theme = name
+
+    def restyle(self) -> None:
+        """Re-render what a stylesheet cannot reach.
+
+        The log is written as markup with a colour per line and the status bar's
+        gate label with the colour of the gate, so both are rebuilt here from
+        what they already hold rather than from the worker.
+        """
+        self.theme_switch.set_current(theme.current_theme())
+        self._log.setStyleSheet(
+            f"font-family: {theme.MONO_FAMILY}; font-size: {theme.FONT_SMALL_PX}px;"
+        )
+        self._replay_log()
+        if self._gate is not None:
+            self._render_gate(self._gate)
 
     # ── slots ───────────────────────────────────────────────────────────────
     def _on_telemetry(self, frame: TelemetryFrame) -> None:
@@ -260,13 +415,19 @@ class MainWindow(QMainWindow):
         self.control_page.set_gate(gate, reason)
         self.status_page.set_gate(gate, reason)
         self.calibration_page.set_gate(gate, reason)
+        self._gate = gate
+        self._render_gate(gate)
+
+    def _render_gate(self, gate: GateState) -> None:
+        """The status bar's gate word, in the colour of the gate."""
         colour = {
             GateState.READY: theme.OK,
             GateState.FACTORY: theme.WARN,
             GateState.BLOCKED: theme.ERROR,
         }[gate]
         self._status_gate.setText(
-            f'<span style="color:{colour}">{gate.value}</span>'
+            f'<span style="color:{colour};font-family:{theme.MONO_FAMILY};'
+            f'font-weight:600">{gate.value}</span>'
         )
 
     def _on_calib_info(self, info) -> None:
@@ -297,8 +458,10 @@ class MainWindow(QMainWindow):
 
     def _on_busy(self, busy: bool, what: str) -> None:
         self.calibration_page.set_busy(busy, what)
-        if busy:
-            self.statusBar().showMessage(what)
+        # Set *and* cleared.  The status bar this replaced only ever set it —
+        # showMessage with no timeout stays up until something else clears it —
+        # so the first busy spell of a session held the line for the rest of it.
+        self._status_message.setText(what if busy else "")
 
     def _on_estop(self) -> None:
         self.worker.estop("手动急停（界面按钮）")

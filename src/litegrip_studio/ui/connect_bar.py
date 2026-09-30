@@ -20,6 +20,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QGridLayout,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QPushButton,
     QSizePolicy,
@@ -43,11 +44,17 @@ from .widgets import StatusDot
 #: stating calmly; the worker refuses motion at LINK_STALE_MS.
 LINK_WARN_MS = constants.LINK_STALE_MS / 2.0
 
+#: Each connection state's label and the severity it is painted with.
+#:
+#: The second element is a severity *name* rather than a colour, because a table
+#: of colours here would be built once against whichever palette was in force at
+#: import and would go on painting it after the console switched.  The colour is
+#: resolved through :func:`theme.ink` at paint time.
 CONN_LABELS = {
-    CONN_DISCONNECTED: ("未连接", theme.TEXT_MUTED),
-    CONN_CONNECTING: ("连接中…", theme.WARN),
-    CONN_CONNECTED: ("已连接", theme.OK),
-    CONN_ERROR: ("连接失败", theme.ERROR),
+    CONN_DISCONNECTED: ("未连接", "muted"),
+    CONN_CONNECTING: ("连接中…", "warn"),
+    CONN_CONNECTED: ("已连接", "ok"),
+    CONN_ERROR: ("连接失败", "error"),
 }
 
 
@@ -109,6 +116,8 @@ class ConnectBar(QWidget):
         self._submit = submit
         self._frame = EMPTY_FRAME
         self._conn = "DISCONNECTED"
+        self._conn_detail = ""
+        self._description = ""
 
         self._target = QLabel("未连接")
         self._target.setTextFormat(Qt.RichText)
@@ -141,10 +150,17 @@ class ConnectBar(QWidget):
 
         self._build()
         self._refresh()
+        self.restyle()
+        theme.subscribe(self.restyle)
 
     def _build(self) -> None:
+        for button in (self._connect, self._disconnect, self._enable,
+                       self._disable, self._clear, self._reset):
+            button.setMinimumWidth(88)
+            button.setMinimumHeight(28)
+
         buttons = QGridLayout()
-        buttons.setSpacing(6)
+        buttons.setSpacing(8)
         buttons.addWidget(self._connect, 0, 0)
         buttons.addWidget(self._disconnect, 0, 1)
         buttons.addWidget(self._enable, 1, 0)
@@ -152,16 +168,25 @@ class ConnectBar(QWidget):
         buttons.addWidget(self._clear, 0, 2)
         buttons.addWidget(self._reset, 1, 2)
 
+        # The two chips sit side by side rather than stacked: they answer two
+        # different questions — is the bus answering, is the drive complaining —
+        # and a row reads as one status line where a column reads as a list.
+        chips = QHBoxLayout()
+        chips.setSpacing(8)
+        chips.addWidget(self._link_dot, 0)
+        chips.addWidget(self._fault_dot, 0)
+        chips.addStretch(1)
+
         status = QVBoxLayout()
-        status.setSpacing(4)
+        status.setSpacing(6)
         status.addWidget(self._target)
         status.addWidget(self._conn_label)
-        status.addWidget(self._link_dot)
-        status.addWidget(self._fault_dot)
+        status.addLayout(chips)
         status.addStretch(1)
 
         box = QGroupBox("连接与电源")
         inner = QGridLayout(box)
+        inner.setHorizontalSpacing(16)
         inner.addLayout(status, 0, 0)
         inner.addLayout(buttons, 0, 1)
         inner.setColumnStretch(0, 1)
@@ -172,16 +197,14 @@ class ConnectBar(QWidget):
 
     # ── slots ───────────────────────────────────────────────────────────────
     def set_backend_description(self, text: str) -> None:
-        self._target.setText(f'<span style="color:{theme.TEXT}">{text}</span>')
+        self._description = text
+        self.restyle()
 
     def set_conn_state(self, state: str, detail: str = "") -> None:
         """``state`` is one of the worker's ``CONN_*`` values."""
         self._conn = state
-        label, colour = CONN_LABELS.get(state, (state, theme.TEXT_MUTED))
-        text = f'<span style="color:{colour}">{label}</span>'
-        if detail:
-            text += f' <span style="color:{theme.TEXT_MUTED}">{detail}</span>'
-        self._conn_label.setText(text)
+        self._conn_detail = detail
+        self.restyle()
         self._refresh()
 
     def update_frame(self, frame: TelemetryFrame) -> None:
@@ -191,6 +214,26 @@ class ConnectBar(QWidget):
         state, text = fault_state(frame)
         self._fault_dot.set(state, text)
         self._refresh()
+
+    def restyle(self) -> None:
+        """Repaint the two text lines in the current palette.
+
+        The dots repaint themselves — they hold the state they were last told —
+        so only the description and the connection line are re-rendered here.
+        """
+        self._target.setText(
+            f'<span style="color:{theme.TEXT};font-weight:600">{self._description}</span>'
+            if self._description else
+            f'<span style="color:{theme.TEXT_FAINT}">未连接</span>'
+        )
+        label, severity = CONN_LABELS.get(self._conn, (self._conn, "muted"))
+        text = f'<span style="color:{theme.ink(severity)};font-weight:600">{label}</span>'
+        if self._conn_detail:
+            text += (
+                f' <span style="color:{theme.TEXT_MUTED};'
+                f'font-family:{theme.MONO_FAMILY}">{self._conn_detail}</span>'
+            )
+        self._conn_label.setText(text)
 
     # ── enablement ──────────────────────────────────────────────────────────
     def _refresh(self) -> None:
