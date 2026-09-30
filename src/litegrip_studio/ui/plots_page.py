@@ -34,6 +34,7 @@ import pyqtgraph as pg
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QPen
 from PyQt5.QtWidgets import (
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -98,6 +99,13 @@ def _axis_bound(peak: float) -> float:
 
 
 def _configure() -> None:
+    """Point pyqtgraph at the current palette.
+
+    pyqtgraph keeps its colours in module-level options rather than reading them
+    per plot, so this is re-run on a theme change alongside the explicit pens and
+    axis pens below — the module-level options alone would leave the axes on the
+    palette that was in force when the process started.
+    """
     pg.setConfigOptions(antialias=True, background=theme.PANEL, foreground=theme.TEXT_MUTED)
 
 
@@ -126,16 +134,12 @@ class PlotsPage(QWidget):
         self._origin: float | None = None
         self._paused = False
 
-        self._position_plot = self._make_plot("位置 (mm)")
-        self._force_plot = self._make_plot("夹持力 (N)")
+        self._position_plot = self._make_plot()
+        self._force_plot = self._make_plot()
 
-        self._actual_curve = self._position_plot.plot(
-            pen=_pen(theme.ACTUAL), name="实测"
-        )
-        self._target_curve = self._position_plot.plot(
-            pen=_pen(theme.TARGET, dashed=True), name="目标"
-        )
-        self._force_curve = self._force_plot.plot(pen=_pen(theme.WARN), name="力")
+        self._actual_curve = self._position_plot.plot(name="实测")
+        self._target_curve = self._position_plot.plot(name="目标")
+        self._force_curve = self._force_plot.plot(name="力")
 
         self._position_plot.setYRange(0.0, constants.STROKE_MAX_MM, padding=0.0)
         self._force_plot.setYRange(
@@ -160,21 +164,77 @@ class PlotsPage(QWidget):
         controls.addWidget(self._note, 1)
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(6)
+        layout.setSpacing(theme.GAP)
+        layout.setContentsMargins(*theme.PAGE_MARGINS)
         layout.addLayout(controls)
-        layout.addWidget(self._position_plot, 1)
-        layout.addWidget(self._force_plot, 1)
+        # Each trace lives on its own card, with the title on the card rather
+        # than painted inside the plot: a pyqtgraph title is centred over the
+        # graph area and shifts every time the y axis is re-ranged, which is
+        # every frame on the force plot.
+        layout.addWidget(self._card("位置 (mm)", self._position_plot), 1)
+        layout.addWidget(self._card("夹持力 (N)", self._force_plot), 1)
+        # Last, because the first paint needs the note label and the three
+        # curves to exist.
+        self.restyle()
+        theme.subscribe(self.restyle)
 
-    def _make_plot(self, title: str) -> pg.PlotWidget:
+    def _card(self, title: str, plot: pg.PlotWidget) -> QGroupBox:
+        box = QGroupBox(title)
+        inner = QVBoxLayout(box)
+        inner.setContentsMargins(0, 0, 0, 0)
+        inner.addWidget(plot)
+        return box
+
+    def _make_plot(self) -> pg.PlotWidget:
         plot = pg.PlotWidget()
-        plot.setTitle(title, color=theme.TEXT, size="10pt")
-        plot.showGrid(x=True, y=True, alpha=0.15)
+        plot.showGrid(x=True, y=True, alpha=0.12)
         plot.setLabel("bottom", "时间", units="s")
         # The x axis scrolls itself, so panning it would be undone by the next
         # sample; the y axis is the operator's to zoom.
         plot.setMouseEnabled(x=False, y=True)
         plot.hideButtons()
         return plot
+
+    def restyle(self) -> None:
+        """Repaint both plots in the current palette.
+
+        Everything here is painted by pyqtgraph rather than by Qt's style engine,
+        so none of it follows the application palette: the curves, the axes, the
+        grid and the background all have to be handed the new colours.
+        """
+        _configure()
+        for plot in (self._position_plot, self._force_plot):
+            plot.setBackground(theme.PANEL)
+            item = plot.getPlotItem()
+            for side in ("left", "bottom"):
+                axis = item.getAxis(side)
+                axis.setPen(pg.mkPen(theme.BORDER))
+                axis.setTextPen(pg.mkPen(theme.TEXT_FAINT))
+        self._position_plot.setLabel(
+            "bottom", "时间", units="s", color=theme.TEXT_MUTED
+        )
+        self._force_plot.setLabel(
+            "bottom", "时间", units="s", color=theme.TEXT_MUTED
+        )
+        self._actual_curve.setPen(_pen(theme.ACTUAL))
+        self._target_curve.setPen(_pen(theme.TARGET, dashed=True))
+        self._force_curve.setPen(_pen(theme.WARN))
+        self._redraw_note()
+
+    def _redraw_note(self) -> None:
+        """Put the paused note back, or leave it empty.
+
+        The note is the only other thing on this page that carries a colour in
+        its markup; it is re-rendered here so a page paused in one theme is not
+        still wearing it in the other.
+        """
+        if self._paused:
+            self._note.setText(
+                f'<span style="color:{theme.WARN}">'
+                f"已暂停（恢复后曲线清空重画）</span>"
+            )
+            return
+        self._note.clear()
 
     # ── slots ───────────────────────────────────────────────────────────────
     def update_frame(self, frame: TelemetryFrame) -> None:
@@ -229,17 +289,12 @@ class PlotsPage(QWidget):
     def _on_pause(self, paused: bool) -> None:
         self._paused = paused
         self._pause.setText("继续" if paused else "暂停")
-        if paused:
-            self._note.setText(
-                f'<span style="color:{theme.WARN}">'
-                f"已暂停（恢复后曲线清空重画）</span>"
-            )
-            return
-        self._note.clear()
-        # Resuming starts a new buffer.  The samples either side of the pause
-        # are separated by an interval nobody measured, and joining them with a
-        # straight line would draw a movement that never happened.
-        self.clear()
+        self._redraw_note()
+        if not paused:
+            # Resuming starts a new buffer.  The samples either side of the pause
+            # are separated by an interval nobody measured, and joining them with
+            # a straight line would draw a movement that never happened.
+            self.clear()
 
     def _redraw(self) -> None:
         times = list(self._t)

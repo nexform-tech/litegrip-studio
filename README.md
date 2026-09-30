@@ -118,6 +118,20 @@ way.
 **Esc is an application-level shortcut**: it works with a spinbox focused and with a modal dialog
 open.
 
+### Light and dark
+
+The console opens dark, which is what a bench under a machine tends to be, and is what it opened
+in before there was a choice. The button beside the emergency stop switches it to light and back,
+and the choice is written to `~/.litegrip/litegrip_studio.ini` under `view/theme`.
+
+Nothing is written until you switch, so "nobody has chosen" stays distinguishable from a choice
+that happens to match the default.
+
+The palette is litearm-studio's in both themes: the same ink ramp, the same semantic fill/edge
+pairs, and the same type scale. What is this console's own is the meaning layer — blue for the
+position that was *commanded*, green for the one the jaws *measured* — and those two are the same
+colours on the slider, in the readout and in the plots.
+
 ### The slider
 
 The core of the requirement. Three visual elements, two independent values:

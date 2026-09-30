@@ -28,8 +28,9 @@ from litegrip_studio.core.worker import (
     GateState,
     GripperWorker,
 )
-from litegrip_studio.settings import KEY_TAB, Settings
+from litegrip_studio.settings import KEY_TAB, KEY_THEME, Settings
 from litegrip_studio.telemetry import EMPTY_FRAME, TelemetryFrame
+from litegrip_studio.ui import theme
 from litegrip_studio.ui.main_window import TAB_NAMES, MainWindow
 from litegrip_studio.units import Limits
 
@@ -333,13 +334,24 @@ class TestTheWiring:
 
         assert window.tabs.currentWidget() is window.tabs.widget(1)
 
-    def test_busy_is_said_in_the_status_bar_and_on_the_calibration_page(
+    def test_busy_is_said_in_the_state_line_and_on_the_calibration_page(
         self, window, worker
     ) -> None:
         worker.busy.emit(True, "正在使能（可能需要数秒）…")
 
-        assert "使能" in window.statusBar().currentMessage()
+        assert "使能" in window._status_message.text()
         assert not window.calibration_page._guided_start.isEnabled()
+
+    def test_the_busy_message_comes_down_again(self, window, worker) -> None:
+        """The status bar this replaced only ever set the message —
+        ``showMessage`` with no timeout stays up until something clears it — so
+        the first busy spell of a session held the line for the rest of it, and
+        with it the readouts that shared that slot."""
+        worker.busy.emit(True, "正在使能（可能需要数秒）…")
+
+        worker.busy.emit(False, "")
+
+        assert window._status_message.text() == ""
 
     def test_a_motion_state_change_is_logged(self, window, worker) -> None:
         """Nothing else records when the axis left SERVO, which is the first
@@ -350,6 +362,21 @@ class TestTheWiring:
 
 
 class TestTheLog:
+    def test_the_debug_filter_lives_on_the_log_header(self, window) -> None:
+        """The filter is about the log, so it belongs on the log's header.
+
+        It used to sit on a row of its own inside the body, where it started
+        10px to the left of the title above it: the style draws a title bar with
+        its own padding and none of the body shares it, so the filter read as a
+        control that had escaped its panel.  Moving it onto the header is what
+        fixed that, and this is what stops it drifting back.
+        """
+        header = window._log_dock.titleBarWidget()
+
+        assert header is not None, "the dock supplies its own title bar"
+        assert header.isAncestorOf(window._show_debug)
+        assert not window._log_dock.widget().isAncestorOf(window._show_debug)
+
     def test_it_shows_what_the_worker_sends(self, window, worker) -> None:
         worker.log.emit("info", "电机已使能")
 
@@ -502,6 +529,101 @@ class TestClosing:
         window.close()
 
         assert any("未在超时内退出" in text for _level, text in window.lines)
+
+
+class TestTheThemeIsSwitchedFromTheWindow:
+    """The palette moves from one control, and nothing else moves with it.
+
+    A theme is the one preference that touches every widget at once, so the two
+    ways it can go wrong are both worth a test: a control that changes how
+    everything looks without being reachable from the page you are on, and a
+    repaint that goes through a slot which also does something — the speed and
+    force fields are re-rendered by the same code that commands the motor, and
+    a switch that reached the commanding half would re-command the gripper.
+    """
+
+    @pytest.fixture(autouse=True)
+    def restore(self):
+        before = theme.current_theme()
+        yield
+        theme.set_theme(before)
+
+    def test_asking_for_a_theme_moves_the_palette_and_remembers_it(self, qapp, worker) -> None:
+        store = _Store()
+        window = MainWindow(worker, Settings(store))
+        window._heartbeat.stop()
+        target = theme.LIGHT if theme.current_theme() == theme.DARK else theme.DARK
+
+        window.theme_switch.button(target).click()
+
+        assert theme.current_theme() == target
+        assert store.value(KEY_THEME) == target
+        assert window.theme_switch.current == target
+        window.close()
+
+    def test_both_names_are_on_screen_at_once(self, window) -> None:
+        """The whole point of the pair: a single toggle labelled with the state
+        it is in cannot say whether it describes now or what a click will do."""
+        for name in (theme.DARK, theme.LIGHT):
+            button = window.theme_switch.button(name)
+            assert button.isVisibleTo(window)
+            assert button.text() == theme.PALETTES[name].label
+
+    def test_the_control_is_reachable_from_every_tab(self, window) -> None:
+        for index in range(window.tabs.count()):
+            window.tabs.setCurrentIndex(index)
+            assert window.theme_switch.isVisibleTo(window)
+
+    def test_switching_commands_nothing(self, window, worker) -> None:
+        worker.commands.clear()
+
+        window.theme_switch.choose(theme.LIGHT)
+
+        assert worker.commands == []
+
+    def test_it_reaches_the_application_and_not_only_the_tokens(
+        self, qapp, window
+    ) -> None:
+        """Moving the tokens is not the same as telling the application, and a
+        console that only did the first would keep the old chrome on every
+        widget that is styled by the sheet rather than by an inline one."""
+        from PyQt5.QtGui import QPalette
+
+        window.theme_switch.choose(
+            theme.LIGHT if theme.current_theme() == theme.DARK else theme.DARK
+        )
+
+        assert qapp.styleSheet() == theme.stylesheet()
+        assert qapp.palette().color(QPalette.Window).name() == theme.BACKGROUND
+
+    def test_every_page_is_repainted(self, window, worker) -> None:
+        """Driven through the worker first, so each page is holding content it
+        painted itself rather than the state it booted in."""
+        worker.conn_state.emit(CONN_CONNECTED, "已连接")
+        worker.calib_info.emit(USER_CAL)
+        worker.gate_state.emit(GateState.READY.value, "")
+        worker.telemetry.emit(frame(position_mm=42.0, enabled=True))
+        worker.alert.emit("warn", "夹持力接近上限")
+
+        def painted() -> tuple:
+            return (
+                window.status_page._values["位置"].styleSheet(),
+                window.calibration_page._gate_label.text(),
+                window.status_page._link_dot.styleSheet(),
+                window.alert_banner.styleSheet(),
+                window._status_gate.text(),
+            )
+
+        before = painted()
+        window.theme_switch.choose(
+            theme.LIGHT if theme.current_theme() == theme.DARK else theme.DARK
+        )
+        after = painted()
+
+        labels = ("status value", "gate label", "link dot", "alert banner",
+                  "status bar")
+        for name, was, now in zip(labels, before, after):
+            assert was != now, f"{name} kept the old palette"
 
 
 class TestEveryHandlerReachesItsEnd:

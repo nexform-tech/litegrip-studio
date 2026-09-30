@@ -53,15 +53,28 @@ OWNER_SLIDER = "slider"
 # triangle below it, then the two end labels.  Written as a stack with explicit
 # offsets rather than as fractions of the widget height, because every element
 # has a fixed size and a fraction-based layout only lines up at one height.
+#
+# The groove is thin and the handle is a squat pill, which is the proportion
+# litearm-studio's sliders use: the bar is a scale to read a position against,
+# not a control that should out-weigh the number beside it.  The handle's width
+# is also the groove's inset at each end, and it is left where it was — the
+# tests derive their pixel positions from it, so widening it would move every
+# position the console can be commanded to by hand.
 HANDLE_W = 14.0
-HANDLE_H = 22.0
+HANDLE_H = 20.0
 HANDLE_TOP = 8.0
-GROOVE_H = 8.0
-MARKER_H = 7.0
+GROOVE_H = 6.0
+MARKER_H = 6.0
 LABEL_H = 14.0
-TRIANGLE_TOP = HANDLE_TOP + HANDLE_H + 4.0
+TRIANGLE_TOP = HANDLE_TOP + HANDLE_H + 5.0
 LABEL_TOP = TRIANGLE_TOP + MARKER_H + 2.0
 MIN_HEIGHT = int(LABEL_TOP + LABEL_H + 4.0)
+
+#: How much of the measured green shows through the filled part of the groove.
+#: Enough to read as a filled bar at a glance, not enough to compete with the
+#: triangle that marks exactly where the jaws are.
+FILL_ALPHA = 80
+FILL_ALPHA_DISABLED = 40
 
 
 class StrokeSlider(QSlider):
@@ -92,6 +105,9 @@ class StrokeSlider(QSlider):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setMinimumHeight(MIN_HEIGHT)
         self.set_value_mm(0.0)
+        # The marks are painted from the palette rather than styled, so this
+        # widget is one of the few that has to be told when the theme changes.
+        theme.subscribe(self.update)
 
     # ── configuration ───────────────────────────────────────────────────────
     def set_limits(self, limits: Limits | None) -> None:
@@ -292,11 +308,12 @@ class StrokeSlider(QSlider):
         painter.setRenderHint(QPainter.Antialiasing)
         groove = self._groove_rect()
         enabled = self.isEnabled()
+        radius = GROOVE_H / 2.0
 
         # 1. the groove
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(theme.GROOVE))
-        painter.drawRoundedRect(groove, GROOVE_H / 2, GROOVE_H / 2)
+        painter.drawRoundedRect(groove, radius, radius)
 
         # 2. how much of the travel the jaws have actually covered.  Filled from
         #    the closed end, so the bar reads as a progress bar for the move —
@@ -308,43 +325,45 @@ class StrokeSlider(QSlider):
             )
             if filled.width() > 0.5:
                 colour = QColor(theme.ACTUAL if enabled else theme.DISABLED)
-                colour.setAlpha(90 if enabled else 50)
+                colour.setAlpha(FILL_ALPHA if enabled else FILL_ALPHA_DISABLED)
                 painter.setBrush(colour)
-                painter.drawRoundedRect(filled, GROOVE_H / 2, GROOVE_H / 2)
+                painter.drawRoundedRect(filled, radius, radius)
 
         # 3. the target: a thin line, which stays where it is when the jaws are
         #    blocked short of it.
         if self._target_mm is not None:
             x = self._x_for_mm(self._target_mm)
             painter.setPen(QPen(QColor(theme.TARGET if enabled else theme.DISABLED), 2))
-            painter.drawLine(QPointF(x, groove.top() - 5), QPointF(x, groove.bottom() + 5))
+            painter.drawLine(
+                QPointF(x, groove.top() - 6), QPointF(x, groove.bottom() + 6)
+            )
 
         # 4. the jaws.  A triangle rather than a line so it cannot be confused
         #    with the target even in a screenshot, where neither is moving.
         if self._actual_mm is not None:
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor(theme.ACTUAL if enabled else theme.DISABLED))
-            painter.drawPolygon(QPolygonF(_triangle(self._x_for_mm(self._actual_mm), TRIANGLE_TOP)))
+            painter.drawPolygon(
+                QPolygonF(_triangle(self._x_for_mm(self._actual_mm), TRIANGLE_TOP))
+            )
 
-        # 5. the handle, last, so it is never hidden by a mark.
+        # 5. the handle, last, so it is never hidden by a mark.  Filled with the
+        #    strongest ink, which is litearm's "primary" — near-white on the dark
+        #    theme, near-black on the light one — so it is the one part of the
+        #    bar that reads as something to grab.
         centre = self._x_for_mm(self.value_mm)
         handle = QRectF(
             centre - HANDLE_W / 2, groove.center().y() - HANDLE_H / 2, HANDLE_W, HANDLE_H
         )
         painter.setPen(QPen(QColor(theme.BORDER), 1))
         painter.setBrush(QColor(theme.TEXT if enabled else theme.DISABLED))
-        painter.drawRoundedRect(handle, 3, 3)
-        painter.setPen(QPen(QColor(theme.BACKGROUND), 1))
-        painter.drawLine(
-            QPointF(handle.center().x(), handle.top() + 3),
-            QPointF(handle.center().x(), handle.bottom() - 3),
-        )
+        painter.drawRoundedRect(handle, 4, 4)
 
         # 6. the two ends of the travel, named, because "the left end is closed"
         #    is a fact about this mechanism rather than something to infer.
-        painter.setPen(QPen(QColor(theme.TEXT_MUTED if enabled else theme.DISABLED)))
+        painter.setPen(QPen(QColor(theme.TEXT_FAINT if enabled else theme.TEXT_DISABLED)))
         font = QFont(painter.font())
-        font.setPointSize(8)
+        font.setPointSizeF(theme.FONT_SMALL_PX * 0.72)
         painter.setFont(font)
         painter.drawText(
             QRectF(0.0, LABEL_TOP, 90.0, LABEL_H),

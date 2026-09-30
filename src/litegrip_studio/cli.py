@@ -227,13 +227,21 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication(sys.argv[:1])
     app.setApplicationName("litegrip-studio")
     app.setOrganizationName("litearm")
+
+    settings = Settings()
+    # The palette is resolved before anything is built: a widget that painted
+    # itself during construction would otherwise keep the theme the process
+    # happened to start in.  Both calls, because they answer different
+    # questions — ``set_theme`` says which palette is in force (and a console
+    # opening in its own default theme changes nothing), while ``apply`` is
+    # what hands it to the application, which a fresh process has never had.
+    theme.set_theme(theme.resolve(settings.theme))
     theme.apply(app)
 
     logging_setup.install_qt_message_handler()
     logging_setup.install_excepthook()
     logging_setup.enable_faulthandler()
 
-    settings = Settings()
     args.calibration = resolve_calibration_path(args, settings)
 
     backend = make_backend(args)

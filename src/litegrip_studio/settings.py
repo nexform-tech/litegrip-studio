@@ -51,6 +51,8 @@ KEY_GEOMETRY = "view/geometry"
 KEY_WINDOW_STATE = "view/window_state"
 KEY_TAB = "view/tab"
 KEY_SHOW_DEBUG = "view/show_debug_log"
+#: ``dark`` or ``light``; absent until the operator picks one.
+KEY_THEME = "view/theme"
 KEY_LOG_LEVEL = "logging/level"
 
 #: Keys a console older than this one may have written and nothing reads any
@@ -167,6 +169,26 @@ class Settings:
     @active_tab.setter
     def active_tab(self, value: int) -> None:
         self._write(KEY_TAB, max(0, int(value)))
+
+    @property
+    def theme(self) -> str | None:
+        """``"dark"`` or ``"light"``, or None while the operator has not chosen.
+
+        ``None`` rather than the resolved name, so that "nobody has chosen" is
+        still readable a restart later.  A console that wrote down the theme it
+        opened in on its first launch could not tell that apart from a choice,
+        and the two want different answers if the default ever moves.
+        """
+        name = self._text(KEY_THEME)
+        return name if name in ("dark", "light") else None
+
+    @theme.setter
+    def theme(self, value: str | None) -> None:
+        if value:
+            self._write(KEY_THEME, str(value))
+        else:
+            self._store.remove(KEY_THEME)
+            self._sync()
 
     @property
     def show_debug_log(self) -> bool:
