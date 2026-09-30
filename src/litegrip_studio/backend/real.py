@@ -464,13 +464,24 @@ class RealBackend(GripperBackend):
         self._gripper.config.max_stroke_mm = float(max_stroke_mm)
 
     def describe(self) -> str:
+        """The link this session is on: the interface and the motor.
+
+        Deliberately nothing that can change afterwards.  This string is taken
+        once, when the connection opens, and is never refreshed — and the
+        calibration is loaded one step *after* that point, so a label in here was
+        the state from before the load and went on saying 未标定 for the rest of
+        the session.  The calibration page's banner is the calibration status,
+        and that one is rewritten whenever the calibration changes.
+
+        ``mst_id`` is out for a related reason: the value shown was the motor's
+        own, 0x18 on this bench, rather than the calibration file's, so it was
+        the same whatever file was in force and said nothing about the session.
+        What the console pushes to the motor is still the file's value; see
+        ``--mst-id`` and ``load_calibration``.  It is the display of it that was
+        noise.
+        """
         cfg = self._gripper.config
-        mst = "自动" if cfg.mst_id is None else f"0x{cfg.mst_id:02X}"
-        label = self._info.label if self._info is not None else "未标定"
-        return (
-            f"实机 {self._gripper.channel} | can_id=0x{int(cfg.can_id):02X} "
-            f"| mst_id={mst} | {label}"
-        )
+        return f"实机 {self._gripper.channel} | can_id=0x{int(cfg.can_id):02X}"
 
     # ── internals ───────────────────────────────────────────────────────────
     def _require_connected(self) -> None:

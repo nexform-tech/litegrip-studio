@@ -190,6 +190,23 @@ class TestItsOwnCalibration:
         assert after.limits.rad_to_mm == before.limits.rad_to_mm
         assert after.limits.closed_rad == before.limits.closed_rad
 
+    def test_its_description_is_the_link_and_not_the_calibration(self, tmp_path) -> None:
+        """The connection line is taken once, when the connection opens, and is
+        never refreshed, so a calibration label in it is the state from before
+        the load rather than a status — a console with a file loaded would go on
+        saying 未标定.  The calibration page is where that belongs.
+
+        Asserted on the *string changing*, not on a word: a label is free to be
+        renamed, and the defect is that this line moves at all.
+        """
+        sim = SimBackend(clock=FakeClock(), calibration_path=tmp_path / "sim.json")
+        before = sim.describe()
+        sim.connect()
+
+        sim.set_calibration_memory(1.780959, -0.069279, 64.86, max_stroke_mm=120.0)
+
+        assert sim.describe() == before
+
     def test_it_never_reads_the_bench_grippers_calibration(
         self, tmp_path, monkeypatch
     ) -> None:

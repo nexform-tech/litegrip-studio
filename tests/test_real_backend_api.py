@@ -431,11 +431,21 @@ class TestLifecycle:
         _stub(backend).disconnect = boom
         backend.disconnect()
 
-    def test_describe_names_the_link_and_the_calibration(self, backend) -> None:
+    def test_describe_names_the_link_and_the_motor_and_nothing_that_changes(self, backend) -> None:
+        """It is taken once, when the connection opens, and never refreshed.
+
+        So it may only carry what cannot go out of date: the calibration it used
+        to end with was read *before* the load — the console says 未标定 on the
+        connection line for the whole session, file loaded or not — and the motor
+        id was the motor's own, not the file's, so it was the same whichever file
+        was in force.
+        """
         text = backend.describe()
+
         assert "can0" in text
         assert "0x08" in text
-        assert "未标定" in text
+        assert "未标定" not in text
+        assert "mst_id" not in text
 
 
 # ── the primitives ──────────────────────────────────────────────────────────

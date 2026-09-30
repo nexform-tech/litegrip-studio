@@ -284,7 +284,14 @@ class SimBackend(GripperBackend):
         return self.plant.limits
 
     def describe(self) -> str:
-        return f"仿真 (Plant) | {self._info.label if self._info else '未标定'}"
+        """The link this session is on.
+
+        No calibration label, for the same reason as
+        :meth:`~litegrip_studio.backend.real.RealBackend.describe`: it is taken
+        once, when the connection opens, and the label in it was the state from
+        before the load rather than a status.  The calibration page shows that.
+        """
+        return "仿真 (Plant)"
 
     # ── fault injection ─────────────────────────────────────────────────────
     def inject(self, **kwargs: Any) -> None:
