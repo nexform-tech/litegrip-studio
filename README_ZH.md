@@ -429,6 +429,11 @@ QT_QPA_PLATFORM=offscreen <venv>/bin/python3 -m pytest tests/ -q
 `PyQt5.QtTest`，`QT_QPA_PLATFORM=offscreen`。`conftest.py` 把 SDK 与 `src/` 插进
 `sys.path`，所以 SDK 没安装也能测。
 
+`tests/conftest.py` 还会把本次会话的 `HOME` 指到一个临时目录，任何测试都读不到、也写不到
+操作员的 `~/.litegrip/`（标定、偏好、日志）。需要这些文件的测试自己造一份；外壳里导出的
+`LITEGRIP_CALIB` / `LITEGRIP_FACTORY_CALIB` 同样会被丢掉。没有这一步，旁边开着的控制台
+保存一次标定，那些自己不带标定文件的仿真器就会读到它，测试的数字跟着一起变。
+
 自检 `--selftest` 只跑纯逻辑（单位换算、标定方向判定、零点错帧拦截、被控对象收敛、
 运动到位、力矩上限、急停失能），**不 import Qt**——最需要它的机器正是 Qt 坏掉的那台。
 测试里有一个子解释器断言这一点。
