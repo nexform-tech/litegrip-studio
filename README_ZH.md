@@ -62,6 +62,15 @@ PYTHON_BIN=.venv/bin/python3 ./run_litegrip_studio.sh sim
   （`1d50:606f`）回的是「Device doesn't support restart from Bus Off.」。碰到这句明确的
   拒绝，控制台会去掉这个选项重配一次，照样把接口起起来——仍然只弹一次授权框，日志里多
   一句说明。在这类适配器上，控制器进了总线关闭**不会自恢复**，下次点连接会重新配好。
+- **USB-CAN 适配器会丢掉自己的 USB 端点表**，这时候任何配置命令都起不来它：
+  `sudo ip link set can0 up` 报「RTNETLINK answers: No such file or directory」（ENOENT），
+  而 `ip -details link show can0` 看着一切正常。这是内核对一条端点已不在设备表里的传输的
+  拒绝，与比特率无关，接口上也没有任何用户态能设的东西能修它。只有重新探测设备才行——所以
+  **拔插一次适配器能修好**，而 `sudo modprobe -r gs_usb && sudo modprobe gs_usb` 不动线
+  也能修。控制台点连接碰到这个状态时会自己执行第二个办法，然后把接口重新配好、重新起来。
+  这次重载会一起重置本机所有 `gs_usb` 接口，包括控制台没用着的适配器——并且只对 `gs_usb`
+  动手，因为「猜着卸载一个不认识的驱动」不该做。仍然起不来时，提示让你去拔插，而不是再
+  回敬一条根本跑不通的 `ip link` 命令。
 - CAN FD 接口：只报告、不改动。SDK 自己按接口 MTU 判断 FD 并通信，而「改回经典 CAN」
   会把同一条总线上的其他节点一起改掉。
 - 真碰上 ENETDOWN 时，**它会被当成链路问题而不是电机问题**：提示里直接写接口名和
@@ -86,6 +95,11 @@ sudo ip link set can0 up
 中间那条如果报「Device doesn't support restart from Bus Off.」，说明你的适配器不支持
 `restart-ms`——去掉这一个选项，另外两条照跑。控制台自己会这么处理，失败时给的手动命令
 也是按你的硬件能跑通的那一版。
+
+最后一条如果在前两条都成功之后报「RTNETLINK answers: No such file or directory」，那就是
+适配器丢了 USB 端点表，这三条命令都救不了。拔下来重插，再重新连接。
+`sudo modprobe -r gs_usb && sudo modprobe gs_usb` 不用动线也能达到同样效果，代价是本机
+所有 `gs_usb` 接口会一起被重置。
 
 **首次接真机先从标定页跑一遍自动标定，再动滑块。** 探测一结束结果就写盘。
 若标定页显示 `FACTORY` 或 `BLOCKED`，先标定，不要靠勾选覆盖去动。

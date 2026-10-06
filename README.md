@@ -70,6 +70,18 @@ bitrate — and only in that one place:
   brings the interface up anyway — one authorization, and a log line saying the difference. On
   such an adapter a bus-off controller does **not** recover by itself; the next Connect
   reconfigures it.
+- **A USB-CAN adapter can lose its USB endpoint table**, and then no configuration command
+  raises it: `sudo ip link set can0 up` answers "RTNETLINK answers: No such file or directory"
+  (ENOENT) while `ip -details link show can0` reads perfectly normal. This is the kernel refusing
+  a transfer whose endpoint is no longer in the device's table; it is not about the bitrate, and
+  nothing userspace can set on the interface repairs it. Only a fresh probe of the device does,
+  which is why **unplugging the adapter and plugging it back in repairs it** — and so does
+  `sudo modprobe -r gs_usb && sudo modprobe gs_usb`, without touching the cable. The console does
+  the second one by itself when Connect hits this, then configures and raises the interface again.
+  That reload resets every `gs_usb` interface on the machine, including adapters this console is
+  not using — and it is attempted for `gs_usb` only, because unbinding an unknown driver is not
+  something to do on a guess. When it still does not come up, the message tells you to replug
+  rather than quoting an `ip link` command that cannot work.
 - A CAN FD interface is reported, never changed. The SDK detects FD from the interface MTU and
   works with it, whereas changing the interface back to classic CAN would change every other node
   on that bus too.
@@ -98,6 +110,11 @@ sudo ip link set can0 up
 If the middle command fails with "Device doesn't support restart from Bus Off.", your adapter
 does not implement `restart-ms` — drop that one option and run the other two. The console does
 this by itself, and a failure message quotes the form that works on your hardware.
+
+If the last command fails with "RTNETLINK answers: No such file or directory" while the first two
+worked, the adapter has lost its USB endpoint table and the three commands cannot help. Unplug it,
+plug it back in, and reconnect. `sudo modprobe -r gs_usb && sudo modprobe gs_usb` does the same
+thing without the cable, and takes every `gs_usb` interface on the machine down with it.
 
 **On a real gripper, run 自动标定 from the calibration page before touching the
 slider.** The result is written out as soon as the probe finishes. If the calibration page shows
