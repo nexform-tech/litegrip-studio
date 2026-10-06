@@ -149,8 +149,20 @@ REAL_MISSING = 'Device "can0" does not exist.\n'
 ADAPTER_REJECTS_RESTART_MS = "Error: Device doesn't support restart from Bus Off.\n"
 
 #: What that adapter's stderr looks like on a run the fallback rescued: the
-#: kernel's sentence, then the marker the script prints after the retry.
-FALLBACK_STDERR = ADAPTER_REJECTS_RESTART_MS + RESTART_MS_FALLBACK + "\n"
+#: marker, and nothing else.  The kernel's refusal is not repeated once it has
+#: been acted on — the script says what it did, not what it was told.
+FALLBACK_STDERR = RESTART_MS_FALLBACK + "\n"
+
+#: ``ip``'s answer when the interface cannot be raised at all, seen on this bench
+#: after the fallback had configured it (``sudo ip link set can0 up`` says the
+#: same thing by hand).  The driver refuses to start the controller, and the
+#: kernel reports it as ENOENT.
+UP_REFUSED = "RTNETLINK answers: No such file or directory"
+
+
+def as_the_script_says(step: str, said: str) -> str:
+    """The line the privileged script writes when *step* fails."""
+    return f"litegrip: {step} failed: {said}\n"
 
 
 class FakeRun:
@@ -495,7 +507,7 @@ class TestWhatItRuns:
             (ok(CAN_UP_500K), (PKEXEC_DISMISSED, "", "")),
             (
                 ok(CAN_UP_500K),
-                (1, "", "RTNETLINK answers: Operation not permitted"),
+                (1, "", as_the_script_says("configure", "RTNETLINK answers: Operation not permitted")),
                 ok(CAN_DOWN_CONFIGURED),
             ),
             (ok(CAN_UP_500K), (0, "", ""), ok(CAN_UP_500K)),  # ran, still wrong
@@ -566,7 +578,7 @@ class TestAnAdapterThatRefusesRestartMs:
         and the operator is handed a command their adapter can actually run."""
         tool, run = link(
             ok(CAN_UP_500K),
-            (1, "", ADAPTER_REJECTS_RESTART_MS),
+            (1, "", as_the_script_says("configure", ADAPTER_REJECTS_RESTART_MS.strip())),
             ok(CAN_DOWN_CONFIGURED),
         )
 
@@ -575,9 +587,42 @@ class TestAnAdapterThatRefusesRestartMs:
         assert outcome.state == LINK_FAILED
         assert len(run.calls) == 3, "probe, escalate, probe again"
         assert "未被改动" not in outcome.detail
+        assert "配置接口失败" in outcome.detail, "which step failed, not a blob of stderr"
         assert "比特率 1000000" in outcome.detail, "what the kernel says now"
         assert "ip link set can0" in outcome.detail
         assert "restart-ms" not in outcome.detail, "the hint drops what it refused"
+
+    def test_a_failure_that_came_from_somewhere_else_is_still_quoted(self) -> None:
+        """Not everything on stderr is the script's.  A shell that died before it
+        could label anything, or a stale script that never learned to, still has
+        to reach the operator."""
+        tool, _run = link(ok(CAN_UP_500K), (2, "", "Error executing /bin/sh: No such file"))
+
+        outcome = tool.ensure()
+
+        assert outcome.state == LINK_FAILED
+        assert "No such file" in outcome.detail
+
+    def test_the_step_that_failed_is_the_last_one_the_script_named(self) -> None:
+        """The bench's own run, in one message: the fallback configured the
+        interface, and the step that stopped the script was ``up``.  Saying
+        "configure failed" there would send the operator after the wrong thing —
+        the option had already been dropped and the bitrate was applied."""
+        tool, _run = link(
+            ok(CAN_DOWN_CONFIGURED),
+            (1, "", FALLBACK_STDERR + as_the_script_says("up", UP_REFUSED)),
+            ok(CAN_DOWN_CONFIGURED),
+        )
+
+        outcome = tool.ensure()
+
+        assert outcome.state == LINK_FAILED
+        assert "把接口 up 失败" in outcome.detail
+        assert UP_REFUSED in outcome.detail
+        assert "restart-ms unsupported" not in outcome.detail, "the marker is ours, not his"
+        assert "已去掉适配器不支持的 restart-ms 重试" in outcome.detail
+        assert "未 up，经典 CAN，比特率 1000000" in outcome.detail
+        assert "restart-ms" not in outcome.detail.split("手动执行：")[1], "the hint too"
 
     def test_the_fallback_is_also_answered_when_the_controller_stays_off(self) -> None:
         """Up, configured and still BUS-OFF: the fallback ran, and the advice
@@ -612,13 +657,20 @@ refuse() {
     case "$1" in
         restart) echo "Error: Device doesn't support restart from Bus Off." >&2 ;;
         busy)    echo "RTNETLINK answers: Device or resource busy" >&2 ;;
+        up)      echo "RTNETLINK answers: No such file or directory" >&2 ;;
+        missing) echo 'Cannot find device "can0"' >&2 ;;
     esac
     exit 1
 }
 case "$IP_MODE" in
-    rejects) case "$*" in *restart-ms*) refuse restart ;; esac ;;
-    busy)    case "$*" in *restart-ms*) refuse busy ;; esac ;;
-    always)  case "$*" in *type*) refuse restart ;; esac ;;
+    rejects)  case "$*" in *restart-ms*) refuse restart ;; esac ;;
+    busy)     case "$*" in *restart-ms*) refuse busy ;; esac ;;
+    always)   case "$*" in *type*) refuse restart ;; esac ;;
+    upfails)  case "$*" in
+                  *restart-ms*) refuse restart ;;
+                  "link set can0 up") refuse up ;;
+              esac ;;
+    downfails) case "$*" in "link set can0 down") refuse missing ;; esac ;;
 esac
 exit 0
 """
@@ -673,14 +725,14 @@ class TestTheScriptItself:
 
         assert result.returncode == 0, result.stderr
         assert calls == [self.DOWN, self.WITH_RESTART, self.WITHOUT_RESTART, self.UP]
-        assert RESTART_MS_FALLBACK in result.stderr
+        assert result.stderr == RESTART_MS_FALLBACK + "\n", "one line, and only that"
 
     def test_an_adapter_that_takes_the_option_is_not_retried(self, tmp_path: Path) -> None:
         result, calls = run_the_script(tmp_path, "ok")
 
         assert result.returncode == 0, result.stderr
         assert calls == [self.DOWN, self.WITH_RESTART, self.UP]
-        assert RESTART_MS_FALLBACK not in result.stderr
+        assert result.stderr == ""
 
     def test_another_failure_is_not_quietly_downgraded(self, tmp_path: Path) -> None:
         """Only the kernel's own wording for this option buys a retry.  Retrying
@@ -690,7 +742,7 @@ class TestTheScriptItself:
 
         assert result.returncode != 0
         assert calls == [self.DOWN, self.WITH_RESTART], "no retry, and no up"
-        assert RESTART_MS_FALLBACK not in result.stderr
+        assert result.stderr == as_the_script_says("configure", "RTNETLINK answers: Device or resource busy")
 
     def test_a_retry_that_fails_does_not_raise_an_unconfigured_interface(
         self, tmp_path: Path
@@ -702,6 +754,33 @@ class TestTheScriptItself:
         assert result.returncode != 0
         assert self.WITHOUT_RESTART in calls, "the retry did run"
         assert self.UP not in calls
+
+    def test_the_bench_adapter_configures_and_then_cannot_be_raised(
+        self, tmp_path: Path
+    ) -> None:
+        """The run that produced the message on the bench, pinned as a script.
+
+        The option is refused, the retry configures the interface, the marker is
+        printed — and then ``up`` is refused, which is what actually stopped it.
+        Two different faults in one run, and the order of these two lines is the
+        whole reason a reader can tell them apart.
+        """
+        result, calls = run_the_script(tmp_path, "upfails")
+
+        assert result.returncode != 0
+        assert calls == [self.DOWN, self.WITH_RESTART, self.WITHOUT_RESTART, self.UP]
+        assert result.stderr == (
+            RESTART_MS_FALLBACK + "\n" + as_the_script_says("up", UP_REFUSED)
+        ), "the marker proves the retry worked; the last line is what failed"
+
+    def test_a_step_that_fails_first_says_so(self, tmp_path: Path) -> None:
+        """The interface is only touched by ``down``, so a failure there is the
+        one case where it really was left alone — worth being able to tell."""
+        result, calls = run_the_script(tmp_path, "downfails")
+
+        assert result.returncode != 0
+        assert calls == [self.DOWN], "nothing else ran"
+        assert result.stderr == as_the_script_says("down", "Cannot find device \"can0\"")
 
 
 class TestWhenPrivilegeIsRefused:
@@ -733,7 +812,7 @@ class TestWhenPrivilegeIsRefused:
         """
         tool, run = link(
             ok(CAN_UP_500K),
-            (1, "", "RTNETLINK answers: Device or resource busy"),
+            (1, "", as_the_script_says("configure", "RTNETLINK answers: Device or resource busy")),
             ok(CAN_DOWN_CONFIGURED),
         )
 

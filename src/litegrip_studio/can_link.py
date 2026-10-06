@@ -89,22 +89,56 @@ RESTART_MS_FALLBACK = "litegrip: restart-ms unsupported"
 #: an intermittent error into a silent downgrade — an interface that comes up and
 #: quietly never auto-recovers.  ``set -e`` still guards the tail: a retry that
 #: also fails aborts before ``up``, so nothing is ever raised without a bitrate.
+#:
+#: Every command reports which step it was through :func:`_step_failure`.  The
+#: three steps have three different consequences — a failed ``down`` leaves the
+#: interface exactly as it was, a failed ``configure`` leaves it down, a failed
+#: ``up`` leaves it configured but deaf — and a message that quotes them as one
+#: blob of stderr is what made the old report claim the interface was untouched
+#: while it was in fact down.
 SCRIPT = (
     "set -e\n"
     'dev="$1"\n'
-    'ip link set "$dev" down\n'
+    'die() { printf \'litegrip: %s failed: %s\\n\' "$1" "$2" >&2; exit 1; }\n'
+    'err=$(ip link set "$dev" down 2>&1) || die down "$err"\n'
     'if ! err=$(ip link set "$dev" type can bitrate "$2" restart-ms "$3" fd off 2>&1); then\n'
-    "    printf '%s\\n' \"$err\" >&2\n"
     '    case "$err" in\n'
     '        *[Rr]estart*)\n'
-    '            ip link set "$dev" type can bitrate "$2" fd off\n'
+    '            err=$(ip link set "$dev" type can bitrate "$2" fd off 2>&1) || die configure "$err"\n'
     f'            echo "{RESTART_MS_FALLBACK}" >&2\n'
     '            ;;\n'
-    '        *) exit 1 ;;\n'
+    '        *) die configure "$err" ;;\n'
     '    esac\n'
     'fi\n'
-    'ip link set "$dev" up\n'
+    'err=$(ip link set "$dev" up 2>&1) || die up "$err"\n'
 )
+
+#: ``litegrip: <step> failed: <what ip said>``.  ``\w+`` and not ``.+`` so a
+#: kernel message that itself contains the word "failed" cannot be mistaken for
+#: the step name; :func:`_step_failure` reads the last match, which is the step
+#: that stopped the script.
+_FAILED_STEP = re.compile(r"^litegrip: (\w+) failed: (.*)$", re.M)
+
+#: The script's step names in the operator's words.
+_STEP_WORDS = {
+    "down": "把接口 down 失败",
+    "configure": "配置接口失败",
+    "up": "把接口 up 失败",
+}
+
+
+def _step_failure(stderr: str) -> str | None:
+    """Which step of the privileged script failed, in the operator's words.
+
+    ``None`` means the text did not come from the script at all — a ``pkexec``
+    refusal, a shell that could not find ``ip`` — and the caller falls back to
+    quoting it as it stands.
+    """
+    found = _FAILED_STEP.findall(stderr)
+    if not found:
+        return None
+    step, said = found[-1]
+    return f"{_STEP_WORDS.get(step, step)}：{said.strip()}"
 
 
 #: ``sh`` and not ``pkexec``-ing the three ``ip`` commands one at a time: each
@@ -436,13 +470,15 @@ class CanLink:
             # message claimed the interface was untouched while it was in fact
             # down, which is the one thing a failure report must not do.
             after = self.probe(ip)
-            return LinkOutcome(
-                LINK_FAILED,
-                f"{self.channel} 配置失败：{reason}。现在「{after.describe()}」。"
-                f"手动执行：{hint}",
-                before=before,
-                after=after,
-            )
+            reason = _step_failure(stderr) or reason
+            detail = f"{self.channel} 未能就绪：{reason}。现在「{after.describe()}」。"
+            if fell_back:
+                # Reachable only when a later step than ``configure`` failed:
+                # the marker is printed after the retry, and ``set -e`` would
+                # have stopped the script before it otherwise.
+                detail += "已去掉适配器不支持的 restart-ms 重试。"
+            detail += f"手动执行：{hint}"
+            return LinkOutcome(LINK_FAILED, detail, before=before, after=after)
 
         after = self.probe(ip)
         if after.matches(self.bitrate):
