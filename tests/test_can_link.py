@@ -7,13 +7,17 @@ the interface is already right, that the interface name is never spliced into
 the script a shell will read, that a refusal leaves the interface alone, and that
 none of it can raise into the connect path.
 
-The subprocess is injected, so the suite never runs ``ip``, never asks for a
-password, and never needs an interface to exist.
+The subprocess is injected, so the suite never runs the real ``ip``, never asks
+for a password, and never needs an interface to exist.  The script itself is the
+one part that cannot be tested that way — its fallback is shell control flow —
+so the last class runs it under a real ``sh`` against a stand-in ``ip``.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -34,6 +38,9 @@ from litegrip_studio.can_link import (
     LINK_OK,
     PKEXEC_DISMISSED,
     PKEXEC_NOT_AUTHORIZED,
+    RESTART_MS_FALLBACK,
+    SCRIPT,
+    SCRIPT_NAME,
     CanLink,
     link_failure,
     parse_link,
@@ -134,6 +141,16 @@ REAL_LO = (
 
 #: Also real (``ip -details link show can0`` with nothing plugged in).
 REAL_MISSING = 'Device "can0" does not exist.\n'
+
+#: The kernel's refusal, captured on this bench's adapter (a gs_usb/candleLight
+#: clone at ``1d50:606f``, kernel 6.8.0-138).  It arrives as an extack — ``strings
+#: /usr/sbin/ip`` does not carry it — and it says "restart" while never saying
+#: "restart-ms", which is what the fallback matches on.
+ADAPTER_REJECTS_RESTART_MS = "Error: Device doesn't support restart from Bus Off.\n"
+
+#: What that adapter's stderr looks like on a run the fallback rescued: the
+#: kernel's sentence, then the marker the script prints after the retry.
+FALLBACK_STDERR = ADAPTER_REJECTS_RESTART_MS + RESTART_MS_FALLBACK + "\n"
 
 
 class FakeRun:
@@ -360,6 +377,12 @@ class TestWhatItRuns:
         assert f'restart-ms "$3"' in script
         assert "$3" in script and "restart-ms" in script
         assert str(constants.CAN_LINK_RESTART_MS) in run.pkexec_calls[0]
+        # And the one retry, without the option, for the adapters that refuse it.
+        # The count rather than a substring: a second ``type can bitrate`` is
+        # what makes the retry possible at all.
+        assert script.count("type can bitrate") == 2, script
+        assert RESTART_MS_FALLBACK in script, "the retry says that it took place"
+        assert 'ip link set "$dev" up' in script
 
     def test_the_device_reaches_the_script_as_an_argument(self) -> None:
         """Not spliced into the text a shell will read: ``$1`` is the interface,
@@ -470,7 +493,11 @@ class TestWhatItRuns:
         commands the README documents and get the same result."""
         problems = [
             (ok(CAN_UP_500K), (PKEXEC_DISMISSED, "", "")),
-            (ok(CAN_UP_500K), (1, "", "RTNETLINK answers: Operation not permitted")),
+            (
+                ok(CAN_UP_500K),
+                (1, "", "RTNETLINK answers: Operation not permitted"),
+                ok(CAN_DOWN_CONFIGURED),
+            ),
             (ok(CAN_UP_500K), (0, "", ""), ok(CAN_UP_500K)),  # ran, still wrong
         ]
 
@@ -493,6 +520,190 @@ class TestWhatItRuns:
         assert "ip link" in detail, "the wrong-name case looks identical from here"
 
 
+class TestAnAdapterThatRefusesRestartMs:
+    """The bench's gs_usb clone, and the bug it produced.
+
+    ``restart-ms`` is not implemented by every adapter, and this one says so
+    loudly: the configure command fails, and under ``set -e`` the script stopped
+    right there — before ``up``.  So the interface was left *down*, the console
+    reported 未被改动, and the manual command it offered carried the same option
+    and failed the same way.  Three defects, one cause, and it reached the
+    operator more than once.
+    """
+
+    def test_the_interface_comes_up_anyway(self) -> None:
+        """The fallback, end to end: the adapter refuses the option, the script
+        retries without it, and the probe that follows says the link is up."""
+        tool, run = link(
+            ok(CAN_DOWN_CONFIGURED),
+            (0, "", FALLBACK_STDERR),
+            ok(CAN_UP_1M),
+        )
+
+        outcome = tool.ensure()
+
+        assert outcome.state == LINK_CONFIGURED
+        assert len(run.pkexec_calls) == 1, "one retry inside the script, still one dialog"
+        assert "比特率 1000000" in outcome.detail
+        assert "restart-ms" in outcome.detail, "the difference is said out loud"
+
+    def test_it_is_not_an_alarm(self) -> None:
+        """The interface is up and the SDK can drive it.  A banner for that would
+        teach the operator to ignore banners."""
+        tool, _run = link(ok(CAN_DOWN_CONFIGURED), (0, "", FALLBACK_STDERR), ok(CAN_UP_1M))
+
+        assert not tool.ensure().needs_attention
+
+    def test_a_plain_success_says_nothing_about_restart_ms(self) -> None:
+        """The other half of the same rule: an adapter that takes the option must
+        not be told about a fallback that never ran."""
+        tool, _run = link(ok(CAN_DOWN_CONFIGURED), (0, "", ""), ok(CAN_UP_1M))
+
+        assert "restart-ms" not in tool.ensure().detail
+
+    def test_a_failure_still_reports_what_is_true_and_what_to_type(self) -> None:
+        """The command failed, so the interface is wherever the script left it —
+        and the operator is handed a command their adapter can actually run."""
+        tool, run = link(
+            ok(CAN_UP_500K),
+            (1, "", ADAPTER_REJECTS_RESTART_MS),
+            ok(CAN_DOWN_CONFIGURED),
+        )
+
+        outcome = tool.ensure()
+
+        assert outcome.state == LINK_FAILED
+        assert len(run.calls) == 3, "probe, escalate, probe again"
+        assert "未被改动" not in outcome.detail
+        assert "比特率 1000000" in outcome.detail, "what the kernel says now"
+        assert "ip link set can0" in outcome.detail
+        assert "restart-ms" not in outcome.detail, "the hint drops what it refused"
+
+    def test_the_fallback_is_also_answered_when_the_controller_stays_off(self) -> None:
+        """Up, configured and still BUS-OFF: the fallback ran, and the advice
+        that follows is about the bus rather than about the option."""
+        tool, _run = link(ok(CAN_DOWN_CONFIGURED), (0, "", FALLBACK_STDERR), ok(CAN_UP_BUS_OFF))
+
+        detail = tool.ensure().detail
+
+        assert "BUS-OFF" in detail
+        assert "restart-ms" not in detail
+
+    def test_a_dismissed_dialog_is_not_probed_again(self) -> None:
+        """The other side of the re-probe: nothing ran, so ``before`` is the
+        truth, 未被改动 is accurate, and a second probe would cost the operator a
+        subprocess while a dialog they never answered is still on screen."""
+        tool, run = link(ok(CAN_UP_500K), (PKEXEC_DISMISSED, "", ""))
+
+        outcome = tool.ensure()
+
+        assert outcome.state == LINK_DENIED
+        assert len(run.calls) == 2
+        assert "未被改动" in outcome.detail
+
+
+#: A stand-in for ``ip``.  It records the arguments it was handed, because the
+#: order and the identity of the commands *is* what is under test here, and it
+#: behaves as ``IP_MODE`` asks.
+STUB_IP = """\
+#!/bin/sh
+echo "$*" >> "$IP_LOG"
+refuse() {
+    case "$1" in
+        restart) echo "Error: Device doesn't support restart from Bus Off." >&2 ;;
+        busy)    echo "RTNETLINK answers: Device or resource busy" >&2 ;;
+    esac
+    exit 1
+}
+case "$IP_MODE" in
+    rejects) case "$*" in *restart-ms*) refuse restart ;; esac ;;
+    busy)    case "$*" in *restart-ms*) refuse busy ;; esac ;;
+    always)  case "$*" in *type*) refuse restart ;; esac ;;
+esac
+exit 0
+"""
+
+
+def run_the_script(tmp_path: Path, mode: str) -> tuple[subprocess.CompletedProcess, list[str]]:
+    """Run the real script under a real ``sh``, with a stand-in ``ip`` first on
+    ``PATH``.  No privilege, no interface, no kernel: the stub answers, and the
+    file it writes is the record of what the script asked for, in order."""
+    stub = tmp_path / "ip"
+    stub.write_text(STUB_IP, encoding="utf-8")
+    stub.chmod(0o755)
+    log = tmp_path / "ip-arguments"
+    env = {
+        **os.environ,
+        "PATH": os.pathsep.join([str(tmp_path), os.environ.get("PATH", "")]),
+        "IP_LOG": str(log),
+        "IP_MODE": mode,
+    }
+
+    result = subprocess.run(
+        [
+            "/bin/sh", "-c", SCRIPT, SCRIPT_NAME,
+            "can0", "1000000", str(constants.CAN_LINK_RESTART_MS),
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    return result, calls
+
+
+class TestTheScriptItself:
+    """The script's control flow, which the injected subprocess cannot reach.
+
+    ``set -e`` is what makes the fallback delicate: the retry has to happen
+    *after* the failure it answers and *before* ``up``, and a retry that fails
+    must not fall through to raising an interface with no bitrate.  Run under a
+    real shell against a stub, because that is what the privileged half is.
+    """
+
+    DOWN = "link set can0 down"
+    WITH_RESTART = "link set can0 type can bitrate 1000000 restart-ms 100 fd off"
+    WITHOUT_RESTART = "link set can0 type can bitrate 1000000 fd off"
+    UP = "link set can0 up"
+
+    def test_an_adapter_that_refuses_the_option_is_retried_without_it(
+        self, tmp_path: Path
+    ) -> None:
+        result, calls = run_the_script(tmp_path, "rejects")
+
+        assert result.returncode == 0, result.stderr
+        assert calls == [self.DOWN, self.WITH_RESTART, self.WITHOUT_RESTART, self.UP]
+        assert RESTART_MS_FALLBACK in result.stderr
+
+    def test_an_adapter_that_takes_the_option_is_not_retried(self, tmp_path: Path) -> None:
+        result, calls = run_the_script(tmp_path, "ok")
+
+        assert result.returncode == 0, result.stderr
+        assert calls == [self.DOWN, self.WITH_RESTART, self.UP]
+        assert RESTART_MS_FALLBACK not in result.stderr
+
+    def test_another_failure_is_not_quietly_downgraded(self, tmp_path: Path) -> None:
+        """Only the kernel's own wording for this option buys a retry.  Retrying
+        any other failure would trade an intermittent error for an interface that
+        comes up and silently never auto-recovers."""
+        result, calls = run_the_script(tmp_path, "busy")
+
+        assert result.returncode != 0
+        assert calls == [self.DOWN, self.WITH_RESTART], "no retry, and no up"
+        assert RESTART_MS_FALLBACK not in result.stderr
+
+    def test_a_retry_that_fails_does_not_raise_an_unconfigured_interface(
+        self, tmp_path: Path
+    ) -> None:
+        """``set -e`` still guards the tail: the retry ran, failed, and the script
+        stopped before ``up`` — it must not leave a bitrate-less interface up."""
+        result, calls = run_the_script(tmp_path, "always")
+
+        assert result.returncode != 0
+        assert self.WITHOUT_RESTART in calls, "the retry did run"
+        assert self.UP not in calls
+
+
 class TestWhenPrivilegeIsRefused:
     def test_a_dismissed_dialog(self) -> None:
         """The operator's own decision, and it leaves the interface alone."""
@@ -513,14 +724,27 @@ class TestWhenPrivilegeIsRefused:
 
     def test_a_script_that_ran_and_failed_is_not_a_denial(self) -> None:
         """Different problem, different message: nobody was refused here, the
-        command itself did not work."""
-        tool, _run = link(ok(CAN_UP_500K), (1, "", "RTNETLINK answers: Device or resource busy"))
+        command itself did not work.
+
+        The state reported is the one the script *left behind*, not the one it
+        found.  Its first command takes the interface down, so "未被改动" was a
+        claim the operator could check and catch — on this bench, the interface
+        really was down while the console said it had not been touched.
+        """
+        tool, run = link(
+            ok(CAN_UP_500K),
+            (1, "", "RTNETLINK answers: Device or resource busy"),
+            ok(CAN_DOWN_CONFIGURED),
+        )
 
         outcome = tool.ensure()
 
         assert outcome.state == LINK_FAILED
         assert outcome.needs_attention
         assert "resource busy" in outcome.detail
+        assert len(run.calls) == 3, "the failure is re-probed before it is described"
+        assert "未被改动" not in outcome.detail
+        assert "比特率 1000000" in outcome.detail, "and the probe's answer is quoted"
 
     def test_a_refusal_is_still_not_an_error_the_operator_must_clear(self) -> None:
         """It is reported, not latched: the connect attempt that follows is what

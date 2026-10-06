@@ -58,6 +58,10 @@ PYTHON_BIN=.venv/bin/python3 ./run_litegrip_studio.sh sim
   0）就是**永远躺着**，之后每次发帧都返回 ENETDOWN，而 `connect()` 只是开 socket 不会
   报错——错误要等到第一个真的发帧的动作（使能）才冒出来，你看到的就是一句内核文案
   「网络已断开 errno 100」。
+- **不是每个适配器都实现了 `restart-ms`**，不支持的会直接说：本台架上的 gs_usb 克隆
+  （`1d50:606f`）回的是「Device doesn't support restart from Bus Off.」。碰到这句明确的
+  拒绝，控制台会去掉这个选项重配一次，照样把接口起起来——仍然只弹一次授权框，日志里多
+  一句说明。在这类适配器上，控制器进了总线关闭**不会自恢复**，下次点连接会重新配好。
 - CAN FD 接口：只报告、不改动。SDK 自己按接口 MTU 判断 FD 并通信，而「改回经典 CAN」
   会把同一条总线上的其他节点一起改掉。
 - 真碰上 ENETDOWN 时，**它会被当成链路问题而不是电机问题**：提示里直接写接口名和
@@ -78,6 +82,10 @@ sudo ip link set can0 type can bitrate 1000000 restart-ms 100 fd off
 sudo ip link set can0 up
 ./run_litegrip_studio.sh gui
 ```
+
+中间那条如果报「Device doesn't support restart from Bus Off.」，说明你的适配器不支持
+`restart-ms`——去掉这一个选项，另外两条照跑。控制台自己会这么处理，失败时给的手动命令
+也是按你的硬件能跑通的那一版。
 
 **首次接真机先从标定页跑一遍自动标定，再动滑块。** 探测一结束结果就写盘。
 若标定页显示 `FACTORY` 或 `BLOCKED`，先标定，不要靠勾选覆盖去动。

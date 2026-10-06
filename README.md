@@ -64,6 +64,12 @@ bitrate — and only in that one place:
   frame send returns ENETDOWN, and `connect()` only opens a socket, so nothing is reported until
   the first action that really sends a frame (enable). What you then see is a kernel message,
   "Network is down, errno 100".
+- **Not every adapter implements `restart-ms`**, and the ones that do not say so: the gs_usb
+  clone on this bench (`1d50:606f`) answers "Device doesn't support restart from Bus Off." When
+  that specific refusal comes back, the console drops the option, configures without it, and
+  brings the interface up anyway — one authorization, and a log line saying the difference. On
+  such an adapter a bus-off controller does **not** recover by itself; the next Connect
+  reconfigures it.
 - A CAN FD interface is reported, never changed. The SDK detects FD from the interface MTU and
   works with it, whereas changing the interface back to classic CAN would change every other node
   on that bus too.
@@ -88,6 +94,10 @@ sudo ip link set can0 type can bitrate 1000000 restart-ms 100 fd off
 sudo ip link set can0 up
 ./run_litegrip_studio.sh gui
 ```
+
+If the middle command fails with "Device doesn't support restart from Bus Off.", your adapter
+does not implement `restart-ms` — drop that one option and run the other two. The console does
+this by itself, and a failure message quotes the form that works on your hardware.
 
 **On a real gripper, run 自动标定 from the calibration page before touching the
 slider.** The result is written out as soon as the probe finishes. If the calibration page shows
