@@ -31,6 +31,15 @@ it failed for the operator exactly as the automatic attempt had.  So the option 
 dropped when — and only when — the kernel is heard to reject it, and the command
 offered is the one that works on the hardware in front of them.
 
+The same bench showed the harder version of that: a state no ``ip`` command can
+leave.  The adapter can lose its USB endpoint table, after which ``up`` answers
+ENOENT while the interface itself is configured correctly; only a fresh probe of
+the device puts the table back.  The script therefore reloads the adapter's
+driver — once, and only for the driver that was diagnosed this way — and
+configures the interface again.  When even that fails, the message stops offering
+``ip link`` and sends the operator to the adapter, because that is the only thing
+left that can work.
+
 *The device name never reaches a shell as text.*  The privileged half is one
 fixed script, and the interface name and bitrate are handed to it as positional
 arguments.  A name that is not a plausible interface name is refused before any
@@ -66,6 +75,20 @@ DEVICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,14}$")
 #: and the reader share this one literal rather than agreeing by eye.
 RESTART_MS_FALLBACK = "litegrip: restart-ms unsupported"
 
+#: Printed by the script once it has unbound and rebound the adapter's driver.
+#: Same purpose as :data:`RESTART_MS_FALLBACK`: the privileged half has no other
+#: channel for saying what it did.
+DRIVER_RELOADED = "litegrip: reloaded the CAN driver"
+
+#: The one driver the console reloads by itself.
+#:
+#: Unbinding a driver resets *every* interface it serves, so this is a list of
+#: one and it holds the adapter the failure was diagnosed on (see README): on a
+#: machine with several adapters of that kind, the others are dropped to the
+#: floor along with it.  A driver this console has never seen in that state is
+#: reported and left to the operator instead.
+RELOADABLE_DRIVER = "gs_usb"
+
 #: The privileged half, as one script.  ``$1`` is the interface and ``$2`` the
 #: bitrate; neither is interpolated into this text, so shell metacharacters in a
 #: device name (which :data:`DEVICE_RE` has already rejected) could not execute
@@ -96,21 +119,81 @@ RESTART_MS_FALLBACK = "litegrip: restart-ms unsupported"
 #: ``up`` leaves it configured but deaf — and a message that quotes them as one
 #: blob of stderr is what made the old report claim the interface was untouched
 #: while it was in fact down.
+#:
+#: ``up`` is also the one step an ``ip`` command cannot repair, so it gets the
+#: one repair a shell can do: see :func:`_usb_endpoint_failure`.  That repair sits
+#: in the same script as the commands it follows, under the same single
+#: authorization — two password dialogs for one attempt at one interface is not a
+#: thing to make the operator sit through.
 SCRIPT = (
     "set -e\n"
+    # strerror(3) is translated; the ENOENT this script branches on is read back
+    # by _usb_endpoint_failure() as one fixed string.  Pinning the locale is what
+    # keeps the two ends agreeing, whatever the operator's is set to.
+    "LC_ALL=C\n"
+    "export LC_ALL\n"
     'dev="$1"\n'
+    'bitrate="$2"\n'
+    'restart_ms="$3"\n'
+    # The fallback marker is printed once even though ``configure`` can run
+    # twice: after a reload it is the same adapter refusing the same option, and
+    # saying so twice would read as two separate faults.
+    "marker=0\n"
     'die() { printf \'litegrip: %s failed: %s\\n\' "$1" "$2" >&2; exit 1; }\n'
-    'err=$(ip link set "$dev" down 2>&1) || die down "$err"\n'
-    'if ! err=$(ip link set "$dev" type can bitrate "$2" restart-ms "$3" fd off 2>&1); then\n'
+    # Configure only — never raises the interface.  The first attempt carries
+    # restart-ms; the retry below drops it, for the adapters that refuse it.
+    "configure() {\n"
+    '    if err=$(ip link set "$dev" type can bitrate "$bitrate" restart-ms "$restart_ms" fd off 2>&1); then\n'
+    "        return 0\n"
+    "    fi\n"
     '    case "$err" in\n'
     '        *[Rr]estart*)\n'
-    '            err=$(ip link set "$dev" type can bitrate "$2" fd off 2>&1) || die configure "$err"\n'
-    f'            echo "{RESTART_MS_FALLBACK}" >&2\n'
-    '            ;;\n'
+    '            err=$(ip link set "$dev" type can bitrate "$bitrate" fd off 2>&1) || die configure "$err"\n'
+    '            if [ "$marker" = 0 ]; then\n'
+    f'                echo "{RESTART_MS_FALLBACK}" >&2\n'
+    "                marker=1\n"
+    "            fi\n"
+    "            ;;\n"
     '        *) die configure "$err" ;;\n'
-    '    esac\n'
-    'fi\n'
-    'err=$(ip link set "$dev" up 2>&1) || die up "$err"\n'
+    "    esac\n"
+    "    return 0\n"
+    "}\n"
+    # Unbind and rebind the adapter's driver.  This is what rebuilds the USB
+    # endpoint table — usb_unbind_interface() disables the interface's endpoints
+    # and immediately re-enables them — so it is the only repair there is for
+    # `up` failing with ENOENT.  The new netdev comes back down and unconfigured,
+    # hence configure() again, and the wait, because the probe after a rebind is
+    # asynchronous.
+    "reload_driver() {\n"
+    '    driver=$(readlink -f "/sys/class/net/$dev/device/driver" 2>/dev/null) || driver=\n'
+    f'    [ "${{driver##*/}}" = "{RELOADABLE_DRIVER}" ] || return 1\n'
+    f'    err=$(modprobe -r "{RELOADABLE_DRIVER}" 2>&1) || die reload "$err"\n'
+    f'    err=$(modprobe "{RELOADABLE_DRIVER}" 2>&1) || die reload "$err"\n'
+    "    found=0\n"
+    "    n=0\n"
+    '    while [ "$n" -lt 50 ]; do\n'
+    '        if ip link show "$dev" >/dev/null 2>&1; then\n'
+    "            found=1\n"
+    "            break\n"
+    "        fi\n"
+    "        n=$((n + 1))\n"
+    "        sleep 0.1\n"
+    "    done\n"
+    '    [ "$found" = 1 ] || die reload "$dev did not come back after reloading $driver"\n'
+    "    configure\n"
+    f'    echo "{DRIVER_RELOADED}" >&2\n'
+    "}\n"
+    'err=$(ip link set "$dev" down 2>&1) || die down "$err"\n'
+    "configure\n"
+    'if ! err=$(ip link set "$dev" up 2>&1); then\n'
+    '    case "$err" in\n'
+    "        *'No such file or directory'*)\n"
+    '            reload_driver || die up "$err"\n'
+    '            err=$(ip link set "$dev" up 2>&1) || die up "$err"\n'
+    "            ;;\n"
+    '        *) die up "$err" ;;\n'
+    "    esac\n"
+    "fi\n"
 )
 
 #: ``litegrip: <step> failed: <what ip said>``.  ``\w+`` and not ``.+`` so a
@@ -124,7 +207,14 @@ _STEP_WORDS = {
     "down": "把接口 down 失败",
     "configure": "配置接口失败",
     "up": "把接口 up 失败",
+    "reload": "重载适配器驱动失败",
 }
+
+
+def _last_failure(stderr: str) -> tuple[str, str] | None:
+    """The last ``litegrip: <step> failed: <what it said>`` line, split."""
+    found = _FAILED_STEP.findall(stderr)
+    return found[-1] if found else None
 
 
 def _step_failure(stderr: str) -> str | None:
@@ -134,10 +224,10 @@ def _step_failure(stderr: str) -> str | None:
     refusal, a shell that could not find ``ip`` — and the caller falls back to
     quoting it as it stands.
     """
-    found = _FAILED_STEP.findall(stderr)
-    if not found:
+    found = _last_failure(stderr)
+    if found is None:
         return None
-    step, said = found[-1]
+    step, said = found
     return f"{_STEP_WORDS.get(step, step)}：{said.strip()}"
 
 
@@ -311,6 +401,38 @@ def _adapter_rejected_restart_ms(stderr: str) -> bool:
     return "restart" in stderr.lower()
 
 
+def _usb_endpoint_failure(stderr: str) -> bool:
+    """Did ``up`` fail because the driver has no USB endpoint left to submit to?
+
+    ENOENT out of ``ip`` is the kernel refusing a URB whose endpoint is not in
+    the device's table any more — ``usb_pipe_endpoint()`` returning NULL is the
+    only thing that yields ``-ENOENT`` from ``usb_submit_urb()`` — and it reaches
+    userspace as ``RTNETLINK answers: No such file or directory``.  The script
+    pins ``LC_ALL=C``, which is what makes that one fixed string rather than
+    whatever the operator's locale translates ``strerror`` into.
+
+    The interface was configured a moment earlier, so its *name* cannot be what
+    is missing: an unknown name fails at ``down``, long before this.  What is
+    missing is the endpoint table, and no configuration command puts it back —
+    which is why this failure, unlike every other one here, must not be answered
+    with ``ip link``.
+    """
+    return "No such file or directory" in stderr
+
+
+#: Offered when the state above is one the console cannot repair: the reload is
+#: tried automatically whenever the adapter's driver is one this console is
+#: willing to unbind, so what is left for the operator is the device itself.
+USB_ENDPOINT_HINT = "拔插一次适配器（换一个 USB 口更好）后重新连接"
+
+#: ... and the software half of it, for the adapters whose driver this console
+#: does not touch on its own.
+RELOAD_HINT = (
+    f"也可以手动重载驱动：sudo modprobe -r {RELOADABLE_DRIVER}"
+    f" && sudo modprobe {RELOADABLE_DRIVER}"
+)
+
+
 def manual_hint(device: str, bitrate: int, *, restart_ms: bool = True) -> str:
     """The commands an operator can paste instead, and what the alerts quote.
 
@@ -440,11 +562,27 @@ class CanLink:
         # this message offers may carry the option at all.
         stderr = result.stderr or ""
         fell_back = RESTART_MS_FALLBACK in stderr
+        reloaded = DRIVER_RELOADED in stderr
         hint = manual_hint(
             self.channel,
             self.bitrate,
             restart_ms=not _adapter_rejected_restart_ms(stderr),
         )
+
+        # The one failure whose advice is not a command: when the driver has no
+        # USB endpoints there is nothing left to configure, and handing over
+        # ``ip link`` again would be the same broken hint the restart-ms case
+        # taught this module to stop giving.  A failed reload counts as the same
+        # state — it is entered only from it — and it says why in its own words.
+        step = _last_failure(stderr)
+        step_name = step[0] if step else ""
+        usb_trouble = step_name == "reload" or (
+            step_name == "up" and _usb_endpoint_failure(stderr)
+        )
+        if usb_trouble:
+            hint = USB_ENDPOINT_HINT
+            if not reloaded and step_name == "up":
+                hint += f"；{RELOAD_HINT}"
 
         # A nonzero exit means the privileged half did not run, and the two
         # reasons for that are worth telling apart: a dismissed dialog is the
@@ -477,7 +615,19 @@ class CanLink:
                 # the marker is printed after the retry, and ``set -e`` would
                 # have stopped the script before it otherwise.
                 detail += "已去掉适配器不支持的 restart-ms 重试。"
-            detail += f"手动执行：{hint}"
+            if reloaded:
+                detail += f"已自动重载 {RELOADABLE_DRIVER} 驱动重试，仍未起来。"
+            if usb_trouble:
+                # Said because it changes what the operator does next: nothing
+                # about this interface is wrong, so re-running the three
+                # commands would be three commands that cannot help.
+                detail += (
+                    "接口本身的配置没问题，是适配器在 USB 层没有就绪"
+                    "（驱动提交不了请求，内核报 ENOENT），重配接口救不了它。"
+                )
+                detail += f"处理：{hint}"
+            else:
+                detail += f"手动执行：{hint}"
             return LinkOutcome(LINK_FAILED, detail, before=before, after=after)
 
         after = self.probe(ip)
@@ -492,6 +642,14 @@ class CanLink:
                 detail += (
                     "；此适配器不支持 restart-ms，控制器总线关闭后不会自恢复，"
                     "下次连接会重新配置"
+                )
+            if reloaded:
+                # Also a log line rather than a banner — the link works — but one
+                # with a consequence the operator should know about: the reload
+                # took every other interface on that driver down with it.
+                detail += (
+                    f"；期间适配器在 USB 层没有就绪，已重载 {RELOADABLE_DRIVER} 驱动修好"
+                    "（本机其它同驱动接口也被一起重置）"
                 )
             return LinkOutcome(LINK_CONFIGURED, detail, before=before, after=after)
         if after.deaf:

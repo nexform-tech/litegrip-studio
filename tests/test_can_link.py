@@ -30,6 +30,7 @@ LiteGripError = litegrip.LiteGripError
 
 from litegrip_studio import constants
 from litegrip_studio.can_link import (
+    DRIVER_RELOADED,
     LINK_CONFIGURED,
     LINK_DENIED,
     LINK_FAILED,
@@ -38,6 +39,7 @@ from litegrip_studio.can_link import (
     LINK_OK,
     PKEXEC_DISMISSED,
     PKEXEC_NOT_AUTHORIZED,
+    RELOADABLE_DRIVER,
     RESTART_MS_FALLBACK,
     SCRIPT,
     SCRIPT_NAME,
@@ -158,6 +160,10 @@ FALLBACK_STDERR = RESTART_MS_FALLBACK + "\n"
 #: same thing by hand).  The driver refuses to start the controller, and the
 #: kernel reports it as ENOENT.
 UP_REFUSED = "RTNETLINK answers: No such file or directory"
+
+#: What the script's stderr looks like when it had to reload the driver: the
+#: marker alone, printed after the interface is configured again.
+RELOADED_STDERR = DRIVER_RELOADED + "\n"
 
 
 def as_the_script_says(step: str, said: str) -> str:
@@ -386,8 +392,8 @@ class TestWhatItRuns:
         tool.ensure()
 
         script = run.pkexec_calls[0][3]
-        assert f'restart-ms "$3"' in script
-        assert "$3" in script and "restart-ms" in script
+        assert 'restart_ms="$3"' in script
+        assert 'restart-ms "$restart_ms"' in script
         assert str(constants.CAN_LINK_RESTART_MS) in run.pkexec_calls[0]
         # And the one retry, without the option, for the adapters that refuse it.
         # The count rather than a substring: a second ``type can bitrate`` is
@@ -395,6 +401,11 @@ class TestWhatItRuns:
         assert script.count("type can bitrate") == 2, script
         assert RESTART_MS_FALLBACK in script, "the retry says that it took place"
         assert 'ip link set "$dev" up' in script
+        # The locale is pinned before anything can fail, because the one failure
+        # the script reads back — ENOENT, the trigger for the reload — is matched
+        # by its English wording rather than by an exit code that cannot tell it
+        # from any other refusal.
+        assert script.index("export LC_ALL") < script.index("ip link set")
 
     def test_the_device_reaches_the_script_as_an_argument(self) -> None:
         """Not spliced into the text a shell will read: ``$1`` is the interface,
@@ -622,7 +633,7 @@ class TestAnAdapterThatRefusesRestartMs:
         assert "restart-ms unsupported" not in outcome.detail, "the marker is ours, not his"
         assert "已去掉适配器不支持的 restart-ms 重试" in outcome.detail
         assert "未 up，经典 CAN，比特率 1000000" in outcome.detail
-        assert "restart-ms" not in outcome.detail.split("手动执行：")[1], "the hint too"
+        assert "ip link set can0" not in outcome.detail, "see the class below"
 
     def test_the_fallback_is_also_answered_when_the_controller_stays_off(self) -> None:
         """Up, configured and still BUS-OFF: the fallback ran, and the advice
@@ -650,6 +661,11 @@ class TestAnAdapterThatRefusesRestartMs:
 #: A stand-in for ``ip``.  It records the arguments it was handed, because the
 #: order and the identity of the commands *is* what is under test here, and it
 #: behaves as ``IP_MODE`` asks.
+#:
+#: ``uphealed`` is the bench's own sequence: ``up`` is refused until the driver
+#: has been rebound, exactly as it was refused until ``modprobe -r gs_usb &&
+#: modprobe gs_usb`` was run by hand.  It reads the file the modprobe stand-in
+#: touches, which is how the two stubs model one machine.
 STUB_IP = """\
 #!/bin/sh
 echo "$*" >> "$IP_LOG"
@@ -670,25 +686,82 @@ case "$IP_MODE" in
                   *restart-ms*) refuse restart ;;
                   "link set can0 up") refuse up ;;
               esac ;;
+    uphealed) case "$*" in
+                  *restart-ms*) refuse restart ;;
+                  "link set can0 up") [ -e "$IP_REBOUND" ] || refuse up ;;
+              esac ;;
+    noreturn) case "$*" in
+                  *restart-ms*) refuse restart ;;
+                  "link set can0 up") refuse up ;;
+                  "link show can0") exit 1 ;;
+              esac ;;
     downfails) case "$*" in "link set can0 down") refuse missing ;; esac ;;
 esac
 exit 0
 """
 
+#: A stand-in for ``modprobe``: it records what it was asked to unload in the
+#: same log as the ``ip`` stand-in — one file, so the order across both tools is
+#: what the assertions read — and touches another file so that ``ip`` can tell
+#: whether the rebind has happened yet.  ``MODPROBE_MODE`` decides whether it
+#: works at all.
+STUB_MODPROBE = """\
+#!/bin/sh
+echo "modprobe $*" >> "$IP_LOG"
+case "$MODPROBE_MODE" in
+    fails) echo "modprobe: FATAL: Module gs_usb is in use." >&2; exit 1 ;;
+esac
+[ "$1" = "-r" ] || : > "$IP_REBOUND"
+exit 0
+"""
 
-def run_the_script(tmp_path: Path, mode: str) -> tuple[subprocess.CompletedProcess, list[str]]:
-    """Run the real script under a real ``sh``, with a stand-in ``ip`` first on
-    ``PATH``.  No privilege, no interface, no kernel: the stub answers, and the
-    file it writes is the record of what the script asked for, in order."""
-    stub = tmp_path / "ip"
-    stub.write_text(STUB_IP, encoding="utf-8")
-    stub.chmod(0o755)
+#: A stand-in for ``readlink``, answering for the driver symlink and nothing
+#: else.  The real ``readlink -f`` on a path that is not there still prints it,
+#: which is what a virtual interface looks like from the script.
+STUB_READLINK = """\
+#!/bin/sh
+case "$2" in
+    */device/driver) [ -n "$DRIVER_NAME" ] && echo "/sys/bus/usb/drivers/$DRIVER_NAME" ;;
+    *) echo "$2" ;;
+esac
+exit 0
+"""
+
+
+def run_the_script(
+    tmp_path: Path,
+    mode: str,
+    *,
+    driver: str = RELOADABLE_DRIVER,
+    modprobe: str = "ok",
+) -> tuple[subprocess.CompletedProcess, list[str]]:
+    """Run the real script under a real ``sh``, with stand-ins first on ``PATH``.
+
+    No privilege, no interface, no kernel.  ``ip``, ``modprobe`` and ``readlink``
+    are all stubbed, and they are stubbed for every test rather than only for the
+    ones that expect them to be called: a test that reaches the reload branch by
+    accident must not be able to unload a module on the machine running the
+    suite.  The log the stubs share is the record of what the script asked for,
+    in order.
+    """
+    stubs = {
+        "ip": STUB_IP,
+        "modprobe": STUB_MODPROBE,
+        "readlink": STUB_READLINK,
+    }
+    for name, text in stubs.items():
+        path = tmp_path / name
+        path.write_text(text, encoding="utf-8")
+        path.chmod(0o755)
     log = tmp_path / "ip-arguments"
     env = {
         **os.environ,
         "PATH": os.pathsep.join([str(tmp_path), os.environ.get("PATH", "")]),
         "IP_LOG": str(log),
         "IP_MODE": mode,
+        "IP_REBOUND": str(tmp_path / "rebound"),
+        "MODPROBE_MODE": modprobe,
+        "DRIVER_NAME": driver,
     }
 
     result = subprocess.run(
@@ -761,17 +834,98 @@ class TestTheScriptItself:
         """The run that produced the message on the bench, pinned as a script.
 
         The option is refused, the retry configures the interface, the marker is
-        printed — and then ``up`` is refused, which is what actually stopped it.
-        Two different faults in one run, and the order of these two lines is the
-        whole reason a reader can tell them apart.
+        printed — and then ``up`` answers ENOENT, which is what actually stopped
+        it.  That answer is now the trigger for one more attempt: the driver is
+        rebound, the fresh interface is configured again, and ``up`` is tried
+        once more.  Two different faults in one run, and the order of these lines
+        is the whole reason a reader can tell them apart.
         """
         result, calls = run_the_script(tmp_path, "upfails")
 
         assert result.returncode != 0
+        assert calls == [
+            self.DOWN,
+            self.WITH_RESTART,
+            self.WITHOUT_RESTART,
+            self.UP,
+            "modprobe -r gs_usb",
+            "modprobe gs_usb",
+            "link show can0",
+            self.WITH_RESTART,
+            self.WITHOUT_RESTART,
+            self.UP,
+        ], "the reload happened between the two raises, and only once"
+        assert result.stderr == (
+            RESTART_MS_FALLBACK + "\n"
+            + RELOADED_STDERR
+            + as_the_script_says("up", UP_REFUSED)
+        ), "the markers say what the script did; the last line is what failed"
+
+    def test_a_rebound_driver_is_what_raises_the_interface(self, tmp_path: Path) -> None:
+        """The bench's own repair, in the script: ``up`` is refused until the
+        driver has been rebound — run by hand there, and run here by the console.
+        The interface that comes back from the rebind has no bitrate, so it is
+        configured again before it is raised."""
+        result, calls = run_the_script(tmp_path, "uphealed")
+
+        assert result.returncode == 0, result.stderr
+        assert calls == [
+            self.DOWN,
+            self.WITH_RESTART,
+            self.WITHOUT_RESTART,
+            self.UP,
+            "modprobe -r gs_usb",
+            "modprobe gs_usb",
+            "link show can0",
+            self.WITH_RESTART,
+            self.WITHOUT_RESTART,
+            self.UP,
+        ]
+        assert result.stderr == RESTART_MS_FALLBACK + "\n" + RELOADED_STDERR
+
+    def test_another_drivers_interface_is_never_unbound(self, tmp_path: Path) -> None:
+        """Unbinding a driver resets every interface it serves, so the console
+        does it for one driver only — the one this was diagnosed on.  Any other
+        adapter gets the failure reported and its driver left alone."""
+        result, calls = run_the_script(tmp_path, "uphealed", driver="kvaser_pciefd")
+
+        assert result.returncode != 0
+        assert not [call for call in calls if call.startswith("modprobe")], calls
         assert calls == [self.DOWN, self.WITH_RESTART, self.WITHOUT_RESTART, self.UP]
         assert result.stderr == (
             RESTART_MS_FALLBACK + "\n" + as_the_script_says("up", UP_REFUSED)
-        ), "the marker proves the retry worked; the last line is what failed"
+        )
+
+    def test_a_driver_that_cannot_be_unloaded_says_so(self, tmp_path: Path) -> None:
+        """``modprobe -r`` fails when the module is in use, and then the fault is
+        in the reload rather than in the interface: it is named as that step, and
+        the interface is not raised again behind its back."""
+        result, calls = run_the_script(tmp_path, "uphealed", modprobe="fails")
+
+        assert result.returncode != 0
+        assert result.stderr == (
+            RESTART_MS_FALLBACK + "\n"
+            + as_the_script_says(
+                "reload", "modprobe: FATAL: Module gs_usb is in use."
+            )
+        )
+        assert calls.count(self.UP) == 1, "no second attempt after a failed reload"
+
+    def test_an_interface_that_never_comes_back_says_so(self, tmp_path: Path) -> None:
+        """The rebind is asynchronous, so the script waits — up to five seconds
+        here, which is what this test costs.  When the interface does not return
+        the script must not go on to configure and raise something that is not
+        there."""
+        result, calls = run_the_script(tmp_path, "noreturn")
+
+        assert result.returncode != 0
+        assert result.stderr == (
+            RESTART_MS_FALLBACK + "\n"
+            + as_the_script_says(
+                "reload", "can0 did not come back after reloading /sys/bus/usb/drivers/gs_usb"
+            )
+        )
+        assert calls.count(self.UP) == 1, "the interface was never raised again"
 
     def test_a_step_that_fails_first_says_so(self, tmp_path: Path) -> None:
         """The interface is only touched by ``down``, so a failure there is the
@@ -781,6 +935,129 @@ class TestTheScriptItself:
         assert result.returncode != 0
         assert calls == [self.DOWN], "nothing else ran"
         assert result.stderr == as_the_script_says("down", "Cannot find device \"can0\"")
+
+
+class TestAnAdapterThatLostItsUsbEndpoints:
+    """The second state this bench reaches, and the one no command can leave.
+
+    ``up`` answers ENOENT while the interface is configured exactly right: the
+    driver has lost the USB endpoint table and only a fresh probe of the device
+    puts it back.  Run by hand, ``modprobe -r gs_usb && modprobe gs_usb`` is what
+    repaired it; the script now does that itself, and these are the messages for
+    the two ways it can end.  The one thing no message here may do is hand the
+    operator another ``ip link`` command, which is the hint that has already been
+    proved not to work.
+    """
+
+    def test_a_reload_that_worked_is_reported_without_a_banner(self) -> None:
+        """The interface is up and the SDK can drive it, so this is a log line —
+        but the reload took the machine's other gs_usb interfaces with it, and
+        that consequence is worth the words."""
+        tool, run = link(
+            ok(CAN_DOWN_CONFIGURED),
+            (0, "", FALLBACK_STDERR + RELOADED_STDERR),
+            ok(CAN_UP_1M),
+        )
+
+        outcome = tool.ensure()
+
+        assert outcome.state == LINK_CONFIGURED
+        assert not outcome.needs_attention
+        assert len(run.pkexec_calls) == 1, "one script, one dialog, reload included"
+        assert "已重载 gs_usb 驱动修好" in outcome.detail
+        assert "其它同驱动接口也被一起重置" in outcome.detail
+
+    def test_a_plain_success_does_not_mention_a_reload(self) -> None:
+        """The other half of the same rule, and the one the bench usually sees."""
+        tool, _run = link(ok(CAN_DOWN_CONFIGURED), (0, "", ""), ok(CAN_UP_1M))
+
+        detail = tool.ensure().detail
+
+        assert "重载" not in detail and "gs_usb" not in detail
+
+    def test_a_reload_that_did_not_help_sends_the_operator_to_the_adapter(
+        self,
+    ) -> None:
+        """The reload ran and ``up`` still refuses: there is nothing left to
+        configure, so the advice is the device rather than the interface, and the
+        reload that was already tried is not offered again as if it were new."""
+        tool, _run = link(
+            ok(CAN_DOWN_CONFIGURED),
+            (
+                1,
+                "",
+                FALLBACK_STDERR + RELOADED_STDERR + as_the_script_says("up", UP_REFUSED),
+            ),
+            ok(CAN_DOWN_CONFIGURED),
+        )
+
+        detail = tool.ensure().detail
+
+        assert "把接口 up 失败" in detail
+        assert UP_REFUSED in detail
+        assert "已自动重载 gs_usb 驱动重试，仍未起来" in detail
+        assert "USB 层没有就绪" in detail
+        assert "处理：拔插一次适配器" in detail
+        assert "ip link set can0" not in detail
+        assert "手动执行" not in detail, "this is not a command to paste"
+
+    def test_a_driver_this_console_will_not_unbind_is_offered_by_hand(self) -> None:
+        """The script left another driver alone on purpose, so the manual command
+        names gs_usb — and only as something the operator may try, since the
+        console cannot know that this adapter is one."""
+        tool, _run = link(
+            ok(CAN_DOWN_CONFIGURED),
+            (1, "", as_the_script_says("up", UP_REFUSED)),
+            ok(CAN_DOWN_CONFIGURED),
+        )
+
+        detail = tool.ensure().detail
+
+        assert "拔插一次适配器" in detail
+        assert "sudo modprobe -r gs_usb && sudo modprobe gs_usb" in detail
+        assert "ip link set can0" not in detail
+
+    def test_a_reload_that_failed_quotes_what_modprobe_said(self) -> None:
+        """``Module gs_usb is in use`` is a fact about this machine that no
+        generic sentence in this module could have guessed, so it is passed
+        through — and the step it is attributed to is the reload, not ``up``."""
+        tool, _run = link(
+            ok(CAN_DOWN_CONFIGURED),
+            (
+                1,
+                "",
+                FALLBACK_STDERR
+                + as_the_script_says("reload", "modprobe: FATAL: Module gs_usb is in use."),
+            ),
+            ok(CAN_DOWN_CONFIGURED),
+        )
+
+        detail = tool.ensure().detail
+
+        assert "重载适配器驱动失败" in detail
+        assert "Module gs_usb is in use" in detail
+        assert "拔插一次适配器" in detail
+        assert "ip link set can0" not in detail
+
+    def test_an_up_failure_that_is_not_this_one_keeps_the_usual_advice(self) -> None:
+        """The guard on the whole class: ENOENT is the trigger, nothing wider.
+        Every other way ``up`` can fail is still answered with the commands the
+        README documents, because for those the interface really is the thing to
+        fix."""
+        tool, _run = link(
+            ok(CAN_DOWN_CONFIGURED),
+            (
+                1,
+                "",
+                as_the_script_says("up", "RTNETLINK answers: Operation not permitted"),
+            ),
+            ok(CAN_DOWN_CONFIGURED),
+        )
+
+        detail = tool.ensure().detail
+
+        assert "手动执行：sudo ip link set can0 down" in detail
+        assert "拔插" not in detail
 
 
 class TestWhenPrivilegeIsRefused:
