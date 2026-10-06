@@ -24,6 +24,13 @@ bitrate differs, because the SDK drives FD by itself (it reads the interface MTU
 and picks the frame format) and "correcting" it would mean rewriting a bus that
 other nodes are also on, on the strength of a guess.
 
+The other half of that rule is the manual command quoted in a failure.  An
+adapter that refuses an option cannot be handed the same option again as advice:
+the bench's gs_usb clone rejects ``restart-ms`` outright, and the hint built from
+it failed for the operator exactly as the automatic attempt had.  So the option is
+dropped when — and only when — the kernel is heard to reject it, and the command
+offered is the one that works on the hardware in front of them.
+
 *The device name never reaches a shell as text.*  The privileged half is one
 fixed script, and the interface name and bitrate are handed to it as positional
 arguments.  A name that is not a plausible interface name is refused before any
@@ -54,6 +61,11 @@ log = logging.getLogger(__name__)
 #: keeps the guarantee independent of how the script is written.
 DEVICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,14}$")
 
+#: Printed by the script's fallback branch.  The text is the only channel the
+#: privileged half has for saying *which* of its commands was run, so the script
+#: and the reader share this one literal rather than agreeing by eye.
+RESTART_MS_FALLBACK = "litegrip: restart-ms unsupported"
+
 #: The privileged half, as one script.  ``$1`` is the interface and ``$2`` the
 #: bitrate; neither is interpolated into this text, so shell metacharacters in a
 #: device name (which :data:`DEVICE_RE` has already rejected) could not execute
@@ -66,13 +78,68 @@ DEVICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,14}$")
 #: the classic CAN the rest of this console assumes (the SDK auto-detects FD on
 #: its own, but nothing here configures a data bitrate); a bus that needs FD is
 #: one the operator configures themselves.
+#:
+#: The middle command is the one an adapter can refuse, and not every adapter
+#: implements ``restart-ms``: the bench's gs_usb clone (``1d50:606f``) answers
+#: "Device doesn't support restart from Bus Off.", after which ``set -e`` would
+#: abort before the interface was ever raised — leaving it *down*, which is worse
+#: than the state it started in.  So that one failure is retried without the
+#: option, and only that one: the retry is gated on the kernel's own wording for
+#: it, because retrying every other failure (``resource busy``, say) would turn
+#: an intermittent error into a silent downgrade — an interface that comes up and
+#: quietly never auto-recovers.  ``set -e`` still guards the tail: a retry that
+#: also fails aborts before ``up``, so nothing is ever raised without a bitrate.
+#:
+#: Every command reports which step it was through :func:`_step_failure`.  The
+#: three steps have three different consequences — a failed ``down`` leaves the
+#: interface exactly as it was, a failed ``configure`` leaves it down, a failed
+#: ``up`` leaves it configured but deaf — and a message that quotes them as one
+#: blob of stderr is what made the old report claim the interface was untouched
+#: while it was in fact down.
 SCRIPT = (
     "set -e\n"
     'dev="$1"\n'
-    'ip link set "$dev" down\n'
-    'ip link set "$dev" type can bitrate "$2" restart-ms "$3" fd off\n'
-    'ip link set "$dev" up\n'
+    'die() { printf \'litegrip: %s failed: %s\\n\' "$1" "$2" >&2; exit 1; }\n'
+    'err=$(ip link set "$dev" down 2>&1) || die down "$err"\n'
+    'if ! err=$(ip link set "$dev" type can bitrate "$2" restart-ms "$3" fd off 2>&1); then\n'
+    '    case "$err" in\n'
+    '        *[Rr]estart*)\n'
+    '            err=$(ip link set "$dev" type can bitrate "$2" fd off 2>&1) || die configure "$err"\n'
+    f'            echo "{RESTART_MS_FALLBACK}" >&2\n'
+    '            ;;\n'
+    '        *) die configure "$err" ;;\n'
+    '    esac\n'
+    'fi\n'
+    'err=$(ip link set "$dev" up 2>&1) || die up "$err"\n'
 )
+
+#: ``litegrip: <step> failed: <what ip said>``.  ``\w+`` and not ``.+`` so a
+#: kernel message that itself contains the word "failed" cannot be mistaken for
+#: the step name; :func:`_step_failure` reads the last match, which is the step
+#: that stopped the script.
+_FAILED_STEP = re.compile(r"^litegrip: (\w+) failed: (.*)$", re.M)
+
+#: The script's step names in the operator's words.
+_STEP_WORDS = {
+    "down": "把接口 down 失败",
+    "configure": "配置接口失败",
+    "up": "把接口 up 失败",
+}
+
+
+def _step_failure(stderr: str) -> str | None:
+    """Which step of the privileged script failed, in the operator's words.
+
+    ``None`` means the text did not come from the script at all — a ``pkexec``
+    refusal, a shell that could not find ``ip`` — and the caller falls back to
+    quoting it as it stands.
+    """
+    found = _FAILED_STEP.findall(stderr)
+    if not found:
+        return None
+    step, said = found[-1]
+    return f"{_STEP_WORDS.get(step, step)}：{said.strip()}"
+
 
 #: ``sh`` and not ``pkexec``-ing the three ``ip`` commands one at a time: each
 #: ``pkexec`` invocation is authorized separately, and three password dialogs in
@@ -232,16 +299,34 @@ def parse_link(text: str, returncode: int = 0) -> LinkState:
     )
 
 
-def manual_hint(device: str, bitrate: int) -> str:
+def _adapter_rejected_restart_ms(stderr: str) -> bool:
+    """Did the kernel refuse ``restart-ms`` specifically?
+
+    The message is a kernel extack (``strings /usr/sbin/ip`` does not carry it),
+    and it says "restart" while never saying "restart-ms" — so the option is
+    dropped only on that positive evidence.  A substring is the honest test here:
+    this is the fallback's trigger, and a miss costs the operator an interface
+    that never comes up.
+    """
+    return "restart" in stderr.lower()
+
+
+def manual_hint(device: str, bitrate: int, *, restart_ms: bool = True) -> str:
     """The commands an operator can paste instead, and what the alerts quote.
 
     The same three commands the README documents, in the same order, so that a
     failure here leads to the procedure the operator may already know.
+
+    ``restart_ms=False`` drops that one option, for the adapters that refuse it.
+    A hint that cannot work is worse than no hint, and the operator who is being
+    handed this one has just watched the automatic command fail on it.
     """
+    options = f"bitrate {bitrate}"
+    if restart_ms:
+        options += f" restart-ms {constants.CAN_LINK_RESTART_MS}"
     return (
         f"sudo ip link set {device} down && "
-        f"sudo ip link set {device} type can bitrate {bitrate} "
-        f"restart-ms {constants.CAN_LINK_RESTART_MS} fd off && "
+        f"sudo ip link set {device} type can {options} fd off && "
         f"sudo ip link set {device} up"
     )
 
@@ -350,6 +435,17 @@ class CanLink:
         ]
         result = self._run(argv, constants.CAN_LINK_SETUP_TIMEOUT_S)
 
+        # What the privileged half said about itself: the marker means it had to
+        # drop ``restart-ms``, and the failure text decides whether the command
+        # this message offers may carry the option at all.
+        stderr = result.stderr or ""
+        fell_back = RESTART_MS_FALLBACK in stderr
+        hint = manual_hint(
+            self.channel,
+            self.bitrate,
+            restart_ms=not _adapter_rejected_restart_ms(stderr),
+        )
+
         # A nonzero exit means the privileged half did not run, and the two
         # reasons for that are worth telling apart: a dismissed dialog is the
         # operator's decision and leaves the interface alone, while a script that
@@ -357,24 +453,47 @@ class CanLink:
         # wrong", which is why the success path below does not trust this code
         # either — the bus is asked again, and that answer is the one reported.
         if result.returncode:
-            reason = self.denied_reason(result.returncode, result.stderr or "")
-            denied = result.returncode in (PKEXEC_DISMISSED, PKEXEC_NOT_AUTHORIZED)
-            return LinkOutcome(
-                LINK_DENIED if denied else LINK_FAILED,
-                f"{self.channel} 未被改动：{reason}。"
-                f"手动执行：{manual_hint(self.channel, self.bitrate)}",
-                before=before,
-            )
+            reason = self.denied_reason(result.returncode, stderr)
+            if result.returncode in (PKEXEC_DISMISSED, PKEXEC_NOT_AUTHORIZED):
+                # Nothing ran, so ``before`` is still the truth and "未被改动"
+                # is the accurate word for it.  No second probe either: there is
+                # nothing to learn, and the operator is already looking at a
+                # dialog they did not answer.
+                return LinkOutcome(
+                    LINK_DENIED,
+                    f"{self.channel} 未被改动：{reason}。手动执行：{hint}",
+                    before=before,
+                )
+            # The script *did* run, and its first command takes the interface
+            # down before anything can fail.  So the state it left behind is
+            # worth going back to the kernel for: on the bench's adapter the old
+            # message claimed the interface was untouched while it was in fact
+            # down, which is the one thing a failure report must not do.
+            after = self.probe(ip)
+            reason = _step_failure(stderr) or reason
+            detail = f"{self.channel} 未能就绪：{reason}。现在「{after.describe()}」。"
+            if fell_back:
+                # Reachable only when a later step than ``configure`` failed:
+                # the marker is printed after the retry, and ``set -e`` would
+                # have stopped the script before it otherwise.
+                detail += "已去掉适配器不支持的 restart-ms 重试。"
+            detail += f"手动执行：{hint}"
+            return LinkOutcome(LINK_FAILED, detail, before=before, after=after)
 
         after = self.probe(ip)
         if after.matches(self.bitrate):
-            return LinkOutcome(
-                LINK_CONFIGURED,
+            detail = (
                 f"{self.channel} 原为「{before.describe()}」，已配置为"
-                f"比特率 {self.bitrate} 并 up",
-                before=before,
-                after=after,
+                f"比特率 {self.bitrate} 并 up"
             )
+            if fell_back:
+                # Said because it is a real loss, and because the next connect
+                # will repair it: worth a log line, not a banner — the link works.
+                detail += (
+                    "；此适配器不支持 restart-ms，控制器总线关闭后不会自恢复，"
+                    "下次连接会重新配置"
+                )
+            return LinkOutcome(LINK_CONFIGURED, detail, before=before, after=after)
         if after.deaf:
             # Raised and configured, and still off the bus.  That is an answer,
             # and it is the one worth the extra sentence: a controller only
@@ -387,14 +506,14 @@ class CanLink:
                 f"{self.channel} 已重新配置并 up，但控制器仍是总线关闭（BUS-OFF）："
                 "发出去的帧没有任何节点应答。驱动器没上电、比特率不是 "
                 f"{self.bitrate}，或者接线与终端电阻有问题。"
-                f"手动执行：{manual_hint(self.channel, self.bitrate)}",
+                f"手动执行：{hint}",
                 before=before,
                 after=after,
             )
         return LinkOutcome(
             LINK_FAILED,
             f"{self.channel} 配置后仍不是期望状态（现在是「{after.describe()}」）。"
-            f"手动执行：{manual_hint(self.channel, self.bitrate)}",
+            f"手动执行：{hint}",
             before=before,
             after=after,
         )
