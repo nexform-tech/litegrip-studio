@@ -254,7 +254,12 @@ class StubGripper:
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    """A calibration environment isolated to ``tmp_path``."""
+    """A calibration environment isolated to ``tmp_path``.
+
+    ``LITEGRIP_CALIB`` is set, which *names* a user file — the console honours a
+    name whether or not the file is there, so it is how these tests say one is in
+    effect.  A test that wants the console's own default unsets it.
+    """
     user = tmp_path / "user.json"
     factory = tmp_path / "factory.json"
     monkeypatch.setenv("LITEGRIP_CALIB", str(user))
@@ -685,9 +690,17 @@ class TestLoadCalibration:
         backend.load_calibration(str(env.user))
         assert _stub(backend).loaded == [str(env.user)]
 
-    def test_the_factory_file_is_passed_explicitly_too(self, backend, env) -> None:
+    def test_the_factory_file_is_passed_explicitly_too(
+        self, backend, env, monkeypatch
+    ) -> None:
         """Passing ``None`` here would let the SDK choose the file itself, which
-        is the silent fallback this module exists to prevent."""
+        is the silent fallback this module exists to prevent.
+
+        ``LITEGRIP_CALIB`` names a user file, so it is unset for this one: the
+        case being pinned is the console with nothing named, which is exactly
+        where the SDK's own fallback branch would otherwise be reached.
+        """
+        monkeypatch.delenv("LITEGRIP_CALIB", raising=False)
         env.write(env.factory, FACTORY_RAW)
         assert backend.load_calibration() is True
         assert _stub(backend).loaded == [str(env.factory)]

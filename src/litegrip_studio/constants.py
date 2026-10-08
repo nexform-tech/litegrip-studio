@@ -443,8 +443,6 @@ SHUTDOWN_WAIT_MS = 4000
 # Consecutive failing ticks before the FSM gives up and goes to FAULT.
 MAX_CONSECUTIVE_TICK_ERRORS = 20
 
-FACTORY_CALIBRATION_GATE_KEY = "safety/allow_factory_calibration"
-
 
 def describe_error(code: int) -> str:
     """Chinese fault text for a DM error code.

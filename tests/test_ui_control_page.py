@@ -399,11 +399,6 @@ class TestTheGate:
         assert page._stop.isEnabled()
         assert page._release.isEnabled()
 
-    def test_the_factory_gate_is_not_ready_either(self, page) -> None:
-        page.set_gate(GateState.FACTORY, "正在使用出厂标定")
-
-        assert not page.slider.isEnabled()
-
     def test_opening_the_gate_restores_the_control(self, page) -> None:
         page.set_gate(GateState.BLOCKED, "缺少标定文件")
         page.set_gate(GateState.READY, READY_REASON)

@@ -4,9 +4,13 @@ Two things are being pinned here, and only one of them is about preferences.
 The ordinary one is that a stored value survives a round trip and an
 out-of-range one is clamped.  The one that matters is that the store is *hostile
 input*: it can be corrupted, hand-edited, or written by an older version, and
-none of those may raise, and none of them may be handed to the motor.  In
-particular a garbled ``safety/allow_factory_calibration`` has to read as False —
-the failure direction for that setting is the whole point of it.
+none of those may raise, and none of them may be handed to the motor.
+
+An older version's ``safety/allow_factory_calibration`` is the case that is no
+longer a *setting* at all.  Nothing reads it — the factory file is the console's
+default now — so the requirement is that it is dropped rather than parsed: a
+hand-edited "true" left in the file would otherwise read as a decision somebody
+made, which is exactly what the file is supposed to be readable for.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ from litegrip_studio import constants
 from litegrip_studio.settings import (
     KEY_ALLOW_FACTORY,
     KEY_FORCE,
+    KEY_LIVE_FOLLOW,
     KEY_SPEED,
     KEY_TRAVEL_MM,
     Settings,
@@ -68,9 +73,14 @@ class TestDefaults:
         assert settings.active_tab == 0
         assert settings.show_debug_log is False
 
-    def test_the_factory_acknowledgement_starts_off(self) -> None:
-        """The safety-relevant default, on its own so a change to it is loud."""
-        assert Settings(Store()).allow_factory_calibration is False
+    def test_the_factory_acknowledgement_is_not_a_setting_any_more(self) -> None:
+        """The gate it armed is gone, so a console that reads a stored one is
+        reading a decision out of a file that no longer decides anything."""
+        store = Store(**{KEY_ALLOW_FACTORY: "true"})
+
+        Settings(store)
+
+        assert KEY_ALLOW_FACTORY not in store.data
 
     def test_the_default_path_sits_with_the_calibration_files(self) -> None:
         from litegrip_studio import calibration
@@ -85,7 +95,6 @@ class TestRoundTrip:
         settings.speed_mm_s = 80.0
         settings.force_n = 25.0
         settings.live_follow = True
-        settings.allow_factory_calibration = True
         settings.calibration_path = "/tmp/cal.json"
         settings.active_tab = 2
         settings.show_debug_log = True
@@ -94,16 +103,15 @@ class TestRoundTrip:
         assert reopened.speed_mm_s == pytest.approx(80.0)
         assert reopened.force_n == pytest.approx(25.0)
         assert reopened.live_follow is True
-        assert reopened.allow_factory_calibration is True
         assert reopened.calibration_path == "/tmp/cal.json"
         assert reopened.active_tab == 2
         assert reopened.show_debug_log is True
 
     def test_a_write_is_flushed(self) -> None:
-        """A console that is killed rather than closed must not lose the
-        acknowledgement the operator gave it."""
+        """A console that is killed rather than closed must not lose the file
+        the operator chose, which is what the next start reads."""
         store = Store()
-        Settings(store).allow_factory_calibration = True
+        Settings(store).calibration_path = "/tmp/cal.json"
 
         assert store.syncs >= 1
 
@@ -165,7 +173,7 @@ class TestRetiredKeys:
 
         settings = Settings(Stubborn(**{KEY_TRAVEL_MM: 10.0}))
 
-        assert settings.allow_factory_calibration is False
+        assert settings.speed_mm_s == constants.SPEED_DEFAULT_MM_S
 
 
 class TestTheStoreIsHostileInput:
@@ -214,12 +222,12 @@ class TestTheStoreIsHostileInput:
     @pytest.mark.parametrize("stored", ["maybe", "2", "yess", "TRUEE", "1.5"])
     def test_an_ambiguous_boolean_does_not_become_true(self, stored: str) -> None:
         """Only the spellings that unambiguously mean yes are yes.  "2" and
-        "maybe" are a hand-edit, and the safe reading of a hand-edit is no."""
-        assert Settings(raw(**{KEY_ALLOW_FACTORY: stored})).allow_factory_calibration is False
+        "maybe" are a hand-edit, and the reading of a hand-edit is no."""
+        assert Settings(raw(**{KEY_LIVE_FOLLOW: stored})).live_follow is False
 
     @pytest.mark.parametrize("stored", ["true", "TRUE", "1", "yes", "on"])
     def test_the_unambiguous_spellings_of_yes_are_honoured(self, stored: str) -> None:
-        assert Settings(raw(**{KEY_ALLOW_FACTORY: stored})).allow_factory_calibration is True
+        assert Settings(raw(**{KEY_LIVE_FOLLOW: stored})).live_follow is True
 
     def test_a_store_that_raises_on_read_is_survivable(self) -> None:
         class Broken(Store):
@@ -228,7 +236,7 @@ class TestTheStoreIsHostileInput:
 
         settings = Settings(Broken())
         assert settings.speed_mm_s == constants.SPEED_DEFAULT_MM_S
-        assert settings.allow_factory_calibration is False
+        assert settings.calibration_path is None
 
     def test_a_store_that_cannot_be_written_is_survivable(self) -> None:
         class ReadOnly(Store):

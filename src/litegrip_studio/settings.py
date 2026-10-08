@@ -7,12 +7,12 @@ been corrupted, hand-edited to something out of range, or written by an older
 version has to fall back to the default rather than raise — or worse, be handed
 to the motor.
 
-The one setting that is not a convenience is
-:attr:`Settings.allow_factory_calibration`.  It is the operator's standing
-acknowledgement that the SDK's bundled factory file may be used, it defaults to
-*off*, and it is read by the worker's gate rather than by a widget, so a console
-that has never been told otherwise cannot be talked into moving an uncalibrated
-gripper.
+These are conveniences rather than interlocks: each one changes what the console
+does, none of them decides whether the motor may move.  The closest is
+:attr:`Settings.calibration_path`, which is not a preference but a record of the
+file the operator loaded — it is what the next start reads instead of the
+default.  Whether that file permits motion is decided from its contents and the
+live reading every time, never from having been chosen once.
 """
 
 from __future__ import annotations
@@ -38,7 +38,12 @@ def default_settings_path() -> Path:
 #: Keys, spelled out so a typo is a NameError rather than a silently ignored
 #: setting that leaves the console behaving as though the operator never
 #: changed anything.
-KEY_ALLOW_FACTORY = constants.FACTORY_CALIBRATION_GATE_KEY
+#: A console older than this one wrote ``safety/allow_factory_calibration``, the
+#: standing acknowledgement that the factory file might be used.  There is no
+#: gate to arm any more — the factory file is the console's own default — so the
+#: key is retired rather than read.  See :data:`RETIRED_KEYS` for why an inert
+#: key is deleted instead of left where it is.
+KEY_ALLOW_FACTORY = "safety/allow_factory_calibration"
 KEY_SPEED = "motion/speed_mm_s"
 KEY_FORCE = "motion/force_n"
 KEY_LIVE_FOLLOW = "motion/live_follow"
@@ -60,7 +65,7 @@ KEY_LOG_LEVEL = "logging/level"
 #: what an operator (or a support engineer) reads when something is wrong: a
 #: ``travel_mm=10`` sitting in it would look like the console's own belief about
 #: the bench, and there is no way to tell from the file that it is inert.
-RETIRED_KEYS = (KEY_TRAVEL_MM,)
+RETIRED_KEYS = (KEY_TRAVEL_MM, KEY_ALLOW_FACTORY)
 
 _TRUE = frozenset({"1", "true", "yes", "on", "y", "t"})
 _FALSE = frozenset({"0", "false", "no", "off", "n", "f", ""})
@@ -119,21 +124,14 @@ class Settings:
 
     # ── calibration ─────────────────────────────────────────────────────────
     @property
-    def allow_factory_calibration(self) -> bool:
-        """The standing acknowledgement that the factory file may be used.
-
-        Defaults to False, and the failure direction matters: a missing or
-        unreadable setting must leave the gripper blocked, not permit it.
-        """
-        return self._bool(KEY_ALLOW_FACTORY, False)
-
-    @allow_factory_calibration.setter
-    def allow_factory_calibration(self, value: bool) -> None:
-        self._write(KEY_ALLOW_FACTORY, bool(value))
-
-    @property
     def calibration_path(self) -> str | None:
-        """The file the operator last loaded, or None to use the SDK's default."""
+        """The file the operator last loaded, or None to use the default.
+
+        Written when the operator applies a calibration, and read at startup by
+        :func:`litegrip_studio.cli.resolve_calibration_path`: an explicit path,
+        so a file that has since gone missing is reported instead of being
+        quietly replaced by the factory numbers.
+        """
         return self._text(KEY_CALIBRATION_PATH) or None
 
     @calibration_path.setter

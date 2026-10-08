@@ -417,11 +417,9 @@ class Bench:
         self.loop.submit(command)
         return self.frame(count)
 
-    def bring_up(self, allow_factory: bool = True) -> None:
+    def bring_up(self) -> None:
         """Connected, enabled, gate open — the state most tests start from."""
         self.send(cmd.Connect())
-        if allow_factory:
-            self.loop.set_allow_factory(True)
         self.send(cmd.Enable())
 
     def swap_calibration(self, info: CalibrationInfo | None) -> None:
@@ -502,30 +500,38 @@ class TestEvaluateGate:
         assert GateState.READY != state
         assert "行程" in why
 
-    def test_the_factory_file_is_gated_until_acknowledged(self) -> None:
+    def test_the_factory_file_is_ready_with_nothing_to_acknowledge(self) -> None:
+        """The console's default calibration has to be usable as it stands.
+
+        There used to be a third gate state here and a risk checkbox to leave it
+        through.  The factory file is what the console ships and falls back to on
+        a fresh machine, so a state that always asks the same question has no
+        answer that is ever different — whether these numbers describe *this*
+        gripper is put to the encoder instead (see :func:`frame_mismatch`).
+        """
         info = self._info(calibration.PROVENANCE_FACTORY)
-        assert evaluate_gate(info)[0] is GateState.FACTORY
-        assert evaluate_gate(info, allow_factory=True)[0] is GateState.READY
+
+        assert evaluate_gate(info)[0] is GateState.READY
 
     def test_an_unsaved_probe_result_is_gated(self) -> None:
         """Its numbers are fine and the UI should show them; it is not *saved*,
         so nothing about it survives a restart and motion cannot be planned on it."""
         info = calibration.in_memory(CLOSED_RAD, OPEN_RAD, 65.21, 120.0)
         assert info.usable
-        state, why = evaluate_gate(info, allow_factory=True)
+        state, why = evaluate_gate(info)
         assert state is GateState.BLOCKED
         assert "保存" in why
 
-    def test_the_acknowledgement_never_lifts_a_block(self) -> None:
-        """Only the factory case is surmountable.  A blocked one stays blocked
-        however many risk checkboxes the operator ticks."""
+    def test_nothing_lifts_a_block(self) -> None:
+        """A blocked provenance stays blocked.  These numbers do not describe
+        this gripper and there is no risk to accept that would make them."""
         for provenance in (
             calibration.PROVENANCE_MISSING,
             calibration.PROVENANCE_INVALID,
             calibration.PROVENANCE_MEMORY,
         ):
             info = self._info(provenance, limits=None)
-            assert evaluate_gate(info, allow_factory=True)[0] is GateState.BLOCKED
+            assert evaluate_gate(info)[0] is GateState.BLOCKED
 
     def test_an_unknown_backend_blocks(self) -> None:
         """A backend that does not track its calibration is not a backend to
@@ -591,41 +597,33 @@ class TestFrameMismatch:
         assert evaluate_gate(info, measured_rad=MID_RAD)[0] is GateState.READY
         assert evaluate_gate(info, measured_rad=-1.0)[0] is GateState.BLOCKED
 
-    def test_the_factory_acknowledgement_cannot_lift_it(self) -> None:
-        """Only the factory case is surmountable.  A file from another frame is
-        not a risk to accept — it is a fact about the wrong gripper."""
+    def test_a_factory_file_from_another_frame_is_refused(self) -> None:
+        """Which is the whole of what is left of the factory check.  A file from
+        the wrong gripper is not a risk to accept — it is a fact about the wrong
+        gripper, and the encoder is what says so."""
         info = CalibrationInfo(
             provenance=calibration.PROVENANCE_FACTORY, limits=LIMITS, path="/tmp/f.json"
         )
 
-        assert evaluate_gate(info, allow_factory=True, measured_rad=-1.0)[0] is (
-            GateState.BLOCKED
-        )
+        assert evaluate_gate(info, measured_rad=-1.0)[0] is GateState.BLOCKED
 
 
 class TestGateInTheLoop:
-    def test_motion_is_refused_until_the_factory_risk_is_acknowledged(self) -> None:
+    def test_a_factory_calibration_drives_the_axis_with_no_acknowledgement(
+        self,
+    ) -> None:
         bench = Bench(RecordingBackend(info=CalibrationInfo(
             provenance=calibration.PROVENANCE_FACTORY, limits=LIMITS, path="/tmp/f.json"
         )))
         bench.send(cmd.Connect())
-        assert bench.loop.gate is GateState.FACTORY
+
+        assert bench.loop.gate is GateState.READY
 
         bench.send(cmd.Enable())
-        # The axis comes up regardless: it has to, because the probe that would
-        # replace this file records its limits off a motor that answers.  What
-        # the acknowledgement buys is *motion*, and that is what stays refused.
         assert bench.loop.enabled
-        assert bench.loop.motion.state is MotionState.HOLD_RAD
-        assert "出厂标定" in bench.signals.alerts()[-1]
 
-        bench.send(cmd.MoveToMm(30.0), count=4)
-        assert bench.loop.motion.state is MotionState.HOLD_RAD
-        assert "被拒绝" in bench.signals.alerts()[-1]
-
-        bench.loop.set_allow_factory(True)
-        assert bench.tick().motion_state != "ESTOP"
-        assert bench.loop.gate is GateState.READY
+        # Straight to SERVO, with nothing ticked in between.  This is the case
+        # the console starts in on a machine that has never been calibrated.
         bench.send(cmd.MoveToMm(30.0), count=10)
         assert bench.loop.motion.state is MotionState.SERVO
 
@@ -1010,7 +1008,6 @@ class TestTick:
         backend = SimBackend(clock=clock, uv=True)
         signals = Recorder()
         loop = WorkerLoop(backend, signals, clock=clock, sleep=lambda s: None, watchdog_s=None)
-        loop.set_allow_factory(True)
         loop.submit(cmd.Connect())
         loop.tick_once(constants.CTRL_DT)
 
@@ -1675,7 +1672,6 @@ class TestCalibrationCommands:
         the operator gets no other signal that anything was missing."""
         bench = Bench()
         bench.send(cmd.Connect())
-        bench.loop.set_allow_factory(True)
         bench.tick()
         for command in (cmd.StartGuidedCalibration(), cmd.StartManualCalibration()):
             bench.send(command)
@@ -2087,7 +2083,6 @@ class TestTheAxisIsHandedBackAfterAProbe:
         clock = FakeClock()
         bench = Bench(RecordingSim(clock=clock), clock=clock)
         bench.send(cmd.Connect())
-        bench.loop.set_allow_factory(True)
         bench.send(cmd.Enable())
         bench.send(cmd.StartGuidedCalibration())
         bench.run_until_probe_finishes(timeout_s=40.0)
@@ -2229,7 +2224,6 @@ class TestTheThread:
         thread.start()
 
         worker.submit(cmd.Connect())
-        worker.set_allow_factory(True)
         worker.submit(cmd.Enable())
         deadline = time.monotonic() + 2.0
         while not worker.enabled and time.monotonic() < deadline:
@@ -2265,7 +2259,6 @@ class TestTheThread:
         backend = RecordingBackend()
         signals = Recorder()
         loop = WorkerLoop(backend, signals, watchdog_s=None)
-        loop.set_allow_factory(True)
 
         # The setup runs through the queue rather than through tick_once: the
         # backend binds itself to the thread that first touches it (that is what

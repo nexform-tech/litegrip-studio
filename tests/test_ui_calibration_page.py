@@ -148,13 +148,16 @@ class TestTheProvenanceIsShown:
             page._banner.headline
         )
 
-    def test_the_factory_file_is_a_warning_and_offers_the_acknowledgement(self, page) -> None:
-        """The silent fallback is the failure this page exists for: the numbers
-        look fine and belong to a different gripper."""
+    def test_the_factory_file_is_shown_like_any_other_source(self, page) -> None:
+        """It is the console's default, not a fallback to be noticed and
+        accepted: what would make it wrong for this gripper is the live reading,
+        and the gate says so in its own words rather than this banner."""
         page.set_calibration(FACTORY_CAL)
 
-        assert page._banner.severity == "warn"
-        assert page._allow.isVisibleTo(page)
+        assert page._banner.severity == "info"
+        assert calibration.PROVENANCE_LABELS[calibration.PROVENANCE_FACTORY] in (
+            page._banner.headline
+        )
 
     def test_an_unusable_calibration_is_an_error_naming_the_problem(self, page) -> None:
         page.set_calibration(INVALID_CAL)
@@ -170,12 +173,6 @@ class TestTheProvenanceIsShown:
         assert page._banner.severity == "info"
         assert page._banner.headline == "用户标定：行程 85.0 mm"
         assert "装配" not in page._banner.detail
-
-    def test_the_acknowledgement_is_hidden_when_it_is_moot(self, page) -> None:
-        page.set_calibration(FACTORY_CAL)
-        page.set_calibration(USER_CAL)
-
-        assert not page._allow.isVisibleTo(page)
 
     def test_the_table_carries_the_numbers_the_decision_rests_on(self, page) -> None:
         page.set_calibration(USER_CAL)
@@ -255,11 +252,6 @@ class TestTheGateIsExplained:
         page.set_gate(GateState.READY, "用户标定")
 
         assert "就绪" in page._gate_label.text()
-
-    def test_the_factory_gate_is_a_warning_rather_than_a_block(self, page) -> None:
-        page.set_gate(GateState.FACTORY, "正在使用出厂标定")
-
-        assert "待确认" in page._gate_label.text()
 
 
 class TestTheProbeButtons:
@@ -522,31 +514,6 @@ class TestSaving:
         assert not page._load.isEnabled()
 
 
-class TestTheFactoryAcknowledgement:
-    def test_ticking_it_tells_the_worker(self, qapp) -> None:
-        seen: list[bool] = []
-        page = CalibrationPage(Recorder(), seen.append)
-        page.set_calibration(FACTORY_CAL)
-
-        page._allow.setChecked(True)
-
-        assert seen == [True]
-
-    def test_it_is_remembered(self, qapp) -> None:
-        store = _Store()
-        page = CalibrationPage(Recorder(), None, Settings(store))
-
-        page._allow.setChecked(True)
-
-        assert store.value(KEY_ALLOW_FACTORY) in (True, "true", 1)
-
-    def test_it_is_restored(self, qapp) -> None:
-        store = _Store(**{KEY_ALLOW_FACTORY: True})
-        page = CalibrationPage(Recorder(), None, Settings(store))
-
-        assert page.allows_factory
-
-
 class TestThePhaseHelpers:
     @pytest.mark.parametrize(
         "phase, active",
@@ -682,9 +649,18 @@ class TestTheTravelIsNotOnThisPage:
     def test_the_page_does_not_read_a_stored_travel(self, qapp) -> None:
         """An older console's value must not leak in through the settings."""
         store = _Store(**{"calibration/travel_mm": "140.0"})
-        page = CalibrationPage(Recorder(), None, Settings(store))
+        page = CalibrationPage(Recorder(), Settings(store))
 
         assert not hasattr(page, "travel_mm")
+
+    def test_a_stored_acknowledgement_is_dropped_rather_than_honoured(self, qapp) -> None:
+        """The gate it armed is gone, and the file it was about is the console's
+        own default now.  Left in the file it would read as a standing decision
+        the console is still taking notice of, which is worse than absent."""
+        store = _Store(**{KEY_ALLOW_FACTORY: "true"})
+        Settings(store)
+
+        assert KEY_ALLOW_FACTORY not in store.data
 
     def test_the_retired_key_is_dropped_from_the_store(self, qapp) -> None:
         store = _Store(**{"calibration/travel_mm": "10.0"})

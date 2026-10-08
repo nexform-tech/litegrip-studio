@@ -15,8 +15,11 @@ to one angle.
 The defence is structural rather than defensive:
 
 1. Read and validate the file ourselves, before asking the SDK for anything.
-2. Classify the provenance, and treat "no user file" and "unusable numbers" as
-   distinct, separately-handled states.
+2. Classify the provenance, so that a file someone named and the SDK's factory
+   default never look alike on screen: they are different claims about which
+   gripper this is, and "no file was named" is a normal state rather than a
+   fault.  A named file that is unusable stays a fault, and is never quietly
+   replaced by the default.
 3. Always hand the SDK an explicit path that we have already confirmed exists,
    so its fallback branch can never fire unnoticed.
 4. Cross-check what the SDK actually applied against what we expected, and check
@@ -61,7 +64,7 @@ PROVENANCE_MEMORY = "in_memory_unsaved"
 
 PROVENANCE_LABELS = {
     PROVENANCE_USER: "用户标定",
-    PROVENANCE_FACTORY: "出厂标定（回退）",
+    PROVENANCE_FACTORY: "出厂标定",
     PROVENANCE_INVALID: "标定无效",
     PROVENANCE_MISSING: "未标定",
     PROVENANCE_MEMORY: "内存标定（未保存）",
@@ -239,9 +242,11 @@ class CalibrationInfo:
         A cross-check failure is narrower still: the numbers are unusable because
         the hardware is not running on them.
 
-        The factory case is allowed here and gated by the worker, which requires
-        the operator to acknowledge the risk first.  Keeping that decision in the
-        UI-facing layer means this property stays a statement about the file.
+        Both file-backed provenances are allowed.  The factory file is the
+        console's default, so refusing it here would refuse the ordinary case;
+        whether it describes *this* gripper is not a question about the file and
+        is not answered here — the gate puts it to the encoder, through
+        :func:`~litegrip_studio.units.frame_mismatch`.
         """
         return self.usable and self.provenance in (PROVENANCE_USER, PROVENANCE_FACTORY)
 
@@ -471,6 +476,24 @@ def validate_limits(
     return problems, warnings
 
 
+def named_calibration(
+    path: str | os.PathLike[str] | None = None,
+) -> Path | None:
+    """The file the caller or the environment named, if either named one.
+
+    ``LITEGRIP_CALIB`` belongs here rather than being left to
+    :func:`default_user_path` because setting it is as deliberate as passing an
+    argument: whoever set it named a file.  That file being gone is a fact about
+    their environment, not an instruction to read a different one, which is the
+    same reason an explicit path does not silently fall through to the factory
+    file below.
+    """
+    if path is not None:
+        return Path(path).expanduser()
+    env = os.environ.get("LITEGRIP_CALIB")
+    return Path(env).expanduser() if env else None
+
+
 def resolve(
     path: str | os.PathLike[str] | None = None,
     max_stroke_mm: float = constants.DEFAULT_TRAVEL_MM,
@@ -480,10 +503,35 @@ def resolve(
     This is the only entry point the UI and the gate should use.  It never asks
     the SDK what it loaded — it decides from the filesystem, because the SDK
     cannot tell the two sources apart.
-    """
-    user_path = Path(path).expanduser() if path else default_user_path()
 
-    if user_path.is_file():
+    With nothing named, the factory file is what is in effect.  It is the
+    console's default rather than a last resort, so there is no user file to
+    consult first and no third state for "the operator has not accepted the
+    factory numbers yet" — nothing on the bench asks that question.
+
+    A *named* path is the other half of that, and the half that has to fail
+    loudly: it is the only file considered, so a file that is missing, or that
+    holds numbers which cannot describe a gripper, is reported as such.  Quietly
+    answering with the factory numbers instead would leave the console measuring
+    with a file the operator did not choose, which is indistinguishable on screen
+    from the file they did.
+    """
+    named = named_calibration(path)
+
+    if named is not None and not named.is_file():
+        return CalibrationInfo(
+            provenance=PROVENANCE_MISSING,
+            limits=None,
+            path=str(named),
+            problems=(
+                f"指定的标定文件不存在：{named}",
+                "请重新载入标定文件，或清掉设置里的标定路径以改用出厂标定",
+            ),
+            max_stroke_mm=max_stroke_mm,
+        )
+
+    if named is not None:
+        user_path = named
         try:
             text = user_path.read_text(encoding="utf-8")
         except OSError as exc:
@@ -518,8 +566,9 @@ def resolve(
             max_stroke_mm=max_stroke_mm,
         )
 
-    # No user calibration.  The SDK would now silently load the factory file, so
-    # we load it deliberately and say so out loud.
+    # Nothing was named, so the factory file is the console's calibration.  The
+    # SDK would load it on its own anyway; we read it deliberately so that the
+    # numbers, and the fact that they are the factory's, are on screen.
     fact = factory_path()
     if fact.is_file():
         try:
@@ -529,11 +578,10 @@ def resolve(
         if raw is not None and not problems:
             limits = limits_from_raw(raw, max_stroke_mm)
             hard, soft = validate_limits(limits, max_stroke_mm, file_scale(raw))
-            warn = [
-                f"未找到用户标定文件 {user_path}",
-                f"正在使用出厂标定（{friendly_path(fact)}）；若与本机夹爪不是同一台，"
-                "所有 mm 与力的读数都会是错的",
-            ] + list(soft)
+            warn = list(soft) + [
+                f"正在使用出厂标定（{friendly_path(fact)}）；它所属的那台夹爪若不是本机，"
+                "mm 与力的读数都会是错的 —— 读数落在量程之外时会被拦下"
+            ]
             return CalibrationInfo(
                 provenance=PROVENANCE_FACTORY if not hard else PROVENANCE_INVALID,
                 limits=limits if not hard else None,
@@ -556,7 +604,7 @@ def resolve(
         limits=None,
         path=None,
         problems=(
-            f"未找到任何标定文件（已尝试 {user_path} 与 {fact}）",
+            f"未找到出厂标定文件（{fact}）",
             "请先执行标定；未标定时运动指令会被拒绝",
         ),
         max_stroke_mm=max_stroke_mm,

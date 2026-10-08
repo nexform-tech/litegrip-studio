@@ -270,7 +270,6 @@ def main(argv: list[str] | None = None) -> int:
     log.info("后端：%s", backend.describe())
 
     worker = GripperWorker(backend, can_link=make_can_link(args))
-    worker.set_allow_factory(settings.allow_factory_calibration)
 
     window = MainWindow(worker, settings)
     window.start()

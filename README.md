@@ -120,8 +120,9 @@ plug it back in, and reconnect. `sudo modprobe -r gs_usb && sudo modprobe gs_usb
 thing without the cable, and takes every `gs_usb` interface on the machine down with it.
 
 **On a real gripper, run 自动标定 from the calibration page before touching the
-slider.** The result is written out as soon as the probe finishes. If the calibration page shows
-`FACTORY` or `BLOCKED`, calibrate first rather than overriding the gate.
+slider.** The console starts on the SDK's factory calibration, which describes whichever unit it
+was taken on — on any other gripper every millimetre and every force reading is wrong. If the
+calibration page shows `BLOCKED`, nothing will move until you deal with it.
 
 ---
 
@@ -236,25 +237,29 @@ this: its axis is scaled to the travel, so the same motion looks the same on any
 ## 📐 Calibration: where the file comes from
 
 This was confirmed against the source while designing, and the answer is not either/or. The
-console resolves the calibration itself, best source first:
+console resolves the calibration itself, and there is now one automatic source:
 
-1. **The user calibration file** (`$LITEGRIP_CALIB` or `~/.litegrip/litegrip_calibration.json`),
-   written by `calibrate_*()` → `save_calibration()`. **This is the file that describes this
-   gripper.**
+1. **The file the operator named** — `--calibration`, the path remembered in
+   `~/.litegrip/litegrip_studio.ini` under `calibration/path`, or `$LITEGRIP_CALIB`. **This is the
+   file that describes this gripper**, and naming one is the only way off the default.
 2. **The SDK's factory calibration file** (`litegrip/factory_calibration.json` inside the vendored
-   SDK package, read-only) — the only fallback, and every machine has it.
+   SDK package, read-only) — what the console runs on when nothing is named, and every machine has
+   it.
 
-A user file that exists but cannot be used stops there: it is never a reason to fall back to the
-factory numbers. `LITEGRIP_FACTORY_CALIB` replaces item 2 outright, for a bench that keeps its
-fallback elsewhere, and no factory file is ever a save target.
+A named file that exists but cannot be used stops there: a corrupt file is never a reason to fall
+back to the factory numbers, and neither is a name that no longer exists — both are reported as
+such. `LITEGRIP_FACTORY_CALIB` replaces item 2 outright, for a bench that keeps its calibration
+elsewhere, and no factory file is ever a save target.
 
-So: **the console uses the calibration result, and the factory file is only a fallback.** The
-process has several traps, which is why the console reads the files and decides the provenance
-itself rather than trusting the SDK's return value:
+So: **the factory file is the default, and naming a file is what replaces it.** `~/.litegrip/`
+`litegrip_calibration.json` is still where a calibration is *saved*, but sitting there is not what
+makes it the one in effect — the console reads the path it remembers, and a file it never wrote
+does not load itself. The process has several traps, which is why the console reads the files and
+decides the provenance itself rather than trusting the SDK's return value:
 
-- **The fallback is silent.** `load_calibration()` returns `True` in both cases; only one
-  `log.info` line distinguishes them. On real hardware that means millimetre readings that are
-  systematically wrong with nothing on screen to show it.
+- **It does not say which file it read.** `load_calibration()` returns `True` for the named file
+  and for the factory default alike; only one `log.info` line distinguishes them. On real hardware
+  that means millimetre readings that are systematically wrong with nothing on screen to show it.
 - **The SDK does not require a calibration.** Neither `connect()` nor `enable()` loads one. Without
   it you get `GripperConfig`'s defaults, `pos_closed_rad=0.0 / pos_open_rad=1.14`, whereas on real
   hardware the closed value is the **larger** one (the fallback vendored with the SDK has
@@ -291,10 +296,18 @@ frame is not a preference but a requirement: once a position has been clamped in
 indistinguishable, and the clamped number still looks entirely reasonable. On real hardware this is
 what "it clamps the moment you enable it" is made of.
 
-The gate has three states: `READY` (user calibration, no problems), `FACTORY` (needs "I understand
-the risk" ticked), and `BLOCKED` (missing, or a zero that belongs to another machine —
-**never overridable**). **The gate logic lives in the worker, not the UI**: the UI can disable
-widgets, but the refusal has to happen before a frame is sent.
+The gate has two states: `READY` (a calibration is in effect and it validated) and `BLOCKED`
+(no file at all, a file that failed validation, a named file that is not there, a zero that
+belongs to another machine, or a probe result that has not been written out yet). There is
+nothing to tick and no override: a state whose answer is always the same is not a state, and the
+factory file is what the console runs on by default rather than something it has to be talked
+into. **The gate logic lives in the worker, not the UI**: the UI can disable widgets, but the
+refusal has to happen before a frame is sent.
+
+The safety net that remains is the frame check above. The factory file carries the range of the
+unit it was taken on, so on a different gripper the first reading falls outside that range, and
+the gate goes `BLOCKED` before a frame is sent. A file that loads but does not validate is
+`BLOCKED` too, and so is a probe result still held in memory.
 
 One more thing: the calibration file is loaded by the worker **on connect**, not at start-up, so
 the provenance and the gate always describe the file that was actually handed to the SDK rather
@@ -627,10 +640,11 @@ from the commit history, the git tag is the only source of truth, and `0.0.0-sem
   dependency, but it cannot be interrupted and drives the motors for about 24 seconds — better to
   offer only the two wizards on the calibration page (自动标定 and the two-point manual one) than a
   24-second window in which the emergency stop does nothing.
-- The factory calibration is a **fallback, not a substitute**: used on another gripper it does not
-  crash, it silently makes every millimetre wrong. Every machine has that file, because it ships
-  inside the vendored SDK, and the gate stops at `FACTORY`: the machine does not move until the
-  operator ticks the acknowledgement on the calibration page.
+- The factory calibration is the **default, not a measurement of your gripper**: used on another
+  unit it does not crash, it makes every millimetre wrong. Every machine has that file, because it
+  ships inside the vendored SDK. Nothing asks you to acknowledge it — the gate goes `READY` on it,
+  and the frame check is what stops a mismatch: the file's range belongs to the unit it was taken
+  on, so a different gripper's first reading lands outside it and the gate goes `BLOCKED`.
   The page looks at the travel implied by the file's own scale, but only warns when it is wrong by
   orders of magnitude (outside
   `STROKE_MIN_MM` / `STROKE_MAX_MM`). That test **cannot** be tightened into a comparison with the

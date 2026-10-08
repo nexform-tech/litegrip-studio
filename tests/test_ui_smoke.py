@@ -101,7 +101,6 @@ class FakeWorker(FakeSignals):
         self.commands: list[object] = []
         self.estopped = False
         self.estop_reasons: list[str] = []
-        self.allow_factory: list[bool] = []
         self.shutdowns = 0
         self.shutdown_ok = True
 
@@ -112,9 +111,6 @@ class FakeWorker(FakeSignals):
     def estop(self, reason: str = "") -> None:
         self.estopped = True
         self.estop_reasons.append(reason)
-
-    def set_allow_factory(self, allow: bool) -> None:
-        self.allow_factory.append(allow)
 
     def shutdown(self, timeout_ms: int = 0) -> bool:
         self.shutdowns += 1
