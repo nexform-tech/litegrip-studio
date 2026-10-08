@@ -257,8 +257,8 @@ itself rather than trusting the SDK's return value:
   systematically wrong with nothing on screen to show it.
 - **The SDK does not require a calibration.** Neither `connect()` nor `enable()` loads one. Without
   it you get `GripperConfig`'s defaults, `pos_closed_rad=0.0 / pos_open_rad=1.14`, whereas on real
-  hardware the closed value is the **larger** one (the fallback the console ships has
-  `0.052 / -1.357`). The mapping `mm = (pos_closed_rad - position_rad) * rad_to_mm` then runs
+  hardware the closed value is the **larger** one (the fallback vendored with the SDK has
+  `0.0 / -1.651`). The mapping `mm = (pos_closed_rad - position_rad) * rad_to_mm` then runs
   **exactly backwards**, computing negative millimetres and driving into the hard stop.
 - **`load_calibration()` overwrites `kp` / `kd` / `grasp_torque_threshold`**, and reads its fields
   without protection: a bad file raises `KeyError`.
@@ -581,8 +581,9 @@ re-vendor commands are in [`src/litegrip/VENDORED.md`](src/litegrip/VENDORED.md)
 
 Vendoring rather than installing is deliberate. The SDK's one declared dependency, `eclipse-zenoh`,
 is never imported by its library code, so an install step would buy nothing — and a distribution of
-the same name would be a *different* SDK: the console prefers the SDK's factory calibration file
-over anything of its own, so the wrong one loads a different set of numbers without saying so.
+the same name would be a *different* SDK: the numbers the console falls back to are read from the
+file beside whichever `litegrip` was imported, so the wrong one loads a different set of numbers
+without saying so.
 
 Do not edit anything under `src/litegrip`. A local edit survives only until the next re-vendor,
 which copies each file wholesale; a change that belongs there goes upstream. `VENDORED.md` records a

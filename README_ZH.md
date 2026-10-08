@@ -218,7 +218,7 @@ sudo ip link set can0 up
   能区分。对真机意味着毫米读数系统性错掉而界面看不出来。
 - **SDK 不强制标定**。`connect()` / `enable()` 都不会自动加载。不加载就用
   `GripperConfig` 默认值 `pos_closed_rad=0.0 / pos_open_rad=1.14`，而实机标定值是
-  **闭合数值更大**（上位机自带的那份兜底是 `0.052 / -1.357`）。映射式
+  **闭合数值更大**（随 SDK vendor 进来的那份兜底是 `0.0 / -1.651`）。映射式
   `mm = (pos_closed_rad - position_rad) * rad_to_mm` 方向**恰好相反**，会算出负毫米并
   朝错误方向顶到硬限位。
 - **`load_calibration()` 会覆盖 `kp` / `kd` / `grasp_torque_threshold`**，且字段读取
@@ -480,8 +480,8 @@ commit，所以 clone 下来什么都不用装就能跑。来源、文件清单�
 [`src/litegrip/VENDORED.md`](src/litegrip/VENDORED.md)。
 
 选择 vendor 而不是安装是有意的。SDK 唯一声明的依赖 `eclipse-zenoh` 在库代码里从未被
-import，安装这一步什么也换不来；而同名的发行包会是**另一个** SDK——上位机让 SDK 的出厂
-标定文件优先于它自己带的任何东西，装错一个就会静默加载另一套数值。
+import，安装这一步什么也换不来；而同名的发行包会是**另一个** SDK——上位机兜底用的那套数值
+读的是它 import 到的那个 `litegrip` 身边的文件，装错一个就会静默加载另一套数值。
 
 **不要改 `src/litegrip` 下的任何文件。** 就地改动只能活到下一次 vendor——那时每个文件
 都是整份覆盖的；该改的地方在上游。`VENDORED.md` 记着整棵树的哈希，`tests/test_vendored_sdk.py`
