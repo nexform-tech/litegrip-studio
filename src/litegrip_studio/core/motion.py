@@ -11,22 +11,29 @@ Force semantics
 A force setpoint is a torque feed-forward, and two things make it mean what it
 says.
 
-**The reference freezes at contact.**  The SDK's ``set_force``
-(gripper.py:988-997) commands ``q_target = get_position()`` plus
-``tau_feedforward``, and the reason is not cosmetic: a reference that keeps
-advancing past a blocked object grows the MIT position error ``kp·(q_cmd − q)``
-without bound, and that term adds to the feed-forward.  Measured in simulation,
-a 40 N setpoint delivered 59 N with the reference advancing.
+**The frame carries no gains at all.**  ``kp=0`` and ``kd=0``, so the only
+torque in it is the feed-forward.  A MIT gain is a torque that depends on
+something other than the setpoint — ``kp`` on how far the jaws have sunk into
+the object, ``kd`` on how fast the drive believes they are moving — and either
+one makes the delivered force differ from the number on the screen.  Measured
+against a 500 Nm/rad object, a 40 N setpoint at ``kp=150`` landed at 31 N and
+would run *over* the setpoint against a stiffer one, and a setpoint whose object
+yields under load sags as it yields.  With no gain the grip force equals the
+setpoint, which is what makes the 40 N rating a real bound rather than an
+aspiration.  The SDK reached the same place from the other side, in its #29:
+``hold_kp``/``hold_kd`` are deprecated there and a held force is the
+feed-forward alone.
 
-**The position gain is zero while holding force.**  This is where this console
-deliberately diverges from the SDK, which holds force at ``kp=150``.  Any
-position term is added to the feed-forward, so the delivered force depends on
-how far the jaws sank into the object — with ``kp=150`` a 40 N setpoint landed
-at 31 N against a 500 Nm/rad object, and would run *over* the setpoint against a
-stiffer one.  With ``kp=0`` the torque is the feed-forward alone and the grip
-force equals the setpoint, which is what makes the 40 N rating a real bound
-rather than an aspiration.  ``kd`` still damps velocity, and the two guards
-below still stop the jaws running away:
+**The reference freezes at contact.**  ``q`` is still sent — a drive wants a
+position in every frame — but with no position gain it commands nothing; it is
+the pose the jaws were in when force mode was entered, clamped to the calibrated
+travel, so an advancing reference cannot grow a position term without bound as
+it did when the SDK's reference kept moving past a blocked object (a 40 N
+setpoint delivered 59 N there).
+
+What is left is open-loop, and that is the price: the jaws can be pushed off the
+object by hand, and an empty grasp drives on to the mechanical stop at the
+setpoint.  The two guards below still bound it:
 
 * the reference is clamped to the calibrated travel, so even with no object the
   fingers halt at the closed stop;
@@ -104,10 +111,9 @@ class MotionFSM:
         # only in that state; every other state that holds a pose holds it in
         # millimetres, and there is deliberately no path from one to the other.
         self._frozen_rad: float | None = None
-        # The ramped torque feed-forward and velocity reference.  ``None``
-        # means "not in force mode", which seeds both from what is in flight.
+        # The ramped torque feed-forward.  ``None`` means "not in force mode",
+        # which seeds it from the torque in flight.
         self._tau_cmd: float | None = None
-        self._vel_cmd_rad = 0.0
         self._settle_ticks = 0
         self._elapsed = 0.0
         # How long this move may take before it is declared lost.  ``None``
@@ -158,7 +164,6 @@ class MotionFSM:
         # the one number an operator reads to decide whether to stand clear.
         self._force_n = 0.0 if force_n is None else clamp_force(force_n)
         self._tau_cmd = None
-        self._vel_cmd_rad = 0.0
         self._settle_ticks = 0
         self._elapsed = 0.0
         self._deadline_s = None
@@ -189,7 +194,6 @@ class MotionFSM:
         self.profile = None
         self._force_n = 0.0
         self._tau_cmd = None
-        self._vel_cmd_rad = 0.0
         self._frozen_mm = self.limits.clamp_mm(measured_mm)
         self._frozen_rad = None
         self.last_command_mm = None
@@ -215,7 +219,6 @@ class MotionFSM:
         self.profile = None
         self._force_n = 0.0
         self._tau_cmd = None
-        self._vel_cmd_rad = 0.0
         self._frozen_rad = float(measured_rad)
         self._frozen_mm = None
         self.last_command_mm = None
@@ -228,7 +231,6 @@ class MotionFSM:
         self.profile = None
         self._force_n = clamp_force(force_n)
         self._tau_cmd = None
-        self._vel_cmd_rad = 0.0
         self._frozen_mm = self.limits.clamp_mm(measured_mm)
         self._frozen_rad = None
         self.last_command_mm = self._frozen_mm
@@ -241,7 +243,6 @@ class MotionFSM:
         self.profile = None
         self._force_n = 0.0
         self._tau_cmd = None
-        self._vel_cmd_rad = 0.0
         self.last_command_mm = None
         self.source = source
         self._note = ""
@@ -261,7 +262,6 @@ class MotionFSM:
             self.profile = None
             self._force_n = 0.0
             self._tau_cmd = None
-            self._vel_cmd_rad = 0.0
             self.last_command_mm = None
             self.source = source
         elif measured_mm is None:
@@ -275,7 +275,6 @@ class MotionFSM:
         self.profile = None
         self._force_n = 0.0
         self._tau_cmd = None
-        self._vel_cmd_rad = 0.0
         self.last_command_mm = None
         self._note = ""
 
@@ -284,7 +283,6 @@ class MotionFSM:
         self.profile = None
         self._force_n = 0.0
         self._tau_cmd = None
-        self._vel_cmd_rad = 0.0
         self.last_command_mm = None
 
     # ── the tick ────────────────────────────────────────────────────────────
@@ -423,6 +421,18 @@ class MotionFSM:
             # slowly to look stuck, but they are not converging either.  Stop
             # and say so rather than keep pressing indefinitely.
             self._stall_reported = True
+            if self._force_n > 0.0:
+                # A force-carrying move does not stop here — it has already
+                # arrived at where it was going.  The operator asked for a grip,
+                # and this is the state a detected contact would have reached:
+                # the feed-forward alone, clamped to the mechanism's rating.
+                # Taking the position hold instead is a grip that quietly loses
+                # its setpoint a few seconds in, and keeps only whatever the
+                # mechanism's own stiffness offers at the pose it froze at.
+                force_n = self._force_n
+                self.hold_force(force_n, pos_mm, source=self.source)
+                self._note = f"{self._deadline_s:.0f}s 内未到位，保持 {force_n:.0f} N"
+                return self._force_frame(backend, pos_mm, telemetry, dt, "grip")
             self.hold(pos_mm)
             self._note = f"{self._deadline_s:.0f}s 内未到位，已停止"
             return FrameOut(None, 0.0, None, 0.0, 0.0, 0.0, False, self._note)
@@ -448,7 +458,6 @@ class MotionFSM:
         self.profile = None
         self._force_n = 0.0
         self._tau_cmd = None
-        self._vel_cmd_rad = 0.0
         self._frozen_mm = self.limits.clamp_mm(measured_mm)
         self._frozen_rad = None
         self._note = reason
@@ -562,27 +571,22 @@ class MotionFSM:
     def _force_frame(
         self, backend, hold_mm: float, telemetry, dt: float, note: str
     ) -> FrameOut:
-        """The frame for every force-holding state: ramp to pure torque, kp=0.
+        """The frame for every force-holding state: the feed-forward, no gains.
 
-        The position gain is zero — see the module docstring for why that is
-        what makes the delivered force equal the setpoint, and therefore what
-        makes ``FORCE_MAX_N`` an actual cap rather than an aspiration.
+        ``kp=0``, ``kd=0`` and a zero velocity reference, so the motor is a
+        torque source and the grip force is the setpoint — see the module
+        docstring for why every gain costs that equality, and for the SDK's #29
+        reaching the same answer from ``hold_kp=150``/``hold_kd=2``.
 
-        Both remaining terms are ramped rather than stepped, and each fixes a
-        measured overshoot:
+        The torque is ramped rather than stepped, which is what keeps the
+        fingers from bouncing off what they just touched: a *step* into a
+        contact is an impulse through the mechanism, and at 40 N it spiked the
+        grip to 56 N.  Entering force mode, the ramp continues from the torque in
+        flight, so the transition is continuous.
 
-        *Torque.*  Stepping the feed-forward makes the fingers bounce off the
-        object and the damping term fight the rebound — 56 N from a 40 N grip.
-
-        *Velocity reference.*  The damping term is ``kd·(dq_cmd − dq)``, so
-        zeroing ``dq_cmd`` while the jaws are still moving is itself a torque
-        step proportional to approach speed: 15 N at 50 mm/s and 46 N at
-        150 mm/s, applied to whatever was just touched.  Seeding the reference
-        at the measured velocity starts that term at zero and lets it decay.
-
-        Note that this is also why the force displayed during a *free* move is
-        not zero: a braking torque is a real motor torque.  Only the settled
-        value after the ramp is the grip force.
+        This is also why the force displayed during a *free* move is not zero:
+        a braking torque is a real motor torque.  Only the settled value after
+        the ramp is the grip force.
         """
         target = clamp_force_torque(self._force_n)
         alpha = min(dt / constants.FORCE_RAMP_S, 1.0)
@@ -592,22 +596,10 @@ class MotionFSM:
             self._tau_cmd = (
                 telemetry.torque_nm if abs(telemetry.torque_nm) < abs(target) else target
             )
-            self._vel_cmd_rad = telemetry.velocity_rad_s
 
         self._tau_cmd += (target - self._tau_cmd) * alpha
-        self._vel_cmd_rad += (0.0 - self._vel_cmd_rad) * alpha
 
-        return self._send(
-            backend,
-            hold_mm,
-            0.0,
-            0.0,
-            self.params.kd,
-            self._tau_cmd,
-            0.0,
-            note,
-            dq_rad=self._vel_cmd_rad,
-        )
+        return self._send(backend, hold_mm, 0.0, 0.0, 0.0, self._tau_cmd, 0.0, note)
 
     def _send(
         self,
@@ -619,15 +611,13 @@ class MotionFSM:
         tau_nm: float,
         err_mm: float,
         note: str,
-        dq_rad: float | None = None,
         ungated: bool = False,
     ) -> FrameOut:
         q_mm = self.limits.clamp_mm(q_cmd_mm)
         q_rad = self.limits.clamp_rad(self.limits.to_rad(q_mm))
-        if dq_rad is None:
-            dq_rad = mm_to_rad_per_s(
-                vel_mm_s, self.limits.rad_to_mm, direction=self.limits.direction
-            )
+        dq_rad = mm_to_rad_per_s(
+            vel_mm_s, self.limits.rad_to_mm, direction=self.limits.direction
+        )
         sent = bool(backend.stream_frame(q_rad, kp, kd, dq_rad, tau_nm, ungated=ungated))
         return FrameOut(
             q_cmd_mm=q_mm,

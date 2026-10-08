@@ -191,6 +191,12 @@ has gone badly wrong ("28 mm short of the target, and not closing"). During the 
 the jaws meet anything, the target and the error are shown as usual: they are the real trajectory
 and the real following error, which is what an operator watching for contact is reading them for.
 
+The frame a held grip sends carries **no gains at all** — `kp=0` and `kd=0` — so the torque in it is
+the setpoint and nothing else. Any gain adds a term that depends on something other than the
+setpoint, and the grip stops being the number on the slider: a position term makes it depend on how
+far the jaws sank into the object, a velocity term on how fast they were still moving when they
+arrived.
+
 Each end of the slider has a **one-press** button, placed next to the end it drives:
 
 | Button | Command | Where it goes |
@@ -552,6 +558,13 @@ The number has a measured origin: in the simulation, a mechanism with 0.3 Nm of 
 moving at 20 mm/s was declared "position not changing over time" after 2.7 mm while travelling at
 **87 % of the commanded speed**. With the corroboration, the same move completes.
 `tests/test_motion_fsm.py::TestWhetherAGapIsAnObstruction` pins both cases.
+
+A move that **carries** a force setpoint is the one exception to what the arrival timeout does. It
+exists to stop a position that is not converging, and a grip that is not converging has already
+reached the state it was aiming for: the feed-forward alone. Taking the position hold instead
+leaves the jaws with nothing but whatever the object's own stiffness offers at the pose they froze
+at, which on the bench is a grip that sags away from its setpoint a few seconds after it took hold.
+`tests/test_motion_fsm.py::TestTimeout` pins both endings.
 
 ### Shutdown and safety
 

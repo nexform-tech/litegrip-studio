@@ -219,8 +219,11 @@ CONTACT_FRESH_MS = 30.0
 KP_GRASP_APPROACH = 25.0
 
 # Torque feed-forward is ramped in over this long rather than stepped.  A step
-# makes the fingers bounce off the object and the damping term fight the
-# rebound, which spiked a 40 N grip to 56 N.
+# into a contact is an impulse through the mechanism, and the fingers bounce off
+# what they just touched — with a velocity gain in the frame that bounce was
+# fought by a damping torque too, which spiked a 40 N grip to 56 N.  The gains
+# are gone (`MotionFSM._force_frame` sends the feed-forward alone), and the
+# ramp stays: the bounce is the mechanism's own, not the gain's.
 FORCE_RAMP_S = 0.05
 
 # ── Stroke ──────────────────────────────────────────────────────────────────

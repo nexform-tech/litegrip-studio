@@ -859,15 +859,19 @@ class TestForceControl:
         assert rig.force_n == pytest.approx(force_n, abs=0.8)
         assert rig.position_mm > 55.0
 
-    def test_the_frame_holding_a_grip_has_no_position_gain(self) -> None:
-        """The deliberate divergence from the SDK.  Any position term is added to
-        the feed-forward, so with a gain the delivered force would depend on how
-        far the jaws sank into the object instead of on the setpoint.
+    def test_the_frame_holding_a_grip_carries_no_gains(self) -> None:
+        """The same place the SDK reached in its #29: a held force is a pure
+        torque source.  Any position term is added to the feed-forward, so with a
+        gain the delivered force would depend on how far the jaws sank into the
+        object instead of on the setpoint; any velocity term makes the frame a
+        damper against a jaw that is already moving.
         """
         fsm, backend = servo(start_mm=60.0)
         fsm.hold_force(20.0, 60.0)
         outs = run_ticks(fsm, backend, 60)
         assert all(o.kp == 0.0 for o in outs)
+        assert all(o.kd == 0.0 for o in outs)
+        assert all(o.vel_ref_mm_s == 0.0 for o in outs)
         assert all(o.tau_nm > 0.0 for o in outs)
 
     def test_the_torque_is_ramped_in_rather_than_stepped(self) -> None:
@@ -883,23 +887,25 @@ class TestForceControl:
         for prev, cur in zip(outs, outs[1:]):
             assert cur.tau_nm >= prev.tau_nm - 1e-12, "the ramp must be monotone"
 
-    def test_the_velocity_reference_starts_at_the_measured_velocity(self) -> None:
-        """Zeroing ``dq_cmd`` while the jaws are still moving is itself a torque
-        step of ``kd·v`` — 15 N at 50 mm/s — applied to whatever was just touched.
+    def test_a_held_force_does_not_read_the_measured_velocity(self) -> None:
+        """The frame a force hold sends must not depend on how fast the jaws
+        arrived.  With a damping gain in it, a jaw still moving at contact gets a
+        second torque of ``kd·v`` on top of the feed-forward — 15 N at 50 mm/s —
+        and the grip the operator asked for is not the grip the object feels.
+        The gains are gone, so the two runs below must be the same run.
         """
-        fsm, backend = servo(start_mm=60.0)
-        backend.velocity_rad_s = -2.0  # approaching at ~130 mm/s
-        fsm.hold_force(20.0, 60.0)
-        outs = run_ticks(fsm, backend, 40)
+        runs = []
+        for velocity_rad_s in (0.0, -2.0):  # standing still, ~130 mm/s closing
+            fsm, backend = servo(start_mm=60.0)
+            backend.velocity_rad_s = velocity_rad_s
+            fsm.hold_force(20.0, 60.0)
+            run_ticks(fsm, backend, 40)
+            runs.append([(f.kp, f.kd, f.dq_rad_s, f.q_rad, f.tau_nm) for f in backend.frames])
 
-        velocity_refs = [f.dq_rad_s for f in backend.frames]
-        assert velocity_refs[0] == pytest.approx(-2.0, rel=0.2)
-        assert all(
-            abs(cur) <= abs(prev) + 1e-12
-            for prev, cur in zip(velocity_refs, velocity_refs[1:])
-        ), "the reference must decay toward zero, never step to it"
-        assert abs(velocity_refs[-1]) < 0.1
-        assert len(outs) == len(velocity_refs)
+        assert all(kd == 0.0 and dq == 0.0 for _, kd, dq, _, _ in runs[0])
+        assert runs[0] == runs[1], (
+            "the measured velocity must not reach the frame at all"
+        )
 
     @pytest.mark.parametrize("asked", [60.0, 999.0, 1e9])
     def test_the_setpoint_cannot_exceed_the_mechanical_rating(self, asked: float) -> None:
@@ -946,6 +952,41 @@ class TestTimeout:
         assert "未到位" in fsm.note
         assert outs[-1].tau_nm == 0.0
         assert abs(fsm._elapsed - deadline) < 10 * DT
+
+    def test_a_grasp_that_never_converges_keeps_its_force(self) -> None:
+        """The same deadline, on a move that carries a force setpoint.
+
+        There is nothing left to servo to — the operator asked for a grip, not a
+        position — so the deadline must not take the grip away.  A position hold
+        here stops commanding the torque and leaves the jaws to whatever the
+        object's own stiffness offers at the pose they froze at, which reads on
+        the bench as a grip that sags to a couple of newtons a few seconds after
+        it took hold.
+        """
+        fsm, backend = servo(start_mm=0.0)
+        fsm.move_to_mm(2.0, "slider", force_n=20.0)  # far too short to reach cruise
+        state = {"n": 0}
+
+        def buzz(b: IdealPlant) -> None:
+            state["n"] += 1
+            b.mm = 0.05 if state["n"] % 2 else 0.0
+
+        ticks = int(round((constants.STALL_TIMEOUT_MIN_S + 0.5) / DT))
+        run_ticks(fsm, backend, ticks, on_tick=buzz)
+
+        assert fsm.state is MotionState.HOLD_FORCE
+        assert "未到位" in fsm.note
+        assert fsm.force_setpoint() == pytest.approx(20.0)
+
+        held = backend.frames[-int(round(0.5 / DT)):]
+        assert all(f.kp == 0.0 and f.kd == 0.0 for f in held), (
+            "a position hold here would carry the position gain, and the grip "
+            "with it would be whatever the frozen pose happens to offer"
+        )
+        assert all(f.tau_nm > 0.0 for f in held)
+        assert backend.frames[-1].tau_nm == pytest.approx(
+            torque_from_force(20.0), rel=0.01
+        )
 
     def test_it_does_not_give_up_before_the_deadline(self) -> None:
         fsm, backend = servo(start_mm=0.0)
