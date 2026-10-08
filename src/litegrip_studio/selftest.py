@@ -24,18 +24,25 @@ from .core.motion import MotionFSM, MotionParams, MotionState
 from .units import Limits, frame_mismatch
 
 #: The three calibrations this console has to get right, as (closed, open,
-#: file_scale, description).  The first is the SDK's shipped default pair, whose
-#: two angles are ordered the other way round and whose range this bench's
+#: file_scale, description).  The first is the SDK's uncalibrated default pair,
+#: whose two angles are ordered the other way round and whose range this bench's
 #: encoder readings fall outside of — the two facts the checks below turn on.
 #:
-#: ``file_scale`` is the millimetres per rad the *file* carries, which on both
-#: real files is its own 120 mm of nominal over the span it recorded.  The
+#: The second is the SDK's shipped template, ``calibration_normal.json`` — the
+#: nominal 120 mm unit a fresh gripper is calibrated from.  It is *not* the
+#: factory file, which is this bench's and whose own mm/rad already is the scale
+#: the console derives for its travel: a file that agrees with the derivation
+#: cannot witness the difference this check is about, so that one is checked as a
+#: file instead, by :func:`check_the_fallback_calibration_is_usable`.
+#:
+#: ``file_scale`` is the millimetres per rad the *file* carries, which for the
+#: first two is the SDK's 120 mm of nominal over the span each recorded.  The
 #: console does not move by it — it derives the scale from the recorded angles
 #: and the measured travel — so it is kept here as the witness of that: the
 #: travel check is defeated by putting the file's number back.
 KNOWN_CALIBRATIONS = (
     (0.0, 1.14, 120.0 / 1.14, "SDK 默认值（两个角次序相反，且在实测角度之外）"),
-    (0.114, -1.491, 74.8, "出厂标定"),
+    (0.114, -1.491, 74.8, "SDK 出厂模板（calibration_normal.json，标称 120 mm）"),
     (1.775959, -0.064279, 65.21, "用户标定（示例）"),
 )
 
@@ -158,10 +165,10 @@ def check_the_direction_is_read_from_the_two_angles() -> None:
         assert grew is (open_ > closed), f"{label}：换算是朝反方向的"
 
     uncalibrated = _limits(*KNOWN_CALIBRATIONS[0][:2])
-    factory = _limits(*KNOWN_CALIBRATIONS[1][:2])
+    template = _limits(*KNOWN_CALIBRATIONS[1][:2])
     user = _limits(*KNOWN_CALIBRATIONS[2][:2])
     assert uncalibrated.direction == 1.0, "SDK 默认值的两个角次序被读成了别的方向"
-    assert factory.direction == -1.0, "出厂标定的方向读错了"
+    assert template.direction == -1.0, "SDK 出厂模板的方向读错了"
     assert user.direction == -1.0, "用户标定的方向读错了"
 
     # And the answer has to come from something other than the ordering: both

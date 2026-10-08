@@ -47,6 +47,8 @@ from litegrip_studio.backend import (
 from litegrip_studio.backend.real import RealBackend
 from litegrip_studio.units import Limits
 
+from conftest import shipped_factory_calibrations
+
 REAL_SOURCE = Path(__file__).resolve().parent.parent / "src/litegrip_studio/backend/real.py"
 
 
@@ -110,7 +112,14 @@ USER_RAW = {
     "grasp_torque_threshold": 0.5,
 }
 
-FACTORY_RAW = dict(USER_RAW, zero_position_rad=0.114, max_position_rad=-1.491, rad_to_mm=74.8)
+#: The factory calibration the console falls back to, read from the copy this
+#: repository ships rather than retyped.  Nothing below depends on the numbers,
+#: only on the file being a valid factory calibration — and retyping them is how
+#: this fixture came to hold another SDK's nominal pair while still being loaded
+#: as if it were the file the console would really fall back to.
+FACTORY_RAW = json.loads(
+    shipped_factory_calibrations()[0].read_text(encoding="utf-8")
+)
 
 #: The same shape with the closed stop at the smaller angle, which is what a
 #: reverse-mounted gripper records.  Its scale is the one derived from its own
