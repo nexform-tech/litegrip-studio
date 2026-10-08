@@ -32,6 +32,10 @@ ROS 2 桥接、RPC 服务、产品代码都能直接调 :attr:`LiteGrip.actions`
 闭合侧有约 0.010 rad 的机械死区，慢速粘滑时单点忽大忽小。斜坡走完的保压段
 不判（那时夹爪本来就该不动）。
 
+保力段（``grasp`` 的第二段）反过来：只下发前馈力矩，不给位置/速度增益。
+力控要的是力，带增益就会随夹爪的位移衰减，详见
+:meth:`GripperActions._hold_force`。
+
 本模块**不 print**：进度通过 ``progress`` 回调交给调用方（CLI 打印、ROS 节点
 记日志、RPC 服务转发都行）。
 """
@@ -107,10 +111,15 @@ class MotionConfig:
     stop_release_s: float = 0.2         # 触发后失力（kp=kd=tau=0）持续时长 s
 
     # ── 保力 ───────────────────────────────────────────────────────────
+    # 保力帧是**纯力矩源**：kp=kd=0，只有前馈力矩。力控要的是力，位置/速度
+    # 增益会让力跟着夹爪的位移和速度走 —— 工件一让位（或闭合侧约 0.010 rad
+    # 的粘滑死区一动），``kp × 位移`` 就从设定力里扣掉一截，现象是「先夹到
+    # 设定力，过一会儿掉下来」。推导与代价见 GripperActions._hold_force。
     force_n: float = 20.0               # 默认夹持力 N（= 2.0 Nm）
     hold_interval: float = 0.2          # 保力分片时长 s
-    hold_kp: float = 150.0              # 保力刚度（对齐 set_force）
-    hold_kd: float = 2.0                # 保力阻尼
+    # [Deprecated] 保力不再用增益（见上）。留着只为兼容老配置，设了也不生效。
+    hold_kp: float = 150.0              # 已废弃：保力刚度
+    hold_kd: float = 2.0                # 已废弃：保力阻尼
 
     # ── 使能 ───────────────────────────────────────────────────────────
     enable_retries: int = 3             # 使能重试次数
@@ -731,8 +740,20 @@ class GripperActions:
         *,
         progress: Optional[Callable[[MoveProgress], None]] = None,
     ) -> Tuple[bool, int, Optional[GripperState]]:
-        """持续输出夹持力：每 :attr:`MotionConfig.hold_interval` 读一次位置，
-        然后用 ``hold_kp`` / ``hold_kd`` + 前馈力矩把当前位置顶住。
+        """持续输出夹持力：整段只下发前馈力矩。
+
+        每片 :attr:`MotionConfig.hold_interval` 下发同一个 ``tau = force_n × 0.1``
+        Nm，回读一次状态查故障。帧里 ``kp=kd=0`` —— 保力要的是**力**，而 MIT
+        律里 ``kp × (q - 实测位置)`` 与 ``kd × (0 - 实测速度)`` 都随夹爪的位置
+        和速度变化：工件在设定力下让位（或闭合侧约 0.010 rad 的粘滑死区走一
+        格），实测位置就往前挪，``kp × 位移`` 立刻从前馈里扣掉一截，读数表现
+        为「先夹到设定力，过一会儿掉到某个更小的值」。上一版锚在 200 ms 前的
+        位置读数上、``kp=150``，工件以 3 mm/s 让位就能把 20 N 读成 5 N。所以
+        **不要**为了「顶得更硬」把增益加回来；:attr:`MotionConfig.hold_kp` /
+        :attr:`MotionConfig.hold_kd` 已废弃，设了也不生效。
+
+        代价：零增益下夹爪可以被外力推动，夹到空载时也会一路顶到机械限位
+        （和 ``close()`` 的压紧段一样，只是力矩小得多）。
 
         ``hold_s <= 0`` 表示不限时长（直到出错或 Ctrl+C）。
 
@@ -753,10 +774,10 @@ class GripperActions:
         pos = st.position_rad
 
         while deadline is None or cfg.monotonic_fn() < deadline:
-            # 用上一次读到的位置顶住一片时长，再回读状态查故障
+            # 用上一次读到的位置当 q 下发（kp=0 时 q 不产生任何力，只是给下游
+            # 一个不越位的指令），再回读状态查故障
             for _ in range(frames_per_slice):
-                self._emit(pos, 0.0, tau_nm,
-                           kp=cfg.hold_kp, kd=cfg.hold_kd)
+                self._emit(pos, 0.0, tau_nm, kp=0.0, kd=0.0)
             cycles += 1
 
             st = g.get_state()

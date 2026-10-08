@@ -34,14 +34,15 @@ from litegrip_studio.units import (
 #
 # The middle one is the SDK's *template* (``calibration_normal.json``) and not
 # its factory file, which is what it was labelled as until the two were
-# compared.  What it carries is the SDK's scale for the unit it was written for:
-# 1.651026 rad of span at its own 52.69 mm/rad is 87 mm, and that product is the
-# gap ``TestStroke`` pins.  Neither shipped file's mm/rad is the scale this
-# console moves by — that one is derived from the travel the operator measured,
-# which over the template's span gives 52.0888 — so the file itself is checked
-# as a file, in ``test_calibration.py``.
+# compared.  Its numbers used to be another unit's — 1.651026 rad of span at its
+# own 52.69 mm/rad is 87 mm, where this console derives 52.0888 — and upstream
+# re-measured the shipped files for this unit in ``b9caae8``, so what it carries
+# now is this bench's geometry: 61.01229326764816 is exactly what the derivation
+# gives over its span.  ``TestStroke`` pins that, and the fixture is compared
+# against the file in ``TestTheFixturesAreTheFilesTheyClaim`` below, so a
+# re-vendor that moves the numbers cannot leave it behind.
 REVERSED = Limits(0.0, 1.14, 104.6)  # GripperConfig defaults
-TEMPLATE = Limits(0.0, -1.651026, 52.69)  # the SDK's calibration_normal.json
+TEMPLATE = Limits(0.052071, -1.357481, 61.01229326764816)  # the SDK's calibration_normal.json
 BENCH = Limits(1.775959, -0.064279, 65.21)  # example user calibration
 
 #: What the real bench's encoder reports, closed and fully open — the two
@@ -80,14 +81,19 @@ class TestRoundTrip:
 
 
 class TestStroke:
-    def test_the_template_stroke_is_what_its_own_scale_says(self) -> None:
-        """1.651026 rad of travel at the file's own 52.69 mm/rad is 86.99 mm.
+    def test_the_template_stroke_is_the_bench_travel_plus_the_inset(self) -> None:
+        """1.409552 rad of span at the file's own 61.01229326764816 mm/rad is 86.00 mm.
 
-        Which is the SDK's scale for the unit the template was written for, not
-        this bench's travel: that gap is what makes the file's number
-        recognisable as a nominal rather than a measurement.
+        Which is ``DEFAULT_TRAVEL_MM`` plus ``SPAN_INSET_MM``, so the template's
+        mm/rad is the scale this console derives for this bench rather than a
+        nominal for another unit: upstream re-measured the shipped files for this
+        unit in ``b9caae8``.  The numbers before that belonged to a different
+        gripper — 1.651026 rad at 52.69 is 86.99 mm — which is the kind of
+        reading ``TestStroke`` can tell apart from a derivation.
         """
-        assert TEMPLATE.stroke_mm == pytest.approx(86.99, abs=0.01)
+        assert TEMPLATE.stroke_mm == pytest.approx(
+            constants.DEFAULT_TRAVEL_MM + constants.SPAN_INSET_MM, abs=0.01
+        )
 
     def test_bench_stroke(self) -> None:
         assert BENCH.stroke_mm == pytest.approx(120.0, abs=0.01)
