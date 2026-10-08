@@ -260,9 +260,27 @@ class TestProvenance:
         assert info.usable and info.is_factory
         assert info.path == str(env.factory)
         assert info.motion_allowed, "the default has to be usable with no ceremony"
-        assert "若不是本机" in " ".join(info.warnings), (
-            "the operator must still be told what this file's numbers assume"
+        assert info.warnings == (), (
+            "the default is not something the operator is asked to weigh: on this "
+            "bench it is the gripper's own file, and the one warning it used to "
+            "carry was read past every time"
         )
+
+    def test_a_factory_file_that_is_another_gripper_still_warns(
+        self, env, monkeypatch
+    ) -> None:
+        """The one warning the default no longer carries is the one about being
+        the default.  Validation's own warnings are not provenance noise and are
+        still the operator's: this file's angles are self-consistent, and only
+        the stroke it implies gives it away."""
+        only_the_factory(monkeypatch)
+        _write(env.factory, dict(FACTORY_RAW, rad_to_mm=1000.0))
+
+        info = calibration.resolve()
+
+        assert info.provenance == PROVENANCE_FACTORY
+        assert info.usable, "a warning must not stop the operator working"
+        assert any("另一台夹爪" in w for w in info.warnings), info.warnings
 
     def test_a_named_file_wins_over_the_factory_default(self, env, monkeypatch) -> None:
         """The whole precedence, in one place: what the operator named, then

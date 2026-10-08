@@ -594,17 +594,13 @@ def resolve(
         if raw is not None and not problems:
             limits = limits_from_raw(raw, max_stroke_mm)
             hard, soft = validate_limits(limits, max_stroke_mm, file_scale(raw))
-            warn = list(soft) + [
-                f"正在使用出厂标定（{friendly_path(fact)}）；它所属的那台夹爪若不是本机，"
-                "mm 与力的读数都会是错的 —— 读数落在量程之外时会被拦下"
-            ]
             return CalibrationInfo(
                 provenance=PROVENANCE_FACTORY if not hard else PROVENANCE_INVALID,
                 limits=limits if not hard else None,
                 path=str(fact),
                 raw=raw,
                 problems=tuple(hard),
-                warnings=tuple(warn),
+                warnings=tuple(soft),
                 max_stroke_mm=max_stroke_mm,
             )
         return CalibrationInfo(
