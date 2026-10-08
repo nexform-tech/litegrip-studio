@@ -369,14 +369,26 @@ class TestTheVersion:
     def test_a_source_run_says_so_rather_than_inventing_a_number(self) -> None:
         assert version.resolve_version() == version.BASE_VERSION + version.SOURCE_SUFFIX
 
+    def test_the_base_cannot_be_mistaken_for_a_release(self) -> None:
+        """``0.1.0+source`` was what a checkout reported, and ``v0.1.0`` is a real
+        tag in this repository — so the current source read as the first release
+        to anyone comparing versions across machines, which is how "the other
+        computers are running an old version" gets reported.
+
+        ``0.0.0`` is the "no release yet" placeholder, the same one
+        ``pyproject.toml`` carries: semantic-release never writes a ``v0.0.0``
+        tag, so this cannot collide with one.
+        """
+        assert version.BASE_VERSION == "0.0.0"
+
     def test_a_build_stamp_wins(self, monkeypatch) -> None:
         """``build.sh`` writes ``_version.py`` next to the package, and a built
         artifact must report the build rather than the base."""
         stamped = types.ModuleType("litegrip_studio._version")
-        stamped.__version__ = "0.1.0.42+gdeadbee.20260924"
+        stamped.__version__ = "0.9.3.42+gdeadbee.20260924"
         monkeypatch.setitem(sys.modules, "litegrip_studio._version", stamped)
 
-        assert version.resolve_version() == "0.1.0.42+gdeadbee.20260924"
+        assert version.resolve_version() == "0.9.3.42+gdeadbee.20260924"
 
     def test_the_flag_prints_it_and_exits(self, capsys) -> None:
         with pytest.raises(SystemExit) as exit_info:

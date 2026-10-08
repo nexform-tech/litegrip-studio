@@ -504,9 +504,13 @@ import，安装这一步什么也换不来；而同名的发行包会是**另一
 留着它会让之后每次源码运行都拿着上一次构建的号自称，而那个号里的 git hash 可能早就
 和工作区对不上了。戳只活在产物内部，所以源码运行一律报告 `+source`。
 
-`_version.py` 里的号**不是发布版本号**。发版由 semantic-release 按提交历史自动完成，
-git tag 是唯一的事实来源，`pyproject.toml` 里的 `0.0.0-semantic-release` 是占位符，
-不要手改。
+戳的基数取自 git 上最近的一个 `v*` tag，所以从 `v0.8.2` 构建出来的产物自称
+`0.8.2.<提交数>+g<sha>.<日期>`，一眼能对上是哪个发布。没有 tag 可问时（浅导出、源码
+tarball）退回 `version.py` 里的 `BASE_VERSION`，它的值是 `0.0.0`，于是源码运行报告
+`0.0.0+source`。
+
+这两个号都**不是发布版本号**。发版由 semantic-release 按提交历史自动完成，git tag 是唯一
+的事实来源，`pyproject.toml` 里的 `0.0.0-semantic-release` 是占位符，不要手改。
 
 ---
 

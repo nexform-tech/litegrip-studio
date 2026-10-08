@@ -610,9 +610,14 @@ source run claim the number from the previous build, whose git hash may long sin
 the working tree. The stamp only lives inside the artifact, so a source run always reports
 `+source`.
 
-The number inside `_version.py` is **not the released version**. Releases are automated by
-semantic-release from the commit history, the git tag is the only source of truth, and
-`0.0.0-semantic-release` in `pyproject.toml` is a placeholder that must not be edited by hand.
+The stamp starts from the nearest `v*` git tag, so an artifact built from `v0.8.2` calls itself
+`0.8.2.<commit count>+g<sha>.<date>` and can be matched to a release at a glance. A tree with no tag
+to ask — a shallow export, a source tarball — falls back to `BASE_VERSION` in `version.py`, which is
+`0.0.0`, so a source run reports `0.0.0+source`.
+
+Neither of those numbers is **the released version**. Releases are automated by semantic-release
+from the commit history, the git tag is the only source of truth, and `0.0.0-semantic-release` in
+`pyproject.toml` is a placeholder that must not be edited by hand.
 
 ---
 
