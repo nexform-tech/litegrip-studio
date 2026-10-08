@@ -15,7 +15,7 @@
 
 | 仓库 | 角色 |
 | --- | --- |
-| [litegrip-python](https://github.com/nexform-tech/litegrip-python) | Python SDK |
+| [litegrip-python](https://github.com/nexform-tech/litegrip-python) | Python SDK——已 vendor 在 `src/litegrip` |
 | [litegrip-cpp](https://github.com/nexform-tech/litegrip-cpp) | C++ SDK |
 | [litegrip-docs](https://github.com/nexform-tech/litegrip-docs) | 产品文档 |
 | [litegrip-ros2](https://github.com/nexform-tech/litegrip-ros2) | ROS 2 驱动 |
@@ -32,8 +32,11 @@
 ./run_litegrip_studio.sh build      # 打包成单文件可执行程序
 ```
 
-脚本里所有路径都加了引号——本仓库目录名带空格。解释器与 SDK 路径可用环境变量覆盖：
-`PYTHON_BIN`、`LITEGRIP_SDK_PATH`。脚本默认用 `python3`，所以 Qt 装在虚拟环境里时，把
+脚本里所有路径都加了引号——本仓库目录名带空格。旁边的目录里不需要装任何东西，也不需要再
+检出一份：LiteGrip SDK 已 vendor 在 `src/litegrip`，启动脚本把 `src/` 放进 `PYTHONPATH`。
+两个环境变量可覆盖默认值：`PYTHON_BIN` 换解释器，`LITEGRIP_SDK_PATH` 换 SDK——后者是给对着
+SDK HEAD 跑的开发者的。它必须指到含有 `litegrip` 包的检出目录（检出根目录或它的 `src/`），
+指错了会直接报错，不会悄悄忽略。脚本默认用 `python3`，所以 Qt 装在虚拟环境里时，把
 `PYTHON_BIN` 指过去：
 
 ```bash
@@ -202,13 +205,11 @@ sudo ip link set can0 up
 
 1. **用户标定文件**（`$LITEGRIP_CALIB` 或 `~/.litegrip/litegrip_calibration.json`）
    ——由 `calibrate_*()` → `save_calibration()` 写出，**这才是这台夹爪的参数**。
-2. **SDK 包内的出厂标定文件**（`litegrip/factory_calibration.json`，只读）。
-3. **上位机自带的那份同款兜底**（`litegrip_studio` 的 package data
-   `factory_calibration.json`，只读）——没有 SDK 源码树的机器靠它才有兜底。它排在最后是
-   故意的：加它只会给原本没有兜底的机器添上兜底，不会改变任何一台机器已经在用的数值。
+2. **SDK 包内的出厂标定文件**（`litegrip/factory_calibration.json`，只读）——唯一的兜底，
+   每台机器都有，因为它随 vendor 进来的 SDK 一起发布。
 
-`LITEGRIP_FACTORY_CALIB` 直接顶掉第 2、3 两级，给把兜底放在别处的台架用；这两份都
-永远不会成为保存目标。
+用户文件存在但不可用时到此为止：绝不会因此改用出厂数值。`LITEGRIP_FACTORY_CALIB` 直接顶掉
+第 2 级，给把兜底放在别处的台架用；出厂文件永远不会成为保存目标。
 
 所以：**上位机用的是标定结果文件，出厂文件只是兜底**。但这个过程有几个坑，上位机
 因此自己读文件判定来源，而不是只看 SDK 的返回值：
@@ -459,8 +460,9 @@ QT_QPA_PLATFORM=offscreen <venv>/bin/python3 -m pytest tests/ -q
 ```
 
 `pytest-qt` 未安装，用的是普通 pytest + session 级 `QApplication` fixture +
-`PyQt5.QtTest`，`QT_QPA_PLATFORM=offscreen`。`conftest.py` 把 SDK 与 `src/` 插进
-`sys.path`，所以 SDK 没安装也能测。
+`PyQt5.QtTest`，`QT_QPA_PLATFORM=offscreen`。仓库根目录的 `conftest.py` 把 `src/` 插进
+`sys.path`，vendor 进来的 SDK 只差这一步就能 import；设了 `LITEGRIP_SDK_PATH` 时它排在
+`src/` 前面。没有任何测试会因为缺少 SDK 而跳过。
 
 `tests/conftest.py` 还会把本次会话的 `HOME` 指到一个临时目录，任何测试都读不到、也写不到
 操作员的 `~/.litegrip/`（标定、偏好、日志）。需要这些文件的测试自己造一份；外壳里导出的
@@ -471,18 +473,22 @@ QT_QPA_PLATFORM=offscreen <venv>/bin/python3 -m pytest tests/ -q
 运动到位、力矩上限、急停失能），**不 import Qt**——最需要它的机器正是 Qt 坏掉的那台。
 测试里有一个子解释器断言这一点。
 
-### 关于 SDK 依赖
+### 关于 SDK
 
-SDK **故意不是**已解析的依赖：它是本仓库旁边的检出目录，其唯一声明的依赖
-`eclipse-zenoh` 在库代码里从未被 import，因此主路径是把检出目录放进 `PYTHONPATH`
-——启动脚本就是这么做的。想走安装路线也可以：
+SDK 是 **vendor 进来的，不是依赖**：`src/litegrip` 里存着 litegrip-python 的一个固定
+commit，所以 clone 下来什么都不用装就能跑。来源、文件清单、树哈希与重新 vendor 的步骤都在
+[`src/litegrip/VENDORED.md`](src/litegrip/VENDORED.md)。
 
-```bash
-python -m pip install -e ../lite-grip --no-deps
-```
+选择 vendor 而不是安装是有意的。SDK 唯一声明的依赖 `eclipse-zenoh` 在库代码里从未被
+import，安装这一步什么也换不来；而同名的发行包会是**另一个** SDK——上位机让 SDK 的出厂
+标定文件优先于它自己带的任何东西，装错一个就会静默加载另一套数值。
 
-（若 venv 里的 `setuptools` 低于 61，它无法解析 PEP 621，这时不要加
-`--no-build-isolation`。）
+**不要改 `src/litegrip` 下的任何文件。** 就地改动只能活到下一次 vendor——那时每个文件
+都是整份覆盖的；该改的地方在上游。`VENDORED.md` 记着整棵树的哈希，`tests/test_vendored_sdk.py`
+会重算它，所以就地改一处就会让测试变红。
+
+想对着 SDK HEAD 跑控制台或测试，把 `LITEGRIP_SDK_PATH` 指到那份检出，它排在 vendor 的
+那份前面。
 
 ### 打包
 
@@ -490,12 +496,9 @@ python -m pip install -e ../lite-grip --no-deps
 ./run_litegrip_studio.sh build      # → dist/litegrip-studio
 ```
 
-`--collect-data litegrip` 是必须的：SDK 用 `dirname(litegrip.__file__)` 找出厂标定
-文件，在 `sys._MEIPASS` 下也成立，但没有这个参数文件不会进产物，出厂回退随之失效。
-
-`--collect-data litegrip_studio` 同理：上位机自带的那份兜底是 package data，那条声明只
-管 wheel，不会把文件放进 PyInstaller 产物；少了这个参数，没有 SDK 源码树的机器就一层兜底
-也不剩。控制台自检里有一条专门查这个文件在不在它该在的地方。
+`--collect-data litegrip` 是必须的：SDK 用 `dirname(litegrip.__file__)` 找出厂标定文件
+和两份方向模板，在 `sys._MEIPASS` 下也成立，但没有这个参数这些文件不会进产物，出厂回退
+随之失效。产物里的 `--selftest` 有一条专门查这个文件在不在它该在的地方。
 
 版本戳在构建时写进 `_version.py`，**构建结束即从源码树删除**（它也已 gitignore）。
 留着它会让之后每次源码运行都拿着上一次构建的号自称，而那个号里的 git hash 可能早就
@@ -513,8 +516,8 @@ git tag 是唯一的事实来源，`pyproject.toml` 里的 `0.0.0-semantic-relea
   运动——与其提供一个急停无效的 24 秒窗口，不如只上标定页上那两个探针（自动标定与手动
   两点标定）。它不是「自动标定」按钮：那个按钮跑的是本仓库自己的导向探测，可以中断。
 - 出厂标定是**兜底而非替代**：出厂文件用在别的夹爪上不会崩，只会让毫米读数静默地错。
-  上位机自带一份同样的文件，没有 SDK 源码树的机器也有一层兜底；只要是靠兜底（无论哪一份）
-  起来的，闸门就停在 `FACTORY`：操作员在标定页勾选确认之前，机器不接受运动命令。
+  这份文件随 vendor 进来的 SDK 一起发布，所以每台机器都有；只要是靠兜底起来的，闸门就停在
+  `FACTORY`：操作员在标定页勾选确认之前，机器不接受运动命令。
   标定页把「文件自带比例尺推出的行程」拿来看，但只在它连数量级都不对时告警
   （`STROKE_MIN_MM` / `STROKE_MAX_MM` 之外）。这条判定**不能**收紧到与实测行程比较：
   SDK 与旧版控制台写出的文件一律带「标称行程 ÷ 跨度」，那个标称是 SDK 自己的默认值而不是

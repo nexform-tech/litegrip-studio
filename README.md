@@ -17,7 +17,7 @@ it runs the same motion state machine the real gripper does.
 
 | Repository | Role |
 | --- | --- |
-| [litegrip-python](https://github.com/nexform-tech/litegrip-python) | Python SDK |
+| [litegrip-python](https://github.com/nexform-tech/litegrip-python) | Python SDK — vendored under `src/litegrip` |
 | [litegrip-cpp](https://github.com/nexform-tech/litegrip-cpp) | C++ SDK |
 | [litegrip-docs](https://github.com/nexform-tech/litegrip-docs) | Product documentation |
 | [litegrip-ros2](https://github.com/nexform-tech/litegrip-ros2) | ROS 2 driver |
@@ -34,10 +34,13 @@ it runs the same motion state machine the real gripper does.
 ./run_litegrip_studio.sh build      # one-file executable
 ```
 
-Every path in the scripts is quoted: this repository's directory name contains a space. The
-interpreter and the SDK location can both be overridden from the environment, with `PYTHON_BIN`
-and `LITEGRIP_SDK_PATH`. The launcher otherwise uses `python3`, so where Qt lives in a
-virtualenv, point `PYTHON_BIN` at it:
+Every path in the scripts is quoted: this repository's directory name contains a space. Nothing has
+to be installed or checked out beside it — the LiteGrip SDK is vendored under `src/litegrip`, and
+the launcher puts `src/` on `PYTHONPATH`. Two environment variables override the defaults:
+`PYTHON_BIN` for the interpreter, and `LITEGRIP_SDK_PATH` for the SDK, which is what a developer
+running against SDK HEAD sets. It must point at a checkout holding the `litegrip` package — the
+checkout root or its `src/` — and a path that does not is reported rather than quietly ignored. The
+launcher otherwise uses `python3`, so where Qt lives in a virtualenv, point `PYTHON_BIN` at it:
 
 ```bash
 PYTHON_BIN=.venv/bin/python3 ./run_litegrip_studio.sh sim
@@ -238,15 +241,12 @@ console resolves the calibration itself, best source first:
 1. **The user calibration file** (`$LITEGRIP_CALIB` or `~/.litegrip/litegrip_calibration.json`),
    written by `calibrate_*()` → `save_calibration()`. **This is the file that describes this
    gripper.**
-2. **The SDK's factory calibration file** (`litegrip/factory_calibration.json` inside the SDK
-   package, read-only).
-3. **The console's own copy of the same fallback** (`factory_calibration.json`, package data of
-   `litegrip_studio`, read-only) — what a machine with no SDK checkout still has. It sits last on
-   purpose: adding it can only give a fallback to a machine that had none, never change which
-   numbers a machine already works on.
+2. **The SDK's factory calibration file** (`litegrip/factory_calibration.json` inside the vendored
+   SDK package, read-only) — the only fallback, and every machine has it.
 
-`LITEGRIP_FACTORY_CALIB` replaces 2 and 3 outright, for a bench that keeps its fallback elsewhere.
-Neither of the two is ever a save target.
+A user file that exists but cannot be used stops there: it is never a reason to fall back to the
+factory numbers. `LITEGRIP_FACTORY_CALIB` replaces item 2 outright, for a bench that keeps its
+fallback elsewhere, and no factory file is ever a save target.
 
 So: **the console uses the calibration result, and the factory file is only a fallback.** The
 process has several traps, which is why the console reads the files and decides the provenance
@@ -557,8 +557,9 @@ QT_QPA_PLATFORM=offscreen python3 -m pytest tests/ -q
 ```
 
 `pytest-qt` is not installed; the suite uses plain pytest with a session-scoped `QApplication`
-fixture and `PyQt5.QtTest`, under `QT_QPA_PLATFORM=offscreen`. `conftest.py` puts both the SDK and
-`src/` on `sys.path`, so the SDK does not have to be installed for the suite to run.
+fixture and `PyQt5.QtTest`, under `QT_QPA_PLATFORM=offscreen`. The root `conftest.py` puts `src/`
+on `sys.path`, which is all the vendored SDK needs to be importable, and `LITEGRIP_SDK_PATH` goes in
+front of it when it is set. No test skips for want of an SDK.
 
 `tests/conftest.py` also points `HOME` at a temporary directory of the session's own, so no test
 reads or writes the operator's `~/.litegrip/` — the calibration, the preferences or the log. A test
@@ -572,19 +573,24 @@ wrong-zero rejection, plant convergence, arrival, torque limits, emergency-stop 
 **imports no Qt at all** — the machine that needs it most is the one where Qt is broken. A
 sub-interpreter test asserts exactly that.
 
-### About the SDK dependency
+### About the SDK
 
-The SDK is **deliberately not** a resolved dependency. It is a checkout beside this repository, its
-one declared dependency `eclipse-zenoh` is never imported by library code, and the main path is
-therefore to put the checkout on `PYTHONPATH` — which is what the launcher does. Installing it is
-also possible:
+The SDK is **vendored, not a dependency**: `src/litegrip` holds litegrip-python at a pinned commit,
+so a clone runs with nothing installed beside it. Provenance, the file list, the tree hash and the
+re-vendor commands are in [`src/litegrip/VENDORED.md`](src/litegrip/VENDORED.md).
 
-```bash
-python -m pip install -e ../lite-grip --no-deps
-```
+Vendoring rather than installing is deliberate. The SDK's one declared dependency, `eclipse-zenoh`,
+is never imported by its library code, so an install step would buy nothing — and a distribution of
+the same name would be a *different* SDK: the console prefers the SDK's factory calibration file
+over anything of its own, so the wrong one loads a different set of numbers without saying so.
 
-The tests that are about the SDK's surface skip themselves when no checkout is present, which is
-why a CI run reports a non-zero skip count.
+Do not edit anything under `src/litegrip`. A local edit survives only until the next re-vendor,
+which copies each file wholesale; a change that belongs there goes upstream. `VENDORED.md` records a
+hash of the whole tree and `tests/test_vendored_sdk.py` recomputes it, so an edit in place fails the
+suite.
+
+To run the console or the suite against SDK HEAD instead, set `LITEGRIP_SDK_PATH` to that checkout.
+It goes in front of the vendored copy.
 
 ### Packaging
 
@@ -592,14 +598,10 @@ why a CI run reports a non-zero skip count.
 ./run_litegrip_studio.sh build      # → dist/litegrip-studio
 ```
 
-`--collect-data litegrip` is required: the SDK finds its factory calibration through
-`dirname(litegrip.__file__)`, which still holds under `sys._MEIPASS`, but without that flag the
-file never enters the artifact and the factory fallback dies with it.
-
-`--collect-data litegrip_studio` is required for the same reason: the console's own copy of the
-fallback is package data, which only puts it into a wheel, not into a PyInstaller artifact — and
-without it a machine with no SDK checkout is left with no fallback at all. The console's selftest
-checks that this file is where the code reads it from.
+`--collect-data litegrip` is required: the SDK finds its factory calibration and its two direction
+templates through `dirname(litegrip.__file__)`, which still holds under `sys._MEIPASS`, but without
+that flag the files never enter the artifact and the factory fallback dies with them. `--selftest`
+inside the built binary checks that the file is where the code reads it from.
 
 The version stamp is written into `_version.py` at build time and **removed from the source tree
 when the build ends** (it is git-ignored as well). Leaving it behind would make every later
@@ -620,9 +622,9 @@ semantic-release from the commit history, the git tag is the only source of trut
   offer only the two wizards on the calibration page (自动标定 and the two-point manual one) than a
   24-second window in which the emergency stop does nothing.
 - The factory calibration is a **fallback, not a substitute**: used on another gripper it does not
-  crash, it silently makes every millimetre wrong. The console carries its own copy of that file so
-  a machine with no SDK checkout still has one, and on either copy the gate stops at `FACTORY`:
-  the machine does not move until the operator ticks the acknowledgement on the calibration page.
+  crash, it silently makes every millimetre wrong. Every machine has that file, because it ships
+  inside the vendored SDK, and the gate stops at `FACTORY`: the machine does not move until the
+  operator ticks the acknowledgement on the calibration page.
   The page looks at the travel implied by the file's own scale, but only warns when it is wrong by
   orders of magnitude (outside
   `STROKE_MIN_MM` / `STROKE_MAX_MM`). That test **cannot** be tightened into a comparison with the
