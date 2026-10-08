@@ -450,19 +450,20 @@ def describe_error(code: int) -> str:
     """Chinese fault text for a DM error code.
 
     Prefers the SDK's own strings so the console and the SDK never disagree;
-    falls back to a local copy when the SDK is not importable (pure-layer tests
-    run without it).
+    falls back to the local copy below when the SDK cannot be imported at all,
+    which is the state a half-installed checkout is in — the panel still has to
+    name the fault it is showing.
     """
     try:
         from litegrip import describe_error as _sdk_describe
 
         return _sdk_describe(code)
-    except Exception:  # pragma: no cover - exercised only without the SDK
+    except Exception:
         return _FALLBACK_ERROR_TEXT.get(code, f"未知错误 (0x{code:X})")
 
 
-# Mirrors litegrip/constants.py describe_error().  Kept in sync by
-# tests/test_units.py::test_error_text_matches_sdk.
+# Mirrors litegrip/constants.py ERROR_DESCRIPTIONS.  Kept in sync by
+# tests/test_units.py::TestErrorText, which compares them code by code.
 _FALLBACK_ERROR_TEXT = {
     ERROR_DISABLED: "已失能",
     ERROR_ENABLED: "已使能",

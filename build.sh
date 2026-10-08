@@ -2,14 +2,14 @@
 #
 # 打包成单文件可执行程序。
 #
-# 两个参数一虚一实，都是必须的：
+# SDK 已 vendor 在 src/litegrip/ 下（来源见 src/litegrip/VENDORED.md），所以
+# --paths src 一条就把控制台和 SDK 都交给了 PyInstaller，不用再指第二个目录。
 #
-#   --collect-data litegrip      把 SDK 的 factory_calibration.json 打进产物。
-#                                SDK 用 dirname(litegrip.__file__) 找它，在
-#                                sys._MEIPASS 下也成立，但没有这个文件就少一层
-#                                回退。
-#   --collect-data litegrip_studio  同理，把控制台自带的同一份出厂标定打进产物：
-#                                没有 SDK 数据文件时的最后一层回退，缺了它机器上
+# 这些参数是必须的：
+#
+#   --collect-data litegrip      把 SDK 的 factory_calibration.json 与两份方向
+#                                模板打进产物。SDK 用 dirname(litegrip.__file__)
+#                                找它们，在 sys._MEIPASS 下也成立；缺了它，机器上
 #                                只剩「未标定、拒绝运动」。控制台自检里有一条专门
 #                                查这个文件在不在（package-data 只管 wheel）。
 #   --collect-submodules litegrip  否则只有直接 import 到的模块进包。
@@ -21,12 +21,12 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-SDK="${LITEGRIP_SDK_PATH:-$HERE/../lite-grip}"
 
 cd "$HERE"
 
 # build.sh 自己也需要能 import litegrip，否则 --collect-* 无从下手。
-export PYTHONPATH="$HERE/src:$SDK${PYTHONPATH:+:$PYTHONPATH}"
+# LITEGRIP_SDK_PATH 指过去时，那份检出排在 src/ 前面，于是打的是它。
+export PYTHONPATH="${LITEGRIP_SDK_PATH:+$LITEGRIP_SDK_PATH:}$HERE/src${PYTHONPATH:+:$PYTHONPATH}"
 
 # ── 收尾 ─────────────────────────────────────────────────────────────────────
 # 构建期写进源码树的东西一律在退出时清掉，失败退出也要清。
@@ -90,10 +90,8 @@ echo "用 $PYTHON_BIN 打包 litegrip-studio …"
     --noconfirm \
     --name "litegrip-studio" \
     --paths src \
-    --paths "$SDK" \
     --collect-submodules litegrip \
     --collect-data litegrip \
-    --collect-data litegrip_studio \
     --hidden-import litegrip_studio._version \
     --exclude-module zenoh \
     --exclude-module eclipse_zenoh \

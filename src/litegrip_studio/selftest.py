@@ -28,21 +28,20 @@ from .units import Limits, frame_mismatch
 #: whose two angles are ordered the other way round and whose range this bench's
 #: encoder readings fall outside of — the two facts the checks below turn on.
 #:
-#: The second is the SDK's shipped template, ``calibration_normal.json`` — the
-#: nominal 120 mm unit a fresh gripper is calibrated from.  It is *not* the
-#: factory file, which is this bench's and whose own mm/rad already is the scale
-#: the console derives for its travel: a file that agrees with the derivation
-#: cannot witness the difference this check is about, so that one is checked as a
-#: file instead, by :func:`check_the_fallback_calibration_is_usable`.
+#: The second is the SDK's shipped template, ``calibration_normal.json``, whose
+#: own mm/rad is a scale for a unit and not for this one: 1.651026 rad of span at
+#: 52.69 is 87 mm, where the derivation over that span gives 52.0888.  It is
+#: *not* the factory file, which is a different file for a different unit as well
+#: and is checked as a file, by :func:`check_the_fallback_calibration_is_usable`.
 #:
-#: ``file_scale`` is the millimetres per rad the *file* carries, which for the
-#: first two is the SDK's 120 mm of nominal over the span each recorded.  The
-#: console does not move by it — it derives the scale from the recorded angles
-#: and the measured travel — so it is kept here as the witness of that: the
-#: travel check is defeated by putting the file's number back.
+#: ``file_scale`` is the millimetres per rad the *file* carries.  The console
+#: does not move by it — it derives the scale from the recorded angles and the
+#: measured travel — so it is kept here as the witness of that: the travel check
+#: is defeated by putting the file's number back.  No file the SDK ships agrees
+#: with the derivation, the factory file included.
 KNOWN_CALIBRATIONS = (
     (0.0, 1.14, 120.0 / 1.14, "SDK 默认值（两个角次序相反，且在实测角度之外）"),
-    (0.114, -1.491, 74.8, "SDK 出厂模板（calibration_normal.json，标称 120 mm）"),
+    (0.0, -1.651026, 52.69, "SDK 模板（calibration_normal.json，自带系数对应 87 mm）"),
     (1.775959, -0.064279, 65.21, "用户标定（示例）"),
 )
 
@@ -191,9 +190,10 @@ def check_the_travel_is_derived_from_the_recorded_angles() -> None:
     sees: 0 mm is the recorded closed angle, the recorded extremes span the
     travel plus the probe's inset rather than the file's nominal stroke, and the
     top of the commanded range is that inset short of the recorded open one.
-    Move by the file's own scale instead and the recorded span comes out as 120
-    mm — a slider covering the middle of a travel nobody has seen the ends of,
-    which is what this check exists to catch.
+    Move by the file's own scale instead and the recorded span comes out as that
+    file's nominal — 120 mm for the defaults, 87 mm for the template — a slider
+    covering the middle of a travel nobody has seen the ends of, which is what
+    this check exists to catch.
 
     All three are stated without a sign, and the first dataset is the one that
     needs that: its two angles are the other way up, and every one of them holds
@@ -354,29 +354,28 @@ def check_a_calibration_from_another_frame_is_refused() -> None:
     )
 
 
-def check_the_bundled_fallback_is_usable() -> None:
+def check_the_fallback_calibration_is_usable() -> None:
     """The one check that reads a file instead of doing arithmetic.
 
-    The console ships its own copy of the fallback calibration so that a machine
-    with no SDK checkout still has real numbers to fall back on.  That copy is
-    data beside the code, which is exactly why it can be absent from an artifact
+    The fallback is the SDK's own ``factory_calibration.json``, which is data
+    beside the code, and that is exactly why it can be absent from an artifact
     that is otherwise complete — a wheel built without its package data, a
-    bundle built without ``--collect-data`` — and the symptom on the target
-    machine is a console that refuses to move.  Nothing else in this file would
-    notice, and the machine that needs this answer is the one where the GUI was
-    not the first thing to be tried.
+    bundle built without ``--collect-data litegrip`` — and the symptom on the
+    target machine is a console that refuses to move.  Nothing else in this file
+    would notice, and the machine that needs this answer is the one where the
+    GUI was not the first thing to be tried.
     """
-    path = calibration.bundled_factory_path()
-    assert path.is_file(), f"自带的出厂标定文件不在产物里：{path}（打包时漏了数据文件）"
+    path = calibration.factory_path()
+    assert path.is_file(), f"出厂标定文件不在产物里：{path}（打包时漏了数据文件）"
 
     raw, problems = calibration.parse_calibration_json(path.read_text(encoding="utf-8"))
-    assert not problems, f"自带的出厂标定读不出来：{problems}"
+    assert not problems, f"出厂标定读不出来：{problems}"
 
     limits = calibration.limits_from_raw(raw, constants.DEFAULT_TRAVEL_MM)
     hard, _soft = calibration.validate_limits(
         limits, constants.DEFAULT_TRAVEL_MM, calibration.file_scale(raw)
     )
-    assert not hard, f"自带的出厂标定没通过校验：{hard}"
+    assert not hard, f"出厂标定没通过校验：{hard}"
 
 
 CHECKS = (
@@ -389,7 +388,7 @@ CHECKS = (
     Check("一次运动能到位并停住", check_a_move_arrives_and_stops),
     Check("顶住硬物时力矩有上限", check_a_stall_is_detected_rather_than_fought),
     Check("急停后电机失能", check_the_estop_zeroes_the_torque),
-    Check("自带的出厂标定文件可用", check_the_bundled_fallback_is_usable),
+    Check("出厂标定文件可用", check_the_fallback_calibration_is_usable),
 )
 
 

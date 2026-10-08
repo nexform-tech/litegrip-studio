@@ -4,11 +4,13 @@ The path bootstrap and the offscreen Qt setting live in the repository-root
 ``conftest.py``, which runs before any of this.  The home directory is moved
 aside here, next to the fixtures that would otherwise reach the operator's.
 
-Two things make these tests runnable with no hardware and no installed SDK: the
-simulated backend is driven by an injected clock, so a 120-second thermal run
-costs milliseconds and produces bit-identical results on every machine; and
-``pytest-qt`` is not a dependency, so the ``qapp`` fixture below stands in for
-it with a plain session-scoped ``QApplication``.
+Two things make these tests runnable with no hardware: the simulated backend is
+driven by an injected clock, so a 120-second thermal run costs milliseconds and
+produces bit-identical results on every machine; and ``pytest-qt`` is not a
+dependency, so the ``qapp`` fixture below stands in for it with a plain
+session-scoped ``QApplication``.  Nothing has to be installed for the SDK
+either — it is vendored under ``src/litegrip`` and the root ``conftest.py`` puts
+it on the path.
 """
 
 from __future__ import annotations
@@ -66,10 +68,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 def shipped_factory_calibrations() -> list[Path]:
     """Every copy of the factory calibration this repository ships.
 
-    Exactly one copy exists, and where it lives depends on the checkout: the
-    console carries its own, and the SDK vendored into ``src/litegrip`` carries
-    the same file.  Found by search so a test comparing against it can say "the
-    file this repository ships" without naming a directory only one layout has.
+    There is one, and it belongs to the vendored SDK
+    (``src/litegrip/factory_calibration.json``) rather than to the console.  It is
+    found by search, not by naming that path, so that the day a second copy comes
+    back a test comparing against them reports it instead of quietly checking one
+    of the two.
 
     The numbers in it are the ones the console falls back to on a machine with
     no user calibration, which is why a fixture claiming to be this file has to

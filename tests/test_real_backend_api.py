@@ -26,12 +26,12 @@ from types import SimpleNamespace
 
 import pytest
 
-#: The SDK is a checkout beside this one rather than a dependency — it is not on
-#: PyPI, and the repository meant to carry it is still empty — so a machine
-#: without that checkout can only skip these.  Everything here is about the
-#: surface of the real SDK: which of its names the backend may call, and what it
-#: does with the errors that SDK raises.  A stand-in would test the stand-in.
-litegrip = pytest.importorskip("litegrip")
+import litegrip
+
+#: Everything here is about the surface of the real SDK: which of its names the
+#: backend may call, and what it does with the errors that SDK raises.  A
+#: stand-in would test the stand-in.  The SDK is vendored under ``src/litegrip``
+#: rather than being a dependency, so it is always importable.
 GripperConfig = litegrip.GripperConfig
 LiteGripError = litegrip.LiteGripError
 
@@ -828,35 +828,6 @@ class TestSaveCalibration:
             backend.save_calibration(str(innocent))
 
         assert env.factory.read_text(encoding="utf-8") == "{}"
-
-    def test_the_console_s_own_copy_is_never_the_save_target_either(
-        self, backend, monkeypatch
-    ) -> None:
-        """The console ships a second copy of the same default, for machines
-        with no SDK checkout, and it sits inside the installed package.
-
-        Which of the two is in force depends on the machine, so both are
-        guarded and not only the one that happens to be loaded here.  This one
-        is the easier mistake of the two: it is the file next to the code doing
-        the writing, and an accidental write to it would outlive the install.
-
-        The environment override is dropped first, because it replaces the whole
-        candidate list — with it set, the bundled copy is not a fallback on this
-        machine and guarding it would be guarding nothing in particular.
-        """
-        monkeypatch.delenv("LITEGRIP_FACTORY_CALIB", raising=False)
-        backend.set_calibration_memory(1.775959, -0.064279, 65.21)
-        target = calibration.bundled_factory_path()
-        assert (
-            target in calibration.factory_candidates()
-        ), "this test is about a copy that is actually a fallback"
-        before = target.read_bytes()
-
-        with pytest.raises(BackendError, match="出厂标定"):
-            backend.save_calibration(str(target))
-
-        assert target.read_bytes() == before
-        assert _stub(backend).saved == [], "nothing reached the SDK"
 
     def test_saving_with_nothing_to_save_is_refused(self, backend) -> None:
         with pytest.raises(NotReady):

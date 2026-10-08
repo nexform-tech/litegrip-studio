@@ -25,11 +25,10 @@ dependencies = [
     "PyQt5>=5.15",
     "pyqtgraph>=0.13",
     "numpy>=1.21",
-    # The LiteGrip SDK is deliberately NOT a resolved dependency: its only
-    # declared dep (eclipse-zenoh) is never imported by library code and is not
-    # installed here. Run via run_litegrip_studio.sh (PYTHONPATH), or install
-    # a sibling checkout explicitly:
-    #   python -m pip install -e ../lite-grip --no-deps
+    # The LiteGrip SDK is vendored under src/litegrip and is deliberately NOT a
+    # resolved dependency: its only declared dep (eclipse-zenoh) is never
+    # imported by its library code, so an install step would buy nothing and
+    # could only pull in the wrong one. Provenance in src/litegrip/VENDORED.md.
 ]
 
 [project.optional-dependencies]
@@ -41,11 +40,11 @@ litegrip-studio = "litegrip_studio.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
-# The console ships its own copy of the fallback calibration, and package data
-# is not included by default: without this, the wheel has the code that reads it
-# and not the file, and a machine with no SDK checkout falls back to nothing.
+# Package data is not included by default. The vendored SDK resolves its
+# calibration files through dirname(__file__), so a wheel built without this has
+# the code that reads them and not the files.
 [tool.setuptools.package-data]
-litegrip_studio = ["factory_calibration.json"]
+litegrip = ["py.typed", "*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

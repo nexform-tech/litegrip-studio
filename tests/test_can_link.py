@@ -21,11 +21,11 @@ from pathlib import Path
 
 import pytest
 
-#: The SDK is a checkout beside this one rather than a dependency — it is not on
-#: PyPI, and the repository meant to carry it is still empty — so a machine
-#: without that checkout can only skip these.  What they test is how the SDK's
-#: own failure messages are read, so a stand-in would test the stand-in.
-litegrip = pytest.importorskip("litegrip")
+import litegrip
+
+#: What these tests are about is how the SDK's own failure messages are read, so
+#: a stand-in would test the stand-in.  The SDK is vendored under
+#: ``src/litegrip``, so it is always importable.
 LiteGripError = litegrip.LiteGripError
 
 from litegrip_studio import constants

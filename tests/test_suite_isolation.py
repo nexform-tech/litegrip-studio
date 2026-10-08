@@ -28,8 +28,10 @@ from conftest import OPERATOR_HOME, TEST_HOME, Rig
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 #: Mirrors the root ``conftest.py``, which is what puts these on the path when
-#: the suite runs; a subprocess has to be told as well.
-SDK = Path(os.environ.get("LITEGRIP_SDK_PATH") or REPO.parent / "lite-grip")
+#: the suite runs; a subprocess has to be told as well.  ``src/`` carries the
+#: vendored SDK, and a ``LITEGRIP_SDK_PATH`` override goes in front of it, the
+#: same way conftest does it.
+SDK_PATHS = [p for p in (os.environ.get("LITEGRIP_SDK_PATH"), str(REPO / "src")) if p]
 
 
 class TestTheSuiteHasAHomeOfItsOwn:
@@ -67,7 +69,7 @@ class TestTheSuiteHasAHomeOfItsOwn:
         """
         theirs = "/tmp/somebody-elses-calibration.json"
         env = dict(os.environ)
-        env["PYTHONPATH"] = os.pathsep.join([str(REPO / "src"), str(SDK)])
+        env["PYTHONPATH"] = os.pathsep.join(SDK_PATHS)
         env["LITEGRIP_CALIB"] = theirs
         env["LITEGRIP_FACTORY_CALIB"] = theirs
 
