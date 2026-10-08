@@ -34,13 +34,14 @@ from litegrip_studio.units import (
 #
 # The middle one is the SDK's *template* (``calibration_normal.json``) and not
 # its factory file, which is what it was labelled as until the two were
-# compared.  The template is the nominal unit, so its mm/rad is the SDK's 120 mm
-# over the 1.605 rad it recorded (74.8, rounded) and its span comes out as
-# 120 mm — the gap ``TestStroke`` pins.  The factory file is this bench's, and
-# its mm/rad already is the scale derived from its own travel, so it cannot show
-# that gap at all; it is checked as a file in ``test_calibration.py``.
+# compared.  What it carries is the SDK's scale for the unit it was written for:
+# 1.651026 rad of span at its own 52.69 mm/rad is 87 mm, and that product is the
+# gap ``TestStroke`` pins.  Neither shipped file's mm/rad is the scale this
+# console moves by — that one is derived from the travel the operator measured,
+# which over the template's span gives 52.0888 — so the file itself is checked
+# as a file, in ``test_calibration.py``.
 REVERSED = Limits(0.0, 1.14, 104.6)  # GripperConfig defaults
-TEMPLATE = Limits(0.114, -1.491, 74.8)  # the SDK's calibration_normal.json
+TEMPLATE = Limits(0.0, -1.651026, 52.69)  # the SDK's calibration_normal.json
 BENCH = Limits(1.775959, -0.064279, 65.21)  # example user calibration
 
 #: What the real bench's encoder reports, closed and fully open — the two
@@ -79,14 +80,14 @@ class TestRoundTrip:
 
 
 class TestStroke:
-    def test_the_template_stroke_is_the_nominal_it_was_written_for(self) -> None:
-        """1.605 rad of travel at the file's own 74.8 mm/rad is 120.05 mm.
+    def test_the_template_stroke_is_what_its_own_scale_says(self) -> None:
+        """1.651026 rad of travel at the file's own 52.69 mm/rad is 86.99 mm.
 
-        Which is the SDK's nominal stroke, not this bench's travel: a file that
-        records its own 120 mm is describing the unit it was written for, and
-        that gap is what ``validate_limits`` reports.
+        Which is the SDK's scale for the unit the template was written for, not
+        this bench's travel: that gap is what makes the file's number
+        recognisable as a nominal rather than a measurement.
         """
-        assert TEMPLATE.stroke_mm == pytest.approx(120.06, abs=0.01)
+        assert TEMPLATE.stroke_mm == pytest.approx(86.99, abs=0.01)
 
     def test_bench_stroke(self) -> None:
         assert BENCH.stroke_mm == pytest.approx(120.0, abs=0.01)
@@ -306,3 +307,41 @@ class TestErrorText:
 
         assert constants.describe_error(constants.ERROR_OC) == "过流故障 (OC)"
         assert constants.describe_error(0x55) == "未知错误 (0x55)"
+
+
+# ── the fixtures themselves ─────────────────────────────────────────────────
+class TestTheFixturesAreTheFilesTheyClaim:
+    """``TEMPLATE`` and ``REVERSED`` stand in for two datasets in a dozen tests
+    each, and neither is read from the file or the config it names.
+
+    That is the failure this class exists for: with the fixtures left behind when
+    the SDK moved, everything above still passed — including ``TestStroke``,
+    against a number the SDK no longer ships.  ``tests/test_calibration.py``
+    guards ``FACTORY_RAW`` the same way, and for the same reason.
+    """
+
+    def test_the_template_is_the_file_it_names(self) -> None:
+        import json
+        from pathlib import Path
+
+        import litegrip
+
+        raw = json.loads(
+            Path(litegrip.CALIB_TEMPLATES["normal"]).read_text(encoding="utf-8")
+        )
+
+        assert TEMPLATE.closed_rad == pytest.approx(raw["zero_position_rad"])
+        assert TEMPLATE.open_rad == pytest.approx(raw["max_position_rad"])
+        assert TEMPLATE.rad_to_mm == pytest.approx(raw["rad_to_mm"])
+
+    def test_the_reversed_pair_is_still_the_sdk_s_untouched_config(self) -> None:
+        """The pair the console recognises a never-calibrated gripper by, so a
+        change to it upstream is a change to that recognition."""
+        import litegrip
+
+        config = litegrip.GripperConfig()
+
+        assert {REVERSED.closed_rad, REVERSED.open_rad} == {
+            config.pos_closed_rad,
+            config.pos_open_rad,
+        }

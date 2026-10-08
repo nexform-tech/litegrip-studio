@@ -748,10 +748,10 @@ class TrajectoryPlayer:
             interval = float(gripper.motion_config.frame_interval)
             rate_hz = 1.0 / interval if interval > 0.0 else 200.0
         self._rate_hz = float(rate_hz)
+        self._dt = 1.0 / self._rate_hz
         self._sleep_fn, self._monotonic_fn = _resolve_seams(
             gripper, sleep_fn, monotonic_fn)
-        self._pacer = _Pacer(1.0 / self._rate_hz, self._sleep_fn,
-                             self._monotonic_fn)
+        self._pacer = _Pacer(self._dt, self._sleep_fn, self._monotonic_fn)
 
         self._thread: Optional[threading.Thread] = None
         self._running = False
@@ -794,14 +794,61 @@ class TrajectoryPlayer:
             self._running = False
 
     def _align_to_start(self) -> None:
-        """One move to sample 0, so following starts from the right place."""
-        target = openness_to_rad(self._traj.samples[0].openness, self._g.config)
+        """Walk to sample 0 at a bounded speed, so following starts in place.
+
+        This used to be one ``goto_rad(..., duration=1.0)``.  ``duration`` reads
+        like a ramp but is only a deadline: the CAN layer sends ``q = q_target``
+        from the first frame and holds it, so that frame demanded ``kp`` times
+        the whole error.  That is the same full-torque step #22 reports for the
+        teleop follower — at the shipped ``kp`` of 100 Nm/rad any error past
+        ~0.1 rad saturates the DM4310.
+
+        The target is walked in at ``motion_config.speed_mm_s`` with that same
+        speed fed forward as ``dq``, and each frame is capped to
+        ``motion_config.max_lead_mm`` of lead.  Torque is
+        ``kp * (q_cmd - q_measured)``, so capping the lead caps the commanded
+        torque by construction — the rule ``open``/``close`` already travel
+        under.
+        """
+        gcfg = self._g.config
+        mcfg = self._g.motion_config
+        target = openness_to_rad(self._traj.samples[0].openness, gcfg)
         log.info("replay aligning to first sample: openness=%.3f -> %.3f rad",
                  self._traj.samples[0].openness, target)
         try:
-            self._g.goto_rad(target, kp=self._kp, kd=self._kd, duration=1.0)
+            start = self._g.get_state(wait=False).position_rad
         except Exception as e:  # noqa: BLE001
-            log.warning("replay align goto_rad failed: %s", e)
+            log.warning("replay align state read failed: %s", e)
+            return
+        rad_to_mm = float(getattr(gcfg, "rad_to_mm", 0.0) or 0.0)
+        speed_mm_s = float(getattr(mcfg, "speed_mm_s", 0.0) or 0.0)
+        dist_rad = target - start
+        if rad_to_mm <= 0.0 or speed_mm_s <= 0.0 or abs(dist_rad) < 1e-9:
+            # Nothing to schedule against: the jaws are already at the target,
+            # or the config cannot give us a speed.  One frame hands over.
+            self._send_rad(target)
+            return
+        speed_rad_s = speed_mm_s / rad_to_mm
+        sign = 1.0 if dist_rad >= 0.0 else -1.0
+        cap_rad = float(getattr(mcfg, "max_lead_mm", 0.0) or 0.0) / rad_to_mm
+        steps = max(1, int(round(abs(dist_rad) / speed_rad_s / self._dt)))
+        log.info("replay align: %+.4f -> %+.4f rad at %.1f mm/s "
+                 "(%d frames, cap %.4f rad)",
+                 start, target, speed_mm_s, steps, cap_rad)
+        for i in range(1, steps + 1):
+            if not self._running:
+                return
+            cycle_start = self._monotonic_fn()
+            q_sched = start + dist_rad * (i / steps)
+            pos = self._g.get_state(wait=False).position_rad
+            lead = q_sched - pos
+            if cap_rad > 0.0:
+                if lead > cap_rad:
+                    q_sched = pos + cap_rad
+                elif lead < -cap_rad:
+                    q_sched = pos - cap_rad
+            self._send_rad(q_sched, dq=sign * speed_rad_s)
+            self._pacer.rest(cycle_start)
 
     def _loop_frames(self) -> None:
         duration = self._traj.duration
@@ -863,11 +910,19 @@ class TrajectoryPlayer:
         return t0
 
     def _emit(self, openness: float) -> None:
-        q = openness_to_rad(openness, self._g.config)
-        if not self._g.send_mit_frame(q=q, kp=self._kp, kd=self._kd, dq=0.0):
+        self._send_rad(openness_to_rad(openness, self._g.config))
+        self._last_openness = openness
+
+    def _send_rad(self, q: float, dq: float = 0.0) -> None:
+        """Send one MIT frame at ``q`` (radians), counting it.
+
+        Shared by the replay loop (``dq = 0``) and the align ramp, which feeds
+        its travel speed forward as ``dq``.  A failed send aborts: dropping
+        frames silently would leave the jaws somewhere the status does not show.
+        """
+        if not self._g.send_mit_frame(q=q, kp=self._kp, kd=self._kd, dq=dq):
             raise TrajectoryError(
                 "MIT 帧下发失败 (未连接或未使能?) —— 回放中止, 不静默丢帧")
-        self._last_openness = openness
         self._frames += 1
 
     def stop(self, timeout: float = 2.0) -> None:

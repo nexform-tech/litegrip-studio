@@ -68,10 +68,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 def shipped_factory_calibrations() -> list[Path]:
     """Every copy of the factory calibration this repository ships.
 
-    Exactly one copy exists, and where it lives depends on the checkout: the
-    console carries its own, and the SDK vendored into ``src/litegrip`` carries
-    the same file.  Found by search so a test comparing against it can say "the
-    file this repository ships" without naming a directory only one layout has.
+    There is one, and it belongs to the vendored SDK
+    (``src/litegrip/factory_calibration.json``) rather than to the console.  It is
+    found by search, not by naming that path, so that the day a second copy comes
+    back a test comparing against them reports it instead of quietly checking one
+    of the two.
 
     The numbers in it are the ones the console falls back to on a machine with
     no user calibration, which is why a fixture claiming to be this file has to

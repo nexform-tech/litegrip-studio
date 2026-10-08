@@ -47,21 +47,28 @@ from conftest import REPO_ROOT, shipped_factory_calibrations
 # The three real datasets, copied from the SDK tree rather than invented, so a
 # change in the SDK's shipped numbers shows up as a test failure here.
 #
-# ``FACTORY_RAW`` is the SDK's ``factory_calibration.json``, verbatim.  Its
-# ``rad_to_mm`` looks arbitrary and is not: it is the 85 mm travel plus the
-# probe's 1 mm inset over the 1.409552 rad span this bench records, which is
-# exactly the scale the console derives for ``DEFAULT_TRAVEL_MM``.
-# ``TestTheFixtureIsTheFileItClaims`` below compares it against the file the
+# ``FACTORY_RAW`` is the SDK's ``factory_calibration.json``, verbatim, including
+# ``work_stroke_mm`` — a key this console does not read and must still carry, or
+# the comparison below would be against a file of its own invention.
+#
+# Its ``rad_to_mm`` is upstream's scale for the unit that file was recorded on:
+# 1.651026 rad of span times 52.69 is 87 mm.  It is deliberately *not* the scale
+# the console moves by — that one is derived from the travel the operator
+# measured, and over this span ``DEFAULT_TRAVEL_MM`` gives 52.0888, about 1.2 %
+# away.  The derivation is the whole point of the console's limits, so a fixture
+# that assumed the file agreed with it would be pinning the wrong number.
+# ``TestTheFixtureIsTheFileItClaims`` below compares this against the file the
 # repository ships.
 FACTORY_RAW = {
     "channel": "can0",
     "can_id": 8,
     "mst_id": 24,
     "canfd_mode": False,
-    "zero_position_rad": 0.052071,
-    "max_position_rad": -1.357481,
-    "travel_range_rad": 1.409552,
-    "rad_to_mm": 61.01229326764816,
+    "zero_position_rad": 0.0,
+    "max_position_rad": -1.651026,
+    "travel_range_rad": 1.651026,
+    "rad_to_mm": 52.69,
+    "work_stroke_mm": 80.0,
     "motor_type": "DM4310",
     "kp": 5.0,
     "kd": 2.0,
@@ -386,7 +393,7 @@ class TestMotionAllowed:
         reason."""
         _write(env.user, USER_RAW)
         info = calibration.resolve()
-        mismatch = calibration.cross_check(info, Limits(0.114, -1.491, 74.8))
+        mismatch = calibration.cross_check(info, Limits(0.0, -1.651026, 52.69))
         assert mismatch
         assert not replace(info, problems=info.problems + tuple(mismatch)).motion_allowed
 

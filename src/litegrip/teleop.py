@@ -9,10 +9,16 @@ bare ``LiteGrip`` on a CAN bus is all it takes.
 Topology::
 
     leader  (zero-gravity, hand-back-driven)  --pub-->  follower (MIT follow)
+    leader  (holds under gain until ready)    <--pub--  follower (at target)
 
-``master`` streams zero-torque frames so the jaws can be pushed by hand, and
-publishes its normalised opening at ``rate_hz``.  ``slave`` subscribes, aligns
-once, then streams MIT position frames toward the received opening.
+``master`` publishes its normalised opening at ``rate_hz``.  ``slave``
+subscribes, ramps once to the first frame's opening, then streams MIT position
+frames toward the received opening.  On a transport that carries the reverse
+direction the follower also announces when it has arrived
+(:func:`ready_topic`), and the master holds its own jaws under gain — **not**
+hand-movable — until it hears that.  A master that cannot subscribe to the ready
+topic, or whose peer never announces, behaves as before: it goes slack
+immediately, warning if it waited past :data:`DEFAULT_READY_TIMEOUT_S`.
 
 Why the wire carries ``openness`` and not radians
 -------------------------------------------------
@@ -30,7 +36,16 @@ Safety notes
 ------------
 * ``openness`` is clamped to ``[0, 1]``, which keeps every commanded target
   inside the calibrated travel.  That clamp bounds *where* the follower may go;
-  ``torque_limit_nm`` bounds *how hard* it may push.
+  ``lead_cap_mm`` bounds *how hard* the align may push, and ``torque_limit_nm``
+  is the backstop for the follow.
+* The align move goes out through :meth:`GripperTeleop._ramp_to`, which caps how
+  far each frame's command may lead the measured position
+  (:meth:`GripperTeleop._cap_lead`).  Torque is ``kp * (q_cmd - q_measured)``, so
+  bounding the lead bounds the commanded torque by construction — without it the
+  first align frame demands ``kp`` times the whole error, and at the shipped
+  ``kp`` of 100 Nm/rad anything past ~0.1 rad saturates the DM4310.  The *follow*
+  loop is deliberately left uncapped so the follower stays responsive; the
+  ``torque_limit_nm`` guard is what protects it under load.
 * When ``torque_limit_nm`` is set (``0``, the default, disables it) the follower
   watches its own torque and releases when it stays over the limit for
   :data:`TORQUE_TRIP_CYCLES` cycles — see
@@ -47,6 +62,11 @@ Safety notes
   gains (it does not relax to zero torque).  The jaws therefore keep pressing
   whatever is between them — the same behaviour as the litearm original.  A
   tripped torque guard overrides that and stays released.
+* The leader's readiness gate is about **when it hands back**, never about
+  withholding frames: it publishes from the first cycle either way, so a
+  follower always has something to align to and neither end can block on the
+  other.  ``require_ready=False`` disables the gate; ``ready_timeout_s=0`` waits
+  indefinitely.  See :meth:`GripperTeleop._master_loop`.
 * Teleoperation is exclusive: stop any motion you started elsewhere before
   calling :meth:`~litegrip.LiteGrip.teleop_start`.
 * :class:`UdpTeleopTransport` is plain, unauthenticated UDP.  Use it only on a
@@ -95,6 +115,28 @@ DEFAULT_DQ_MAX = 10.0
 #: fall back to position-only control for that cycle.
 MAX_FRAME_GAP_S = 0.05
 
+# ── [遥操对齐块] 常量 ──────────────────────────────────────────────────────
+# 遥操从机启动对齐的「定速斜坡 + 每帧领先上限」。整块的作用、清单，以及
+# 临时停用 / 整块移除的做法，见 GripperTeleop._ramp_to() 上方那段说明。
+# 用 `grep -n '\[遥操对齐块\]' src/litegrip/teleop.py src/litegrip/gripper.py`
+# 可定位本块的全部位置。
+# ──────────────────────────────────────────────────────────────────────────
+#: Speed the follower travels at when it aligns to the leader's opening, in mm/s
+#: of jaw travel.  It used to travel at whatever stiffness would get it there:
+#: ``goto_rad(..., duration=1.0)`` sends ``q = q_target`` from the first frame,
+#: so the whole error was commanded at once.  Same number
+#: ``actions.MotionConfig.speed_mm_s`` gives ``open``/``close``.  Must be > 0.
+DEFAULT_ALIGN_SPEED_MM_S = 50.0
+
+#: Ceiling on how far the *align* command may lead the measured position, in mm
+#: of jaw travel.  Torque is ``kp * (q_cmd - q_measured)``, so bounding the lead
+#: bounds the commanded torque by construction.  4 mm is 0.054 rad at the shipped
+#: ``rad_to_mm`` of ~83, i.e. ~5.4 Nm at ``kp`` 100 — the bracket ``open``/
+#: ``close`` already travel with (``MotionConfig.max_lead_mm``).  ``0`` disables
+#: the cap.  The follow loop does not use this: it commands the leader's opening
+#: outright so it stays responsive.
+DEFAULT_LEAD_CAP_MM = 4.0
+
 #: Default ceiling on the follower's own torque, in Nm.  ``0`` disables the guard,
 #: which is the default: it changes the follower's behaviour under load, so a
 #: caller opts in rather than inheriting it.
@@ -120,6 +162,27 @@ TORQUE_TRIP_CYCLES = 3
 #: there the requirement is the open stop itself; see
 #: :meth:`GripperTeleop._update_torque_guard`.
 TORQUE_REARM_OPENNESS = 0.05
+
+#: Follower arrival tolerance, in mm of the follower's own travel.  The follower
+#: announces itself ready once its measured position is this close to the target
+#: it was last commanded, so the leader can hand back knowing the jaws are where
+#: it thinks they are.  Tight enough that the hand-off does not jump, loose
+#: enough that a stiff position loop with a little following error still
+#: qualifies.
+DEFAULT_READY_TOLERANCE_MM = 2.0
+
+#: How often the follower republishes its ready state, in seconds — ~10 Hz.  The
+#: state is also resent whenever it changes, so the leader sees a transition at
+#: once; the periodic resend is for a leader that starts *after* the follower
+#: arrived and would otherwise never learn it.
+DEFAULT_READY_PERIOD_S = 0.1
+
+#: How long the leader holds under gain for a ready signal before proceeding
+#: anyway, in seconds.  ``0`` waits indefinitely.  A bounded wait is the
+#: backward-compatibility answer: an older follower that never announces ready
+#: must not leave a new leader holding forever, so the leader warns and relaxes
+#: after this.  See :meth:`GripperTeleop._relaxed`.
+DEFAULT_READY_TIMEOUT_S = 10.0
 
 
 def encode_frame(openness: float, position_mm: float, force_n: float,
@@ -150,6 +213,41 @@ def decode_frame(payload: bytes) -> Tuple[float, float, float, float]:
     return _FRAME.unpack(payload)
 
 
+# ── Ready codec ───────────────────────────────────────────────────────────
+
+_READY_FRAME = struct.Struct(">B")
+
+#: Size of one ready frame in bytes (a single state byte).
+READY_FRAME_SIZE = _READY_FRAME.size
+
+
+def encode_ready_frame(ready: bool) -> bytes:
+    """Pack one follower-ready frame — a single state byte.
+
+    Deliberately tiny and separate from the teleop frame: the teleop frame
+    carries the *leader's* pose and is byte-identical to the litearm stack's, so
+    a readiness bit cannot ride on it without diverging that format.  This
+    channel is the follower -> leader direction only.
+    """
+    return _READY_FRAME.pack(1 if ready else 0)
+
+
+def decode_ready_frame(payload: bytes) -> bool:
+    """Unpack a ready frame into ``True`` (ready) or ``False`` (not ready).
+
+    ⚠ Any non-zero byte reads as ready: a truncation or a stray value should not
+    silently look like "not ready".  Both of those are caught at the wire
+    boundary instead — the leader treats an undecodable frame as no frame.
+
+    Raises:
+        ValueError: ``payload`` is not exactly :data:`READY_FRAME_SIZE` bytes.
+    """
+    if len(payload) != READY_FRAME_SIZE:
+        raise ValueError(
+            f"ready frame must be {READY_FRAME_SIZE} byte, got {len(payload)}")
+    return _READY_FRAME.unpack(payload)[0] != 0
+
+
 def teleop_topic(grip_id: str = DEFAULT_GRIP_ID) -> str:
     """Topic the leader publishes and the follower subscribes to.
 
@@ -161,6 +259,18 @@ def teleop_topic(grip_id: str = DEFAULT_GRIP_ID) -> str:
     teleoperation runs on the same transport.
     """
     return f"litearm/v4/{grip_id}/gripper_teleop"
+
+
+def ready_topic(grip_id: str = DEFAULT_GRIP_ID) -> str:
+    """Topic the follower publishes and the leader subscribes to.
+
+    A sibling of :func:`teleop_topic` on the same transport, in the reverse
+    direction, carrying the one-byte readiness state.  It is *not* part of the
+    litearm namespace the teleop topic shares — that link is one-way and its
+    frame format is pinned — so a peer that does not know this topic simply
+    never matches it, which is the intended "old peer" behaviour.
+    """
+    return f"litearm/v4/{grip_id}/gripper_ready"
 
 
 # ── Transport abstraction ─────────────────────────────────────────────────
@@ -248,19 +358,20 @@ class UdpTeleopTransport(TeleopTransport):
     def __init__(self, pub_addr: Union[str, Tuple[str, int], None] = None,
                  bind_addr: Union[str, Tuple[str, int], None] = None) -> None:
         self._pub_addr = _parse_addr(pub_addr) if pub_addr is not None else None
+        self._bind_addr = _parse_addr(bind_addr) if bind_addr is not None else None
         self._sock: Optional[socket.socket] = None
         self._sub: Optional[_UdpSubscription] = None
 
-        if bind_addr is not None:
+        if self._bind_addr is not None:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind(_parse_addr(bind_addr))
+            sock.bind(self._bind_addr)
             sock.setblocking(False)
             self._sock = sock
         elif self._pub_addr is not None:
             self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-        if self._pub_addr is None and bind_addr is None:
+        if self._pub_addr is None and self._bind_addr is None:
             raise ValueError("UdpTeleopTransport needs pub_addr, bind_addr or both")
 
     def pub(self, topic: str, payload: bytes) -> None:
@@ -272,7 +383,11 @@ class UdpTeleopTransport(TeleopTransport):
             log.debug("udp send failed: %s", e)
 
     def sub(self, topic: str) -> TeleopSubscription:
-        if self._sock is None:
+        # Keyed on the *bind*, not on the socket: a pub-only transport still
+        # holds a socket, but it was never bound, is left in blocking mode, and
+        # a recv on it would block the caller forever rather than returning
+        # "nothing yet".
+        if self._bind_addr is None:
             raise TeleopError(
                 "UdpTeleopTransport was built without bind_addr; it cannot subscribe")
         if self._sub is None:
@@ -442,11 +557,16 @@ def check_ready(cfg: Any) -> None:
 class GripperTeleop:
     """One side of a gripper teleoperation, driven by a background thread.
 
-    ``mode="master"`` streams zero-torque frames (so the jaws can be moved by
-    hand) and publishes the opening.  ``mode="slave"`` subscribes, aligns to
-    the first frame with a single :meth:`~litegrip.LiteGrip.goto_rad`, then
-    follows every fresh sample with ``send_mit_frame``, feeding the leader's
-    finite-difference velocity forward as ``dq`` (:meth:`_estimate_dq`).
+    ``mode="master"`` publishes its opening and, once the follower reports ready
+    (or ``ready_timeout_s`` passes), streams zero-torque frames so the jaws
+    can be moved by hand; until then it holds its own position under gain.
+    ``mode="slave"`` subscribes, ramps to the first frame (:meth:`_ramp_to`),
+    then follows every fresh sample with ``send_mit_frame``, feeding the leader's
+    finite-difference velocity forward as ``dq`` (:meth:`_estimate_dq`).  The
+    ramp caps how far each frame's command may lead the measurement
+    (:meth:`_cap_lead`); the follow loop is uncapped so it tracks the leader
+    sample-for-sample.  It announces ready on :func:`ready_topic` once it has
+    arrived.
 
     One loop thread per side, sampling and sending in the same cycle — no
     shared buffers and no contention, which is all a single-DOF gripper needs
@@ -463,6 +583,8 @@ class GripperTeleop:
         kp, kd: Follow gains (slave).  ``None`` uses the calibration's ``kp`` /
             ``kd``, falling back to ``100.0`` / ``2.0``.
         align: Slave only — align to the first frame before following.
+        align_speed_mm_s: Slave only — speed of that align move, in mm/s of jaw
+            travel.  Must be > 0.  See :meth:`_ramp_to`.
         watchdog_s: Slave only — seconds without a fresh frame before the
             follower is considered stale and starts holding.  Must be > 0: a
             non-positive watchdog makes the follower permanently stale, which is
@@ -471,11 +593,29 @@ class GripperTeleop:
             as the follower's ``dq`` target.  ``0`` disables the feedforward, in
             which case the follower biases on position error alone and trails a
             moving leader.  See :meth:`_estimate_dq`.
+        lead_cap_mm: Slave only — ceiling in mm on how far the *align* command
+            may lead the measured position, which bounds the align torque at
+            ``kp * lead_cap_mm / rad_to_mm``.  The follow loop is not capped.
+            ``0`` disables the cap.  See :meth:`_cap_lead`.
         torque_limit_nm: Slave only — ceiling in Nm on the follower's own torque.
             Held over the limit for :data:`TORQUE_TRIP_CYCLES` cycles it
             releases in place and stays released until the leader reopens by
             :data:`TORQUE_REARM_OPENNESS`.  ``0`` disables the guard.  See
             :meth:`_update_torque_guard`.
+        ready_topic: The follower-ready channel, or ``None`` to run without a
+            handshake (the master then goes slack from its first cycle).  When
+            set, the master holds under gain until a ready frame arrives and the
+            slave announces its arrival.
+        require_ready: Master only — gate the hand-back on a ready frame.  Only
+            meaningful with ``ready_topic`` set; ``False`` restores the
+            immediate hand-back.
+        ready_timeout_s: Master only — seconds to hold for a ready signal before
+            proceeding anyway with a warning; ``0`` waits indefinitely.  Ignored
+            when ``require_ready`` is ``False``.
+        ready_tolerance_mm: Slave only — announce ready once the measured
+            position is within this many mm of the commanded one.
+        ready_period_s: Slave only — republish the ready state at least this
+            often (it is also resent on every change).
         sub_transport: Slave only — a separate transport to subscribe on when
             the leader is remote (the master's transport is local-only).
         sleep_fn, time_fn: Timing seams for tests.  ``time_fn`` must be
@@ -492,9 +632,16 @@ class GripperTeleop:
         kp: Optional[float] = None,
         kd: Optional[float] = None,
         align: bool = True,
+        align_speed_mm_s: float = DEFAULT_ALIGN_SPEED_MM_S,   # [遥操对齐块]
         watchdog_s: float = 0.2,
         dq_max: float = DEFAULT_DQ_MAX,
         torque_limit_nm: float = DEFAULT_TORQUE_LIMIT_NM,
+        lead_cap_mm: float = DEFAULT_LEAD_CAP_MM,             # [遥操对齐块]
+        ready_topic: Optional[str] = None,
+        require_ready: bool = True,
+        ready_timeout_s: float = DEFAULT_READY_TIMEOUT_S,
+        ready_tolerance_mm: float = DEFAULT_READY_TOLERANCE_MM,
+        ready_period_s: float = DEFAULT_READY_PERIOD_S,
         sub_transport: Optional[TeleopTransport] = None,
         sleep_fn: Callable[[float], None] = time.sleep,
         time_fn: Callable[[], float] = time.monotonic,
@@ -505,10 +652,26 @@ class GripperTeleop:
             raise ValueError("rate_hz must be > 0")
         if not watchdog_s > 0.0:
             raise ValueError("watchdog_s must be > 0")
+        if not float(align_speed_mm_s) > 0.0:
+            raise ValueError(
+                f"align_speed_mm_s must be > 0, got {align_speed_mm_s!r}")
         if float(torque_limit_nm) < 0.0:
             raise ValueError(
                 f"torque_limit_nm must be >= 0 (0 disables the guard), "
                 f"got {torque_limit_nm!r}")
+        if float(lead_cap_mm) < 0.0:
+            raise ValueError(
+                f"lead_cap_mm must be >= 0 (0 disables the cap), "
+                f"got {lead_cap_mm!r}")
+        if float(ready_timeout_s) < 0.0:
+            raise ValueError(
+                f"ready_timeout_s must be >= 0 (0 waits indefinitely), "
+                f"got {ready_timeout_s!r}")
+        if float(ready_tolerance_mm) < 0.0:
+            raise ValueError(
+                f"ready_tolerance_mm must be >= 0, got {ready_tolerance_mm!r}")
+        if not float(ready_period_s) > 0.0:
+            raise ValueError("ready_period_s must be > 0")
         self._g = gripper
         self._tp = transport
         self._mode = mode
@@ -517,9 +680,16 @@ class GripperTeleop:
         self._kp = kp
         self._kd = kd
         self._align = align
+        self._align_speed_mm_s = float(align_speed_mm_s)
         self._watchdog_s = watchdog_s
         self._dq_max = float(dq_max)
         self._torque_limit_nm = float(torque_limit_nm)
+        self._lead_cap_mm = float(lead_cap_mm)
+        self._ready_topic = ready_topic
+        self._require_ready = bool(require_ready)
+        self._ready_timeout_s = float(ready_timeout_s)
+        self._ready_tolerance_mm = float(ready_tolerance_mm)
+        self._ready_period_s = float(ready_period_s)
         self._sub_tp = sub_transport
         self._sleep_fn = sleep_fn
         self._time_fn = time_fn
@@ -555,6 +725,27 @@ class GripperTeleop:
         self._torque_trips = 0
         self._torque_over_cycles = 0
         self._trip_openness = 0.0
+        #: Readiness handshake.  Master side: ``_follower_ready`` is the last
+        #: state heard, ``_master_relaxed`` latches once the gate opens so a
+        #: later not-ready does not snatch control back from the operator, and
+        #: ``_master_t0``/``_ready_timed_out`` implement the bounded wait.  Slave
+        #: side: ``_ready_state`` is the state it last published (``None`` =
+        #: nothing sent yet) and ``_ready_pub_ts`` paces the republish.
+        self._follower_ready = False
+        self._master_relaxed = False
+        self._master_t0: Optional[float] = None
+        self._ready_timed_out = False
+        self._ready_rx = 0
+        #: Master only — the live ready subscription, or ``None`` when the gate
+        #: is disabled or the transport cannot carry it.  Set by
+        #: :meth:`_master_loop`.
+        self._ready_sub: Optional[TeleopSubscription] = None
+        self._ready_state: Optional[bool] = None
+        self._ready_pub_ts = 0.0
+        self._ready_pubs = 0
+        #: Slave only — the transport its ready frames go out on (the one that
+        #: reaches the leader), set by :meth:`_slave_loop`.
+        self._ready_tp: Optional[TeleopTransport] = None
         #: Leader velocity fed forward as this cycle's ``dq`` target, and the
         #: two samples it is differenced from.  Seeded on the first good frame;
         #: see :meth:`_estimate_dq`.
@@ -608,6 +799,12 @@ class GripperTeleop:
             thread.join(timeout=timeout)
         self._thread = None
         self._handoff()
+        if self._mode == "slave":
+            # Withdraw the announcement: the next session aligns again, and a
+            # leader still up must not be told the follower is ready through a
+            # gap between sessions.  Forced — the change might fall inside the
+            # republish period and be throttled away.
+            self._publish_ready(False, force=True)
         log.info("teleop stopped: mode=%s frames=%d", self._mode, self._frames)
 
     def _handoff(self) -> None:
@@ -666,26 +863,60 @@ class GripperTeleop:
             "torque_trips": self._torque_trips,
             # Master only: whether a subscriber is matched.
             "matching": matching if isinstance(matching, bool) else None,
+            # Readiness handshake.  ``ready`` is this side's answer to "has the
+            # follower arrived?" — on the slave, what it last announced; on the
+            # master, the last state heard.  ``ready_timed_out`` is the master
+            # proceeding without one (see :meth:`_master_loop`), and the two
+            # counters are the frames sent/received on the ready channel.
+            "ready": (bool(self._ready_state) if self._mode == "slave"
+                      else self._follower_ready),
+            "ready_rx": self._ready_rx,
+            "ready_pubs": self._ready_pubs,
+            "ready_timed_out": self._ready_timed_out,
         }
 
     # ── master ────────────────────────────────────────────────────────
 
     def _master_loop(self) -> None:
-        log.info("[master] zero-gravity, publishing to %s", self._topic)
+        self._ready_sub = self._open_ready_sub()
+        if self._ready_sub is None:
+            log.info("[master] zero-gravity, publishing to %s", self._topic)
+        else:
+            wait = ("indefinitely" if self._ready_timeout_s <= 0.0
+                    else f"{self._ready_timeout_s:.0f}s")
+            log.info("[master] holding under gain, publishing to %s; releasing "
+                     "when %s reports ready (waiting %s)",
+                     self._topic, self._ready_topic, wait)
+        self._master_t0 = self._time_fn()
         try:
             while self._running:
                 t0 = self._time_fn()
-                # Keep the frame stream alive: the DM motor self-locks a
-                # "communication loss" fault ~100 ms after frames stop, so a
-                # zero-torque frame goes out every cycle even though nothing
-                # is being commanded.
+                # Read before sending: a held master needs its own angle to
+                # hold, and a relaxed one still wants the state for the frame.
                 try:
-                    self._send(0.0, 0.0, 0.0, quiet=True)
                     state = self._g.get_state(wait=False)
                 except Exception:  # noqa: BLE001
                     log.exception("[master] CAN error; loop exiting")
                     break
                 self._note_grip_fault(state)
+                if self._ready_sub is not None and not self._follower_ready:
+                    self._read_ready(self._ready_sub)
+                # Keep the frame stream alive: the DM motor self-locks a
+                # "communication loss" fault ~100 ms after frames stop, so a
+                # frame goes out every cycle even though nothing is commanded.
+                # While the gate is shut it is a *hold* at the current angle —
+                # a zero-torque frame there would make the jaws hand-movable,
+                # which is the very thing the gate exists to prevent.
+                try:
+                    if self._relaxed():
+                        self._send(0.0, 0.0, 0.0, quiet=True)
+                    else:
+                        self._send(clamp_to_calibrated(
+                            self._g.config, state.position_rad),
+                            self._resolve_kp(), self._resolve_kd())
+                except Exception:  # noqa: BLE001
+                    log.exception("[master] CAN error; loop exiting")
+                    break
                 openness = rad_to_openness(state.position_rad, self._g.config)
                 if not all(math.isfinite(v) for v in
                            (openness, state.position_mm, state.force_n)):
@@ -712,6 +943,9 @@ class GripperTeleop:
 
     def _slave_loop(self) -> None:
         transport = self._sub_tp or self._tp
+        # The ready frames go back the same way the teleop frames came in, so
+        # they travel the link that is already proven to reach the leader.
+        self._ready_tp = transport
         sub = transport.sub(self._topic)
         cfg = self._g.config
         log.info("[slave] subscribed %s (align=%s watchdog=%.0fms)",
@@ -720,25 +954,31 @@ class GripperTeleop:
         # Until a frame arrives, hold wherever the jaws already are.  A ``0.0``
         # target here would be a real position command — the open or the closed
         # stop, depending on the mount.
-        q_cmd = clamp_to_calibrated(cfg, self._g.get_state(wait=False).position_rad)
+        here = self._g.get_state(wait=False)
+        q_cmd = clamp_to_calibrated(cfg, here.position_rad)
+        # Announce "not ready" up front: a leader already holding must not read
+        # a stale ready from the previous session as "this one is aligned".
+        self._publish_ready(False, force=True)
 
         if self._align:
             first = self._wait_first_frame(sub, timeout_s=5.0, hold_q=q_cmd)
             if first is not None:
+                # ``q_cmd`` becomes the align target *before* the ramp so the
+                # follow loop keeps holding it if the leader then goes quiet;
+                # leaving it at the pre-align position would drive the jaws back
+                # the moment the ramp finished.
                 q_cmd = clamp_to_calibrated(
                     cfg, openness_to_rad(_clamp01(first[0]), cfg))
-                log.info("[slave] aligning to first frame: openness=%.3f -> %+.4f rad",
-                         _clamp01(first[0]), q_cmd)
-                try:
-                    self._g.goto_rad(q_cmd, kp=self._resolve_kp(),
-                                     kd=self._resolve_kd(), duration=1.0)
-                except Exception as e:  # noqa: BLE001
-                    log.warning("[slave] align goto_rad failed: %s", e)
                 self._last_frame_ts = self._time_fn()
                 self._ever_received = True
                 self._last_openness = _clamp01(first[0])
                 self._last_position_mm = float(first[1])
                 self._last_force_n = float(first[2])
+                # [遥操对齐块] 定速斜坡 + 领先上限对齐（说明见 _ramp_to() 上方）。
+                # 退回旧行为就把下一行换成：
+                # self._g.goto_rad(q_cmd, kp=self._resolve_kp(),
+                #                  kd=self._resolve_kd(), duration=1.0)
+                self._ramp_to(q_cmd)
             else:
                 log.warning("[slave] no frame within align timeout; "
                             "holding current position")
@@ -791,12 +1031,17 @@ class GripperTeleop:
                     state = self._g.get_state(wait=False)
                     self._note_grip_fault(state)
                     self._update_torque_guard(state)
+                    self._announce_ready(state, cfg, q_cmd)
                     if self._over_torque:
                         # Released in place: zero stiffness and damping, but the
                         # frames keep flowing so the motor does not latch its
                         # comm-loss fault.
                         self._send(q_cmd, 0.0, 0.0)
                     else:
+                        # Deliberately uncapped: the follower commands the
+                        # leader's opening outright so it stays responsive.  Only
+                        # the align ramp caps its lead (:meth:`_ramp_to`); the
+                        # guard above is what protects the follow under load.
                         self._send(q_cmd, self._resolve_kp(), self._resolve_kd(),
                                    dq=dq_cmd)
                 except Exception:  # noqa: BLE001
@@ -813,7 +1058,7 @@ class GripperTeleop:
         """Wait for the first frame, holding position while we wait.
 
         ⚠ A **non-finite** frame is skipped and the wait continues, never
-        returned: this value feeds ``goto_rad``, and a NaN folds onto an end
+        returned: this value feeds the align ramp, and a NaN folds onto an end
         stop — one bad frame would pull the follower to the closed limit, on the
         ``align=True`` default path, before the loop's own guard could see it.
         ⚠ The wait **keeps sending hold frames**: staying silent for up to 5 s
@@ -839,6 +1084,235 @@ class GripperTeleop:
                 return None
             self._sleep_fn(0.01)
         return None
+
+    # ── readiness handshake ───────────────────────────────────────────
+
+    def _gate_enabled(self) -> bool:
+        """Whether this session *wants* the leader-side gate."""
+        return (self._mode == "master" and self._require_ready
+                and self._ready_topic is not None)
+
+    def _open_ready_sub(self) -> Optional[TeleopSubscription]:
+        """Subscribe to the ready channel, or ``None`` if the gate is off.
+
+        ⚠ A transport that cannot subscribe must not be fatal.  The UDP master
+        publishes without binding — there is no receive path on it at all — so
+        the gate is simply disabled and the leader goes slack as it always did.
+        Treating "no channel" as "not ready" would hold the leader under gain
+        for the full timeout on a link that can never carry the answer.
+        """
+        if not self._gate_enabled():
+            return None
+        try:
+            return (self._sub_tp or self._tp).sub(self._ready_topic)
+        except Exception as e:  # noqa: BLE001
+            log.warning("[master] cannot subscribe to %s (%s); the readiness "
+                        "gate is off", self._ready_topic, e)
+            return None
+
+    def _read_ready(self, sub: TeleopSubscription) -> None:
+        """Drain the ready channel.  The newest frame wins."""
+        msg = sub.drain_latest()
+        if msg is None:
+            return
+        try:
+            ready = decode_ready_frame(msg)
+        except ValueError as e:
+            log.debug("[master] ignoring bad ready frame: %s", e)
+            return
+        self._ready_rx += 1
+        if ready != self._follower_ready:
+            log.info("[master] follower %s", "ready" if ready else "not ready")
+        self._follower_ready = ready
+
+    def _relaxed(self) -> bool:
+        """Whether the leader may hand back this cycle — **latched**.
+
+        The gate opens on the first ready frame, or, so that an older follower
+        that never announces cannot deadlock a new leader, once
+        ``ready_timeout_s`` has passed — with a warning.  It then stays open:
+        taking the jaws away from the operator mid-session because a frame went
+        missing would be worse than the transient the gate guards against.
+        """
+        if self._master_relaxed:
+            return True
+        if self._ready_sub is None:
+            return True
+        if self._follower_ready:
+            self._master_relaxed = True
+            log.info("[master] follower ready — handing back zero-gravity")
+            return True
+        if self._ready_timeout_s <= 0.0:
+            return False
+        if (self._master_t0 is not None
+                and (self._time_fn() - self._master_t0) >= self._ready_timeout_s):
+            self._master_relaxed = True
+            self._ready_timed_out = True
+            log.warning("[master] no ready signal within %.0fs; releasing the "
+                        "hand-back anyway (an older follower may not announce)",
+                        self._ready_timeout_s)
+            return True
+        return False
+
+    def _announce_ready(self, state: Any, cfg: Any, q_cmd: float) -> None:
+        """Publish the follower's readiness for this cycle (slave)."""
+        if self._ready_topic is None:
+            return
+        measured = float(state.position_rad)
+        at_target = (abs(float(q_cmd) - measured) * float(cfg.rad_to_mm)
+                     <= self._ready_tolerance_mm)
+        self._publish_ready(self._ever_received and not self._stale
+                            and not self._over_torque and at_target)
+
+    def _publish_ready(self, ready: bool, force: bool = False) -> None:
+        """Send one ready frame, throttled to a change or ``ready_period_s``.
+
+        Best-effort: the channel is advisory, so a transport that cannot carry
+        it (or drops this one frame) must not affect the follow loop.
+        """
+        if self._ready_topic is None or self._ready_tp is None:
+            return
+        now = self._time_fn()
+        if (not force and ready == self._ready_state
+                and (now - self._ready_pub_ts) < self._ready_period_s):
+            return
+        try:
+            self._ready_tp.pub(self._ready_topic, encode_ready_frame(ready))
+        except Exception as e:  # noqa: BLE001
+            log.debug("[slave] ready publish failed: %s", e)
+            return
+        if ready != self._ready_state:
+            log.info("[slave] %s", "ready — the leader may hand back" if ready
+                     else "not ready")
+        self._ready_state = ready
+        self._ready_pub_ts = now
+        self._ready_pubs += 1
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # [遥操对齐块] 遥操从机启动对齐的安全措施 —— 可整块注释 / 删除
+    #
+    # 作用：把"对齐到 leader 第一帧"从「一帧 goto_rad 把整个误差一次发出去」
+    # 改成「定速斜坡（align_speed_mm_s）+ 每帧把指令领先夹到 lead_cap_mm」。
+    # 力矩 = kp × (q_cmd − q_measured)，夹住领先就从构造上夹住了力矩 —— 开盘
+    # 那一帧不再以满力矩顶过去（曾有从机被这样怼进硬限位、撞断打印限位）。
+    # 顺带把对齐纳入 _update_torque_guard：卡住会像正常一样失力释放。
+    #
+    # 本块清单（grep -n '\[遥操对齐块\]' src/litegrip/teleop.py src/litegrip/gripper.py）：
+    #   - 常量   DEFAULT_ALIGN_SPEED_MM_S / DEFAULT_LEAD_CAP_MM
+    #   - 形参   __init__ 的 align_speed_mm_s / lead_cap_mm（含校验与赋值）
+    #   - 方法   _lead_cap_rad / _cap_lead / _ramp_to（本段）
+    #   - 调用点 self._ramp_to(q_cmd)（slave 对齐段）
+    #   - 透传   gripper.py 的 teleop_start(align_speed_mm_s=, lead_cap_mm=)
+    #
+    # 临时停用（不动代码）：teleop_start(lead_cap_mm=0) 关掉领先上限；
+    #   align_speed_mm_s 只调对齐速度。
+    # 整块移除：删掉上面清单，并把 _ramp_to(q_cmd) 换回旧行为 ——
+    #   self._g.goto_rad(q_cmd, kp=self._resolve_kp(),
+    #                    kd=self._resolve_kd(), duration=1.0)
+    #   （注意：旧的 duration 只是 deadline、不是斜坡，第一帧即满误差；这正是
+    #    本块要修的隐患。）
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def _lead_cap_rad(self) -> float:
+        """The lead cap in radians, or ``0.0`` when it is disabled.
+
+        ``rad_to_mm`` is the only conversion the cap needs and teleop already
+        refuses to start without it (``check_ready``); treating a missing or zero
+        one as "disabled" keeps this from dividing by zero on a caller that
+        bypassed that check.
+        """
+        rad_to_mm = float(getattr(self._g.config, "rad_to_mm", 0.0) or 0.0)
+        if self._lead_cap_mm <= 0.0 or rad_to_mm <= 0.0:
+            return 0.0
+        return self._lead_cap_mm / rad_to_mm
+
+    def _cap_lead(self, q_target: float, pos_rad: float) -> float:
+        """Pull a position command back to within the lead cap of the measurement.
+
+        The follower is a position loop whose gain is in Nm/rad, so the torque it
+        commands is ``kp * (q_target - pos_rad)``.  Bounding that difference
+        bounds the torque by construction, which is the point: the align's first
+        frame hands over the leader's whole opening at once, and an uncapped one
+        would demand ``kp`` times the full error — at the shipped ``kp`` of 100
+        an error over ~0.1 rad saturates the DM4310 (10 Nm).  Capping does not
+        slow the move down for free: the jaws still travel, they just press with
+        a bounded torque while they catch up.  Only the align ramp calls this.
+        """
+        cap = self._lead_cap_rad()
+        if cap <= 0.0:
+            return q_target
+        lead = q_target - pos_rad
+        if lead > cap:
+            return pos_rad + cap
+        if lead < -cap:
+            return pos_rad - cap
+        return q_target
+
+    def _ramp_to(self, target_rad: float) -> None:
+        """Travel to ``target_rad`` at :attr:`_align_speed_mm_s`, capped every frame.
+
+        The align used to be one ``goto_rad(..., duration=1.0)``.  ``duration``
+        reads like a ramp, but the CAN layer sends ``q = q_target`` from the
+        first frame and merely holds it until the deadline
+        (``protocols/can_bus.py``'s ``control_mit_stream``), so the first frame
+        demanded ``kp`` times the whole error — a full-torque step wherever the
+        jaws happened to start, which drove a follower into the closed hard stop
+        hard enough to break its printed limit.  Instead this is the profile
+        ``open``/``close`` already travel with (``actions.MotionConfig``): a
+        constant-speed schedule, the same speed fed forward as ``dq``, and
+        :meth:`_cap_lead` on every frame.
+
+        Sending through this module's own path also puts the align under
+        :meth:`_update_torque_guard`, which the blocking ``goto_rad`` was outside
+        of — a jam during the align now releases like any other.
+        """
+        cfg = self._g.config
+        try:
+            state = self._g.get_state(wait=False)
+        except Exception as e:  # noqa: BLE001
+            log.warning("[slave] align state read failed: %s", e)
+            return
+        start = clamp_to_calibrated(cfg, state.position_rad)
+        dist_rad = target_rad - start
+        rad_to_mm = float(getattr(cfg, "rad_to_mm", 0.0) or 0.0)
+        speed_mm_s = self._align_speed_mm_s
+        if rad_to_mm <= 0.0 or abs(dist_rad) < 1e-9:
+            # Nothing to schedule against.  One capped frame still bounds the
+            # torque; an uncapped one would be the bug this method exists to fix.
+            self._send(self._cap_lead(target_rad, state.position_rad),
+                       self._resolve_kp(), self._resolve_kd())
+            return
+        speed_rad_s = speed_mm_s / rad_to_mm
+        sign = 1.0 if dist_rad >= 0.0 else -1.0
+        steps = max(1, int(round(abs(dist_rad) / speed_rad_s / self._dt)))
+        log.info("[slave] aligning: %+.4f -> %+.4f rad at %.1f mm/s "
+                 "(%d frames, cap %.4f rad)",
+                 start, target_rad, speed_mm_s, steps, self._lead_cap_rad())
+        for i in range(1, steps + 1):
+            if not self._running:
+                return
+            t0 = self._time_fn()
+            try:
+                state = self._g.get_state(wait=False)
+                self._note_grip_fault(state)
+                self._update_torque_guard(state)
+                if self._over_torque:
+                    # Released in place, exactly as the follow loop would.  Hold
+                    # where the jaws are; do not keep driving into whatever
+                    # tripped the guard.
+                    self._send(clamp_to_calibrated(cfg, state.position_rad),
+                               0.0, 0.0)
+                    return
+                q_sched = start + dist_rad * (i / steps)
+                self._send(self._cap_lead(q_sched, state.position_rad),
+                           self._resolve_kp(), self._resolve_kd(),
+                           dq=sign * speed_rad_s)
+            except Exception:  # noqa: BLE001
+                log.exception("[slave] CAN error during align; loop exiting")
+                return
+            rest = self._dt - (self._time_fn() - t0)
+            if rest > 0.0:
+                self._sleep_fn(rest)
 
     def _estimate_dq(self, q: float, rx_ts: float) -> float:
         """Leader velocity in rad/s, differenced from the previous good frame.

@@ -93,6 +93,19 @@ class MotionConfig:
     # ── 力矩 / 指令上限 ────────────────────────────────────────────────
     max_lead_mm: float = 4.0            # 行进段领先上限 mm（≈ kp × 上限）
 
+    # ── 行进段堵转保护（≈7 N） ────────────────────────────────────────
+    # 普通移动（``press=True`` 的 open/close）行进段的领先上限是 max_lead_mm，
+    # 一旦夹爪在半路被硬挡，``kp × 领先上限`` ≈ 7.6 N·m 会一直压着；而位置
+    # 窗口判据对「缓慢变形」的硬停会漏判（结构让位让窗口净位移一直够）。这
+    # 一路**独立按力矩保护**：行进段里实测速度明显跟不上指令、且 ``|tau|``
+    # 连续 stop_torque_cycles 次过阈 → 判堵转并失力。压紧段（已经贴着标定
+    # 限位，``lead_cap`` 已切到 stop_lead_mm）不走这一路 —— 那里本来就该顶着
+    # 力矩，硬加力矩门槛会让每一次 open/close 都误触发。
+    stop_torque_nm: float = 0.7         # 触发保护的力矩阈值 Nm（≈7 N）
+    stop_torque_cycles: int = 3         # 连续这么多个采样点都过阈才触发
+    stop_speed_ratio: float = 0.5       # 实测速度低于指令速度这个比例才算「没跟上」
+    stop_release_s: float = 0.2         # 触发后失力（kp=kd=tau=0）持续时长 s
+
     # ── 保力 ───────────────────────────────────────────────────────────
     force_n: float = 20.0               # 默认夹持力 N（= 2.0 Nm）
     hold_interval: float = 0.2          # 保力分片时长 s
@@ -165,6 +178,10 @@ class MoveResult:
     limit_rad: float                    # 这一端标定出的机械限位
     final_cmd_rad: float                # 最后一帧下发的指令位置
     steps: int                          # 实际走了多少帧
+    # 行进段堵转保护（≈7 N 力矩）触发 —— 触发即失力，``ok`` 必为 False。
+    # 与 ``stalled`` 的区别：``stalled`` 也会由「顶到标定限位」成立（那是
+    # open/close 的正常成功终点），``protected`` 只报这一路力矩保护。
+    protected: bool = False
 
     def __bool__(self) -> bool:
         return self.ok
@@ -293,6 +310,38 @@ def press_target(
     return limit - s * over_rad, limit, over_rad, travel
 
 
+def work_limit_target(
+    config: GripperConfig,
+    work_stroke_mm: float,
+) -> Tuple[float, float, float]:
+    """张开侧「工作行程」目标：从闭合零点起算 ``work_stroke_mm`` 处的指令位置。
+
+    与 :func:`press_target` 相反 —— 它**不**越位压到机械限位，而是在限位内侧
+    留出一段余量（现场口径：机械行程 87 mm，工作只用到 80 mm，开口端留 7 mm）。
+    余量是**显式**的毫米数，不是 :func:`limit_target` 那种按行程比例的 ``margin``。
+
+    方向来自 :attr:`GripperConfig.close_sign`，所以反装的机器同样成立。目标按
+    机械行程 clamp，``work_stroke_mm`` 不小于机械行程时就是「张开到底」。
+
+    Args:
+        config: 夹爪配置（用 ``pos_closed_rad`` / ``pos_open_rad`` / ``rad_to_mm``）。
+        work_stroke_mm: 工作行程 mm（自闭合零点起算）。
+
+    Returns:
+        ``(目标 rad, 张开侧标定限位 rad, 实际工作行程 rad)``
+
+    Raises:
+        CommandError: 配置还没标定（``calibrated=False``），或行程为零。
+    """
+    _check_calibrated(config)
+
+    s = config.close_sign
+    travel_mm = abs(config.pos_open_rad - config.pos_closed_rad) * config.rad_to_mm
+    stroke_mm = max(0.0, min(work_stroke_mm, travel_mm))
+    work_rad = stroke_mm / config.rad_to_mm
+    return config.pos_closed_rad - s * work_rad, config.pos_open_rad, work_rad
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # 动作层
 # ═══════════════════════════════════════════════════════════════════════════
@@ -326,12 +375,24 @@ class GripperActions:
         *,
         progress: Optional[Callable[[MoveProgress], None]] = None,
     ) -> MoveResult:
-        """全开：直接顶到张开侧机械限位堵转（压紧段轻压，不会撞）。
+        """全开。
 
-        ``ok=True`` 时 ``stalled=True``、``reached`` 基本为 ``False`` ——
-        见 :class:`MoveResult`。
+        默认顶到张开侧机械限位堵转（压紧段轻压，不会撞），``ok=True`` 时
+        ``stalled=True``、``reached`` 基本为 ``False``。
+
+        但若配置带了**工作行程**（:attr:`GripperConfig.work_stroke_mm` 且小于
+        机械行程），只走到那里就停 —— 开口端留出余量，不再压机械限位。这时是
+        一次普通定位（``ok = reached and not stalled``），``limit_rad`` 仍是
+        张开侧标定限位，示意目标停在它内侧。
         """
-        speed = self.config.speed_mm_s if speed_mm_s is None else speed_mm_s
+        cfg = self.config
+        gcfg = self._g.config
+        speed = cfg.speed_mm_s if speed_mm_s is None else speed_mm_s
+        travel_mm = abs(gcfg.pos_open_rad - gcfg.pos_closed_rad) * gcfg.rad_to_mm
+        if 0.0 < gcfg.work_stroke_mm < travel_mm:
+            target, _limit, _rad = work_limit_target(gcfg, gcfg.work_stroke_mm)
+            return self._move_to_limit("open", speed, target_rad=target,
+                                       progress=progress)
         return self._move_to_limit("open", speed, press=True, progress=progress)
 
     def close(
@@ -481,6 +542,7 @@ class GripperActions:
         speed_mm_s: float,
         *,
         press: bool = False,
+        target_rad: Optional[float] = None,
         progress: Optional[Callable[[MoveProgress], None]] = None,
     ) -> MoveResult:
         """走到一端的限位：整段是一条 frame_interval 一格的连续斜坡（MIT 帧 +
@@ -492,6 +554,10 @@ class GripperActions:
         靠堵转停在物理限位上；距限位 :attr:`MotionConfig.press_zone_mm` 之内
         领先上限切到 :attr:`MotionConfig.stop_lead_mm`，压紧力矩有界。
 
+        ``target_rad``：显式目标（如 :func:`work_limit_target` 算出的工作行程
+        点）。给了它就走**普通定位**语义（``press`` 视为 False），``limit`` 取该
+        方向的标定限位用于上报。
+
         返回 :class:`MoveResult`。
         """
         cfg = self.config
@@ -499,7 +565,12 @@ class GripperActions:
         g._check_enabled()
         gcfg = g.config
 
-        if press:
+        if target_rad is not None:
+            press = False
+            limit = (gcfg.pos_closed_rad if toward == "close"
+                     else gcfg.pos_open_rad)
+            target = target_rad
+        elif press:
             target, limit, _over_rad, _travel = press_target(
                 gcfg, toward, cfg.press_overshoot)
         else:
@@ -542,6 +613,9 @@ class GripperActions:
 
         hist = [before.position_rad]
         stalled = False
+        protected = False
+        over_torque = 0                          # 连续过阈的采样点数
+        prev_sample_pos = before.position_rad
         st = before
         last_cmd = before.position_rad
         last_i = 0
@@ -569,6 +643,9 @@ class GripperActions:
 
             if i % sample_every and i != total_steps:
                 continue
+            # 本采样的实测速度（rad/s）：用于堵转力矩保护的「有没有跟上」佐证。
+            rate_rad_s = abs(pos - prev_sample_pos) / cfg.sample_interval
+            prev_sample_pos = pos
             hist.append(pos)
             win_delta = (abs(hist[-1] - hist[-1 - win])
                          if len(hist) > win else None)
@@ -596,6 +673,35 @@ class GripperActions:
                          win, win_s, win_delta, win_thresh_rad, pos)
                 break
 
+            # 行进段堵转力矩保护（≈7 N）：与位置窗口判据**互补** —— 位置窗口对
+            # 「硬停但结构一直缓慢让位」会漏判（净位移始终够），这一路只看力矩。
+            # 门槛只在**行进段**生效（leading 还是 max_lead_mm）：那里持续高力矩
+            # 意味着真的顶上了东西。压紧段的领先已收窄到 stop_lead_mm，本来就该
+            # 顶着力矩，硬加力矩门槛会让每一次 open/close 都误触发。
+            if press and lead_cap_rad == travel_cap_rad and speed_rad_s > 0.0:
+                slow = rate_rad_s < cfg.stop_speed_ratio * speed_rad_s
+                if abs(st.torque_nm) >= cfg.stop_torque_nm and slow:
+                    over_torque += 1
+                else:
+                    over_torque = 0
+                if over_torque >= cfg.stop_torque_cycles:
+                    protected = True
+                    stalled = True
+                    log.info("堵转保护：|tau|=%.3f Nm ≥ %.3f 且速度 %.4f rad/s 只"
+                             "有指令的 %.0f%%，连续 %d 次采样 —— 判堵转并失力",
+                             st.torque_nm, cfg.stop_torque_nm, rate_rad_s,
+                             100.0 * rate_rad_s / speed_rad_s, over_torque)
+                    break
+
+        if protected:
+            # 触发即失力：连发 kp=kd=tau=0 的帧，让夹爪能被手掰动，而不是继续
+            # 压着。q 用当前读数 —— 零增益下 q 不产生任何力，只是给个不越位的
+            # 指令，免得下游把它当一次正常定位。
+            release_frames = max(
+                1, int(round(cfg.stop_release_s / cfg.frame_interval)))
+            for _ in range(release_frames):
+                self._emit(pos, 0.0, 0.0, kp=0.0, kd=0.0)
+
         st = g.get_state()                         # 阻塞等一帧新状态再判到位
         reached = abs(st.position_rad - target) < cfg.reach_tol
         if press:
@@ -604,6 +710,8 @@ class GripperActions:
             ok = stalled and abs(st.position_rad - limit) <= cfg.stop_tol
         else:
             ok = reached and not stalled
+        if protected:
+            ok = False                             # 保护性堵转永远不算成功
         return MoveResult(
             ok=ok,
             reached=reached,
@@ -613,6 +721,7 @@ class GripperActions:
             limit_rad=limit,
             final_cmd_rad=last_cmd,
             steps=last_i,
+            protected=protected,
         )
 
     def _hold_force(

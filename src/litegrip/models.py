@@ -99,6 +99,14 @@ class GripperConfig:
     # Mechanical stroke (mm) — set to match your gripper's physical travel
     max_stroke_mm: float = 120.0
 
+    # Working stroke (mm) — the opening the motions are allowed to reach, from
+    # the closed zero.  ``0`` (or anything ≥ the mechanical stroke) means "no
+    # limit": :meth:`actions.open` then presses onto the open mechanical stop as
+    # before.  Set it below the mechanical stroke to keep a margin at the open
+    # end (e.g. 80 mm of travel on an 87 mm mechanical stroke leaves 7 mm), so a
+    # plain open no longer drives into the stop.
+    work_stroke_mm: float = 0.0
+
     # Unit conversion — update after calibration
     rad_to_mm: float = 105.26              # rad → mm
     nm_to_n: float = 10.0                  # Nm → N (approximate)

@@ -245,6 +245,24 @@ class LiteGripCAN:
         except Exception:
             return False
 
+    def set_zero(self) -> bool:
+        """Make the current position the motor's encoder zero (CMD 0xFE).
+
+        This is the raw frame only.  A DM motor **ignores 0xFE while it is
+        enabled**, so the caller must send :meth:`disable` first (and re-enable
+        afterwards if it wants to keep moving) — that is the order the proven
+        bench tool uses.  The motor must already be sitting at the position you
+        want to call zero before this is sent; this method sends the command but
+        does not verify, so the caller reads the position back to confirm.
+        """
+        if self._controller is None or self._motor is None:
+            return False
+        try:
+            self._controller.set_zero(self._motor)
+            return True
+        except Exception:
+            return False
+
     # ═══════════════════════════════════════════════════════════════════
     # Fault handling
     # ═══════════════════════════════════════════════════════════════════

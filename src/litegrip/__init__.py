@@ -75,6 +75,7 @@ from .actions import (
     GripperActions,
     limit_target,
     press_target,
+    work_limit_target,
 )
 
 # ── Data models ─────────────────────────────────────────────────────────
@@ -125,11 +126,20 @@ from .teleop import (
     DEFAULT_GRIP_ID,
     DEFAULT_GRIP_PORT,
     DEFAULT_DQ_MAX,
+    DEFAULT_ALIGN_SPEED_MM_S,
+    DEFAULT_LEAD_CAP_MM,
     DEFAULT_TORQUE_LIMIT_NM,
+    DEFAULT_READY_TOLERANCE_MM,
+    DEFAULT_READY_PERIOD_S,
+    DEFAULT_READY_TIMEOUT_S,
     FRAME_SIZE,
+    READY_FRAME_SIZE,
     encode_frame,
     decode_frame,
+    encode_ready_frame,
+    decode_ready_frame,
     teleop_topic,
+    ready_topic,
 )
 
 # ── Trajectory record and replay ────────────────────────────────────────
@@ -193,6 +203,7 @@ __all__ = [
     "GripperActions",
     "limit_target",
     "press_target",
+    "work_limit_target",
     # Models
     "GripperState",
     "GripperConfig",
@@ -231,11 +242,20 @@ __all__ = [
     "DEFAULT_GRIP_ID",
     "DEFAULT_GRIP_PORT",
     "DEFAULT_DQ_MAX",
+    "DEFAULT_ALIGN_SPEED_MM_S",
+    "DEFAULT_LEAD_CAP_MM",
     "DEFAULT_TORQUE_LIMIT_NM",
+    "DEFAULT_READY_TOLERANCE_MM",
+    "DEFAULT_READY_PERIOD_S",
+    "DEFAULT_READY_TIMEOUT_S",
     "FRAME_SIZE",
+    "READY_FRAME_SIZE",
     "encode_frame",
     "decode_frame",
+    "encode_ready_frame",
+    "decode_ready_frame",
     "teleop_topic",
+    "ready_topic",
     # Teleoperation — zenoh link (resolved lazily; needs litegrip[zenoh])
     "ZenohTeleopTransport",
     "Listener",

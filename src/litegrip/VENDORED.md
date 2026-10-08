@@ -12,7 +12,7 @@ that has nothing but this repository.
 | | |
 | --- | --- |
 | Upstream | <https://github.com/nexform-tech/litegrip-python> |
-| Commit | `85e619f81b182afeb341747d12051b9dcf2382cb` (2026-09-30) |
+| Commit | `4cec95da2fb12ce5eb2617477564e81b65ba117e` (2026-10-08) |
 | License | Apache-2.0 — `LICENSE` is that commit's file, copied verbatim |
 
 `src/litegrip/` holds the modules, the `can/` and `protocols/` subpackages, `py.typed`, and the
@@ -22,7 +22,7 @@ three JSON data files the code resolves through `dirname(__file__)`: `factory_ca
 `CALIB_TEMPLATES`), so they must travel with the code.
 
 Upstream's `tests/`, `.github/`, `.releaserc.json`, `AGENTS.md`, `README*`, `examples/`,
-`pyproject.toml`, and `__pycache__/` are deliberately **not** copied. Its 244 tests are upstream's
+`pyproject.toml`, and `__pycache__/` are deliberately **not** copied. Its tests are upstream's
 suite about upstream's internals; the console pins the part of the SDK surface it actually uses
 (`tests/test_vendored_sdk.py`, `tests/test_real_backend_api.py`) and records the tree hash below so
 drift cannot go unnoticed.
@@ -40,7 +40,7 @@ and fails when it no longer matches.
 ## Tree hash
 
 ```text
-83b4704ea1b4c38e48ef428a69ffb65a8809264d8f5fe8345351d3c9f0461fd3
+839bd5489041c087c0beb2454b6f34128e9a1df86aa8cb101f90ed80993acbe2
 ```
 
 The recipe, so it can be recomputed without reading the test: take every file under `src/litegrip/`
@@ -75,15 +75,16 @@ git -C ../litegrip-python show NEW_SHA:LICENSE > src/litegrip/LICENSE
 ```
 
 **Do not** copy the checkout's working tree instead (`cp -r ../litegrip-python/src/litegrip src/`).
-A checkout sits on whatever branch it was last switched to, and an unmerged branch carries unmerged
-data. `feat/gripper-work-stroke` (`893e07b`) is one: its `factory_calibration.json` reads
-`0.0 / -1.651026 / 1.651026 / 52.69` and adds a `work_stroke_mm` the console ignores, where `main`
-has the `0.052071 / -1.357481 / 1.409552 / 61.01229326764816` the console falls back to and moves
-by — check either with `git -C ../litegrip-python show BRANCH:src/litegrip/factory_calibration.json`
-rather than by reading the file on disk, which shows whichever branch was last checked out. Extra
-keys are not refused, so a `cp` from that branch would have changed the fallback numbers on every
-machine with no user calibration, and nothing in the diff would have said so. `git archive NEW_SHA`
-cannot do that, which is why every step above names a commit.
+A checkout sits on whatever branch it was last switched to, and that branch decides the numbers in
+its `factory_calibration.json` — this file's own history is the evidence: upstream changed that file
+in `4cec95d`, from `0.052071 / -1.357481 / 1.409552 / 61.01229326764816` to
+`0.0 / -1.651026 / 1.651026 / 52.69` plus a `work_stroke_mm` key the console ignores. The console
+falls back to whichever of the two it was vendored with, and a checkout left on a branch from before
+that change still carries the old one. A `cp` from there would have moved the fallback numbers on
+every machine that has no user calibration, and nothing in the diff would have said so — a key the
+console does not know is not refused, so the file loads either way. To see what a commit carries
+before copying it, ask the commit:
+`git -C ../litegrip-python show NEW_SHA:src/litegrip/factory_calibration.json`.
 
 Then, in one commit:
 
