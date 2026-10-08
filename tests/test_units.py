@@ -1,8 +1,9 @@
 """mm ↔ rad conversion, limits, and force scaling.
 
 These are the functions where a sign error drives a gripper into a hard stop,
-so the expectations are checked against the three real calibration datasets
-rather than against the formulas themselves.
+so the expectations are checked against real calibrations — this bench's user
+file, the SDK's shipped template, and its uncalibrated default pair — rather
+than against the formulas themselves.
 """
 
 from __future__ import annotations
@@ -29,8 +30,16 @@ from litegrip_studio.units import (
 # disqualify; here it is kept as what it looks like from the numbers — a pair of
 # angles recorded the other way round, and one whose range the real bench's
 # encoder readings fall outside of.
+#
+# The middle one is the SDK's *template* (``calibration_normal.json``) and not
+# its factory file, which is what it was labelled as until the two were
+# compared.  The template is the nominal unit, so its mm/rad is the SDK's 120 mm
+# over the 1.605 rad it recorded (74.8, rounded) and its span comes out as
+# 120 mm — the gap ``TestStroke`` pins.  The factory file is this bench's, and
+# its mm/rad already is the scale derived from its own travel, so it cannot show
+# that gap at all; it is checked as a file in ``test_calibration.py``.
 REVERSED = Limits(0.0, 1.14, 104.6)  # GripperConfig defaults
-FACTORY = Limits(0.114, -1.491, 74.8)  # litegrip/factory_calibration.json
+TEMPLATE = Limits(0.114, -1.491, 74.8)  # the SDK's calibration_normal.json
 BENCH = Limits(1.775959, -0.064279, 65.21)  # example user calibration
 
 #: What the real bench's encoder reports, closed and fully open — the two
@@ -42,12 +51,12 @@ MEASURED_OPEN_RAD = -0.300793
 
 
 class TestRoundTrip:
-    @pytest.mark.parametrize("lim", [FACTORY, BENCH, REVERSED])
+    @pytest.mark.parametrize("lim", [TEMPLATE, BENCH, REVERSED])
     @pytest.mark.parametrize("mm", [0.0, 0.001, 1.0, 37.5, 119.9, 120.0])
     def test_mm_rad_round_trip(self, lim: Limits, mm: float) -> None:
         assert lim.to_mm(lim.to_rad(mm)) == pytest.approx(mm, abs=1e-9)
 
-    @pytest.mark.parametrize("lim", [FACTORY, BENCH, REVERSED])
+    @pytest.mark.parametrize("lim", [TEMPLATE, BENCH, REVERSED])
     def test_rad_mm_round_trip(self, lim: Limits, ) -> None:
         for rad in (lim.closed_rad, lim.open_rad, (lim.closed_rad + lim.open_rad) / 2):
             assert lim.to_rad(lim.to_mm(rad)) == pytest.approx(rad, abs=1e-12)
@@ -69,14 +78,20 @@ class TestRoundTrip:
 
 
 class TestStroke:
-    def test_factory_stroke(self) -> None:
-        assert FACTORY.stroke_mm == pytest.approx(120.06, abs=0.01)
+    def test_the_template_stroke_is_the_nominal_it_was_written_for(self) -> None:
+        """1.605 rad of travel at the file's own 74.8 mm/rad is 120.05 mm.
+
+        Which is the SDK's nominal stroke, not this bench's travel: a file that
+        records its own 120 mm is describing the unit it was written for, and
+        that gap is what ``validate_limits`` reports.
+        """
+        assert TEMPLATE.stroke_mm == pytest.approx(120.06, abs=0.01)
 
     def test_bench_stroke(self) -> None:
         assert BENCH.stroke_mm == pytest.approx(120.0, abs=0.01)
 
     def test_travel_is_absolute(self) -> None:
-        for lim in (FACTORY, BENCH):
+        for lim in (TEMPLATE, BENCH):
             assert lim.travel_rad > 0
             assert lim.rad_low < lim.rad_high
 
@@ -118,8 +133,10 @@ class TestDirectionCheck:
     encoder and never looks at the ordering at all.
     """
 
-    def test_the_real_calibrations_have_the_closed_stop_at_the_larger_angle(self) -> None:
-        for lim in (FACTORY, BENCH):
+    def test_the_two_recorded_the_usual_way_have_the_closed_stop_at_the_larger_angle(
+        self,
+    ) -> None:
+        for lim in (TEMPLATE, BENCH):
             assert lim.direction == -1.0
 
     def test_the_defaults_read_as_the_ordering_they_have(self) -> None:
@@ -134,7 +151,7 @@ class TestDirectionCheck:
     def test_the_direction_is_the_sign_of_the_conversion_slope(self) -> None:
         """Both orderings agree with their own recorded angles, which is the only
         thing that makes the other one safe to drive."""
-        for lim in (FACTORY, BENCH, REVERSED):
+        for lim in (TEMPLATE, BENCH, REVERSED):
             assert lim.to_rad(0.0) == pytest.approx(lim.closed_rad)
             step = lim.to_rad(10.0) - lim.to_rad(0.0)
             assert math.copysign(1.0, step) == lim.direction
@@ -197,7 +214,7 @@ class TestVelocityFeedForward:
         assert abs(mm_to_rad_per_s(65.21, 65.21, direction=-1.0)) == pytest.approx(1.0)
         assert abs(mm_to_rad_per_s(65.21, 65.21, direction=1.0)) == pytest.approx(1.0)
 
-    @pytest.mark.parametrize("lim", [FACTORY, BENCH, REVERSED])
+    @pytest.mark.parametrize("lim", [TEMPLATE, BENCH, REVERSED])
     def test_the_derivative_of_the_position_mapping(self, lim: Limits) -> None:
         """Cross-check the sign against the position mapping numerically.
 

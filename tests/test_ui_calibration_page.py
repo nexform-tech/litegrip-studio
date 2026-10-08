@@ -35,7 +35,10 @@ from litegrip_studio.ui.calibration_page import (
 from litegrip_studio.units import Limits
 
 USER_LIMITS = Limits(1.775959, -0.064279, 65.21, 120.0)
-FACTORY_LIMITS = Limits(0.114, -1.491, 74.8, 120.0)
+#: The factory file this console falls back to, at the travel it is shipped
+#: configured for: ``61.01229326764816`` is that file's own mm/rad, which is the
+#: scale derived from its 1.409552 rad span over 85 mm plus the probe's inset.
+FACTORY_LIMITS = Limits(0.052071, -1.357481, 61.01229326764816, 85.0)
 
 #: A stand-in for where the SDK was checked out.  The shortened form of a
 #: factory path is relative to that root, so the tests that assert on it

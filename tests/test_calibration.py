@@ -42,19 +42,28 @@ from litegrip_studio.calibration import (
 )
 from litegrip_studio.units import Limits
 
+from conftest import REPO_ROOT, shipped_factory_calibrations
+
 # The three real datasets, copied from the SDK tree rather than invented, so a
 # change in the SDK's shipped numbers shows up as a test failure here.
+#
+# ``FACTORY_RAW`` is the SDK's ``factory_calibration.json``, verbatim.  Its
+# ``rad_to_mm`` looks arbitrary and is not: it is the 85 mm travel plus the
+# probe's 1 mm inset over the 1.409552 rad span this bench records, which is
+# exactly the scale the console derives for ``DEFAULT_TRAVEL_MM``.
+# ``TestTheFixtureIsTheFileItClaims`` below compares it against the file the
+# repository ships.
 FACTORY_RAW = {
     "channel": "can0",
     "can_id": 8,
     "mst_id": 24,
     "canfd_mode": False,
-    "zero_position_rad": 0.114,
-    "max_position_rad": -1.491,
-    "travel_range_rad": 1.605,
-    "rad_to_mm": 74.8,
+    "zero_position_rad": 0.052071,
+    "max_position_rad": -1.357481,
+    "travel_range_rad": 1.409552,
+    "rad_to_mm": 61.01229326764816,
     "motor_type": "DM4310",
-    "kp": 100.0,
+    "kp": 5.0,
     "kd": 2.0,
     "grasp_torque_threshold": 0.5,
 }
@@ -975,3 +984,25 @@ class TestPathsAreShownRelative:
         """An in-memory probe result has no file, and the page shows it."""
         assert calibration.friendly_path(None) == "—"
         assert calibration.friendly_path("") == "—"
+
+
+# ── the fixture itself ──────────────────────────────────────────────────────
+class TestTheFixtureIsTheFileItClaims:
+    """``FACTORY_RAW`` stands in for *the* factory calibration in a dozen tests,
+    so a wrong one is worse than a missing one: every test still passes, and the
+    suite then describes a file no machine loads.
+
+    That is what happened.  The numbers here were a fork's factory file
+    (``0.114 / -1.491 / 74.8``, the SDK's nominal pair for a 120 mm unit) under a
+    comment naming the SDK this console was built against, so the file the
+    console actually falls back to had never been through these tests at all.
+    """
+
+    def test_it_matches_every_copy_the_repository_ships(self) -> None:
+        copies = shipped_factory_calibrations()
+        assert copies, "this repository ships no factory calibration at all"
+
+        for path in copies:
+            assert json.loads(path.read_text(encoding="utf-8")) == FACTORY_RAW, (
+                f"{path.relative_to(REPO_ROOT)} 与 FACTORY_RAW 已经不一致了，两份要一起改"
+            )
