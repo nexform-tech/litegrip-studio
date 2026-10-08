@@ -17,6 +17,7 @@ import json
 import pytest
 
 from litegrip_studio import calibration, constants
+from litegrip_studio.backend import GripperBackend
 from litegrip_studio.backend.sim import SimBackend
 from litegrip_studio.calibration import PROVENANCE_INVALID, PROVENANCE_USER
 from litegrip_studio.core.worker import GateState, evaluate_gate
@@ -206,6 +207,26 @@ class TestItsOwnCalibration:
         sim.set_calibration_memory(1.780959, -0.069279, 64.86, max_stroke_mm=120.0)
 
         assert sim.describe() == before
+
+    def test_it_does_not_ask_to_be_remembered(self, tmp_path) -> None:
+        """The same guarantee through the settings file.
+
+        Applying a calibration remembers its path so the next launch loads it.
+        For the simulator that would be a one-way door: the remembered path is
+        read on every later launch, including a real one, and the bench gripper
+        would come up measuring with ``litegrip_calibration.sim.json``.  The
+        backend declares this rather than the window deciding it, because the
+        backend is the thing that knows whether its calibration describes a
+        gripper.
+        """
+        sim = SimBackend(clock=FakeClock(), calibration_path=tmp_path / "sim.json")
+
+        assert sim.remember_calibration_path is False
+
+    def test_the_real_backend_does_ask(self) -> None:
+        """The other half of it: a bench calibration is worth carrying across
+        restarts, and losing the path means starting on the factory numbers."""
+        assert GripperBackend.remember_calibration_path is True
 
     def test_it_never_reads_the_bench_grippers_calibration(
         self, tmp_path, monkeypatch

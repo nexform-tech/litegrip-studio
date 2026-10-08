@@ -190,6 +190,14 @@ class GripperBackend(ABC):
     def save_calibration(self, path: str | None = None) -> str:
         """Persist the active calibration; returns the path written."""
 
+    #: Whether the path a calibration was applied to should be remembered for the
+    #: next launch.  True for a bench: the file describes the gripper that is
+    #: plugged in, and losing the path means the console starts on the factory
+    #: numbers again.  False for the simulator, whose file describes no gripper at
+    #: all — remembering it is how a simulated calibration gets loaded as this
+    #: bench's own on the next real run.
+    remember_calibration_path: bool = True
+
     @abstractmethod
     def limits(self) -> Limits:
         """The travel limits currently in effect."""

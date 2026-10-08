@@ -48,6 +48,14 @@ def default_sim_calibration_path() -> Path:
 class SimBackend(GripperBackend):
     """A gripper that exists only in software."""
 
+    #: A simulated calibration describes no gripper, so the path it was applied to
+    #: is not worth carrying into the next launch: a later real run would load
+    #: ``litegrip_calibration.sim.json`` as this bench's own calibration and
+    #: measure every millimetre with it.  The file is still written — the operator
+    #: asked for it, and the simulator needs it to survive its own restart — it is
+    #: only the *remembering* that is refused.
+    remember_calibration_path = False
+
     def __init__(
         self,
         config: PlantConfig | None = None,

@@ -81,6 +81,8 @@ class FakeSignals(QObject):
     gate_state = pyqtSignal(str, str)
     calib_info = pyqtSignal(object)
     calib_progress = pyqtSignal(str, float, str)
+    calib_ready_to_apply = pyqtSignal(object)
+    calibration_applied = pyqtSignal(str)
     log = pyqtSignal(str, str)
     alert = pyqtSignal(str, str)
     alert_cleared = pyqtSignal()
@@ -502,6 +504,36 @@ class TestWhatIsRemembered:
 
         assert store.value("motion/speed_mm_s") == 77
         assert store.value("calibration/travel_mm") is None
+
+    def test_an_applied_calibration_is_remembered_as_a_path(self, qapp, worker) -> None:
+        """The round trip the whole 应用标定 flow exists to close: the file is
+        written, the path is remembered, and the next launch loads *it* rather
+        than the factory numbers.
+
+        Without this the calibration would be applied, the console restarted,
+        and the factory file back in force — the write would have been for
+        nothing, because the console only reads the path it was told."""
+        store = _Store()
+        worker.backend.remember_calibration_path = True
+        window = MainWindow(worker, Settings(store))
+        window._heartbeat.stop()
+
+        worker.calibration_applied.emit("/tmp/bench.json")
+
+        assert store.value("calibration/path") == "/tmp/bench.json"
+
+    def test_a_simulated_application_is_not_remembered(self, qapp, worker) -> None:
+        """A simulated calibration describes a plant.  Remembering it is how a
+        later real run loads ``litegrip_calibration.sim.json`` as this bench's
+        own calibration and measures every millimetre with it."""
+        store = _Store()
+        worker.backend.remember_calibration_path = False
+        window = MainWindow(worker, Settings(store))
+        window._heartbeat.stop()
+
+        worker.calibration_applied.emit("/tmp/sim.json")
+
+        assert store.value("calibration/path") is None
 
 
 class TestClosing:

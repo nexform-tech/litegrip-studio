@@ -224,6 +224,55 @@ class SaveCalibration(Command):
 
 
 @dataclass(frozen=True)
+class RefreshCalibration(Command):
+    """Re-read the calibration that is in force, and repaint it.
+
+    Deliberately *not* ``LoadCalibration()`` with no path.  That asks the backend
+    to resolve the default, so a file that has been renamed or deleted would come
+    back as the factory numbers — the console would look refreshed and be running
+    on a different gripper.  This re-reads the file the console is already on, and
+    says so when that file has gone.
+    """
+
+    source: str = "refresh"
+
+    def describe(self) -> str:
+        return "刷新标定显示"
+
+
+@dataclass(frozen=True)
+class ApplyCalibration(Command):
+    """Save the probe result the operator was just asked about, and use it.
+
+    The write is what promotes the result out of memory, and the only thing that
+    can open the gate on it — an in-memory calibration does not survive a
+    restart, so the console refuses to move until the file carries it.
+    """
+
+    source: str = "apply"
+
+    def describe(self) -> str:
+        return "应用标定"
+
+
+@dataclass(frozen=True)
+class DiscardCalibration(Command):
+    """Keep the probe result on screen and in memory, but do not write it.
+
+    The operator who says 暂不 has not asked for the numbers to be thrown away —
+    they are still what was just measured, and they are the reason the page can
+    say what they are.  What is refused is letting them *govern* the machine: no
+    file is written, so the gate stays shut and a restart finds the old
+    calibration.
+    """
+
+    source: str = "discard"
+
+    def describe(self) -> str:
+        return "暂不应用标定"
+
+
+@dataclass(frozen=True)
 class StartGuidedCalibration(Command):
     """Probe both travel limits by stepping into them.
 
@@ -357,6 +406,9 @@ AnyCommand = Union[
     SetForce,
     LoadCalibration,
     SaveCalibration,
+    RefreshCalibration,
+    ApplyCalibration,
+    DiscardCalibration,
     StartGuidedCalibration,
     ConfirmProbeLimit,
     StartManualCalibration,

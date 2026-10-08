@@ -67,6 +67,7 @@ import threading
 import time
 from collections import deque
 from enum import Enum
+from pathlib import Path
 from typing import Any, Callable
 
 from PyQt5.QtCore import QThread, pyqtSignal
@@ -955,6 +956,12 @@ class WorkerLoop:
             self._load_calibration(command.path)
         elif isinstance(command, cmd.SaveCalibration):
             self._save_calibration(command.path)
+        elif isinstance(command, cmd.RefreshCalibration):
+            self._refresh_display()
+        elif isinstance(command, cmd.ApplyCalibration):
+            self._apply_calibration()
+        elif isinstance(command, cmd.DiscardCalibration):
+            self._discard_calibration()
         elif isinstance(command, cmd.StartGuidedCalibration):
             self._start_probe(guided=True)
         elif isinstance(command, cmd.StartManualCalibration):
@@ -1188,21 +1195,56 @@ class WorkerLoop:
         self._refresh_calibration()
         info = self._info
         if ok and info is not None:
-            self._log("info", f"已载入标定: {info.describe()}")
+            # The path leads the line.  Which file is in force is the question
+            # this whole module exists to answer, and it used to be buried at the
+            # end of the numbers: a load that worked and a click that did nothing
+            # produced the same entry, because ``describe`` names the source
+            # whether or not it changed.
+            self._log("info", f"已载入标定文件: {info.path or '（内存中的结果）'}")
+            self._log("info", info.describe())
             if info.warnings:
                 self._alert("warn", "；".join(info.warnings))
         else:
             reason = "；".join(info.problems) if info is not None else "未知原因"
             self._alert("error", f"标定不可用：{reason}")
 
+    def _refresh_display(self) -> None:
+        """Re-read the file in force and repaint it, without switching files.
+
+        The button this serves is 刷新显示, and the one thing it must not do is
+        resolve the default.  Going through :meth:`_load_calibration` with no
+        path would look identical on screen and quietly answer with the factory
+        numbers when the operator's file has been renamed — the console would
+        measure with a file nobody chose, which is the confusion the 文件 row was
+        added to end.
+        """
+        info = self._info
+        if info is None:
+            self._alert("warn", "尚无标定信息可刷新")
+            return
+        if info.path is None:
+            # An in-memory probe result has no file behind it; showing it again is
+            # the whole of what refreshing can mean here.
+            self._signals.calib_info.emit(info)
+            self._log("info", "标定结果在内存中，已重新显示；它尚未保存到文件")
+            return
+        if not Path(info.path).is_file():
+            self._alert(
+                "warn",
+                f"标定文件已不存在：{info.path}。仍显示上次读到的结果；"
+                "换成别的文件请按「载入文件…」，改用出厂标定请在设置里清掉标定路径",
+            )
+            return
+        self._load_calibration(info.path)
+
     def _save_calibration(self, path: str | None) -> str | None:
         """Write the calibration out, returning where it landed or ``None``.
 
         The return value exists for the one caller that has to *decide*
-        something on the answer — a finished probe, whose hand-back depends on
-        whether the file now carries the result (see :meth:`_save_probe_result`).
-        Everything else reports the outcome through the alerts below, which are
-        the record as well as the message (see :meth:`_alert`).
+        something on the answer — :meth:`_apply_calibration`, whose retry
+        depends on whether the file now carries the result.  Everything else
+        reports the outcome through the alerts below, which are the record as
+        well as the message (see :meth:`_alert`).
         """
         try:
             written = self.backend.save_calibration(path)
@@ -1213,42 +1255,64 @@ class WorkerLoop:
         self._alert("info", f"标定已保存到 {written}")
         return written
 
-    def _save_probe_result(self, probe: Any, info: CalibrationInfo) -> bool:
-        """Write a finished probe out, and say whether the file now carries it.
+    def _offer_to_apply(self, probe: Any, info: CalibrationInfo) -> None:
+        """Put a finished probe's result to the operator, and ask before writing.
 
-        The operator used to have to press 保存 for this, and that press was the
-        only thing between a finished probe and a console that would not move: a
-        result in memory is *usable* but not *saved*, and an unsaved calibration
-        holds the gate shut.  A probe is a calibration the operator asked for by
-        hand, step by step, so it is written without being asked for once more.
-        The button survives as the retry for the case where the write itself
-        fails — a read-only directory, a full disk, the SDK refusing.
+        The result is adopted in memory either way — it is what the probe just
+        measured, and the page shows it — but it is not written until someone
+        says so.  An earlier version wrote it out on its own, on the argument
+        that the two presses of 记录 were already the request; that argument
+        holds right up to the moment the operator wants to look at the numbers
+        first, or intends to keep the calibration they already had.
 
-        A result that does not pass validation is deliberately *not* written.
-        The file on disk is a working calibration, and replacing it with numbers
-        the console has just called unusable would destroy it; the operator is
-        better served by a console that keeps refusing to move than by one that
-        moves on bad numbers.  The check has to live here because saving is
-        automatic now: the probe itself refuses only a degenerate travel
-        (calibration_fsm.summarise), so this is the first place the rest of
-        ``validate_limits`` gets a say.
+        A result that fails validation is not offered at all.  The file on disk
+        is a working calibration, and writing numbers the console has just called
+        unusable over it would destroy it: the operator is better served by a
+        console that keeps refusing to move.  This is the first place the rest of
+        ``validate_limits`` gets a say — the probe itself refuses only a
+        degenerate travel (``calibration_fsm.summarise``).
         """
         if not info.usable:
             reason = "；".join(info.problems) or "未通过校验"
             self._alert(
                 "warn",
-                f"{probe.note}。结果未自动保存：{reason}。"
+                f"{probe.note}。结果未通过校验：{reason}。"
                 "运动限制未解除，请重新标定或手工修好文件",
             )
-            return False
-        if self._save_calibration(None) is None:
-            self._alert(
-                "warn",
-                f"{probe.note}。结果尚未保存，保存之前不会解除运动限制。"
-                "排除原因后可按「重新保存标定…」重试",
-            )
-            return False
-        return True
+            return
+        self._signals.calib_ready_to_apply.emit(info)
+
+    def _apply_calibration(self) -> None:
+        """Write the result the operator just accepted, and say where it landed.
+
+        A failed write asks the question again rather than reporting a dead end:
+        the result is still in memory and still usable, so 应用标定 is its own
+        retry and the operator does not have to work out how to get the prompt
+        back.  The backend's guard against overwriting the factory file arrives
+        here as one of those failures.
+        """
+        info = self._info
+        if info is None or not info.usable:
+            self._alert("warn", "没有可应用的标定结果")
+            return
+        if info.provenance not in (PROVENANCE_MEMORY, PROVENANCE_USER):
+            self._alert("warn", f"当前标定（{info.label}）不是本次探测的结果，无需应用")
+            return
+        written = self._save_calibration(None)
+        if written is None:
+            self._signals.calib_ready_to_apply.emit(info)
+            return
+        self._signals.calibration_applied.emit(str(written))
+
+    def _discard_calibration(self) -> None:
+        """Leave the result unwritten, and say what that leaves the console in.
+
+        The numbers stay: they are what was just measured, and the page goes on
+        showing them.  What they do not get is authority — nothing is written, so
+        the gate stays shut and the axis keeps holding the pose the probe ended
+        on, which is the same guarantee an unwritten result has always carried.
+        """
+        self._log("info", "标定结果未应用：仍留在内存中，运动限制未解除")
 
     def _record_manual_limit(self, opening: bool) -> None:
         """Take the labelled point the operator has just pressed for.
@@ -1432,6 +1496,7 @@ class WorkerLoop:
     def _finish_probe(self, probe: Any, tele: Telemetry) -> None:
         self._probe = None
         result = probe.result
+        info = None
         if result is not None:
             info = self.backend.set_calibration_memory(
                 result.zero_rad, result.open_rad, result.rad_to_mm, result.max_stroke_mm
@@ -1439,7 +1504,6 @@ class WorkerLoop:
             self._refresh_calibration(info)
             for line in result.notes:
                 self._log("info", f"标定记录：{line}")
-            saved = self._save_probe_result(probe, info)
         else:
             # What the probe did get to see, logged *before* the verdict: on a
             # failed probe these lines are the whole account of it — which limit
@@ -1449,11 +1513,15 @@ class WorkerLoop:
                 self._log("info", f"标定记录：{line}")
             self._refresh_calibration()
             self._alert("warn", f"标定未完成：{probe.note}")
-            saved = False
         self._signals.calib_progress.emit(probe.phase.value, 1.0, probe.note)
-        self._hand_back_after_probe(probe, saved=saved)
+        self._hand_back_after_probe(probe)
+        if info is not None:
+            # Asked after the hand-back, because answering it is what decides
+            # whether the axis stays held where the probe left it or is let go
+            # into the new travel it just produced.
+            self._offer_to_apply(probe, info)
 
-    def _hand_back_after_probe(self, probe: Any, *, saved: bool) -> None:
+    def _hand_back_after_probe(self, probe: Any) -> None:
         """Close a probe out: leave zero gravity and put the axis somewhere.
 
         Reached by every way a probe can end — finished, cancelled, failed —
@@ -1482,13 +1550,6 @@ class WorkerLoop:
             self._log("info", "标定结束，已退出零重力")
         if not self._enabled:
             self._motion.idle()
-        elif saved:
-            # Nothing left to hand back: writing the result is what opened the
-            # gate, and the re-read that follows the write saw a READY gate and
-            # held the measured pose there and then (see _refresh_calibration).
-            # Sending the hold a second time would repeat the same frame, so the
-            # hand-back is over before it starts.
-            return
         elif self._gate is GateState.READY:
             self._hold_measured("标定结束，但尚未读到位置，先零重力")
         else:
@@ -1496,8 +1557,13 @@ class WorkerLoop:
             # in, and there does not need to be: the pose to hold is the one the
             # jaws are already in, which the encoder has just measured.  Nothing
             # is un-gated by this — the axis is held where the probe left it, and
-            # every command that would move it is still refused until the result
-            # is saved.
+            # every command that would move it is still refused until the operator
+            # applies the result and the file carries it.
+            #
+            # This is where every finished probe ends now.  A probe writes nothing
+            # on its own, so the gate is shut at this moment by construction, and
+            # the axis is held at the measured angle until the answer to 应用标定
+            # comes back.
             measured_rad = self._measured_rad()
             if measured_rad is None:
                 # No reading, so no pose to hold to.  Zero stiffness asks
@@ -1793,6 +1859,13 @@ class GripperWorker(QThread):
     calib_info = pyqtSignal(object)
     #: (phase, progress 0–1, note)
     calib_progress = pyqtSignal(str, float, str)
+    #: A finished probe produced a result worth keeping, and the operator has not
+    #: said yet whether it should govern the machine.  Carries the
+    #: :class:`~litegrip_studio.calibration.CalibrationInfo`.  Emitted again if an
+    #: accepted result fails to write, so the prompt doubles as the retry.
+    calib_ready_to_apply = pyqtSignal(object)
+    #: Where an accepted calibration was written, so the GUI can remember it.
+    calibration_applied = pyqtSignal(str)
     #: (level, text)
     log = pyqtSignal(str, str)
     #: (level, text) — something the operator must see without opening the log.

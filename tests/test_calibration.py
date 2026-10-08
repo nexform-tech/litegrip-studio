@@ -857,18 +857,33 @@ class TestPresentation:
         table = dict(calibration.resolve().as_table())
         assert table["can_id"] == "—"
 
-    def test_the_summary_is_two_rows_and_no_radians(self, env) -> None:
+    def test_the_summary_is_three_rows_and_no_radians(self, env) -> None:
         """The dict stays small on purpose: every extra row is another number
-        between the operator and the two that matter.
+        between the operator and the ones that matter.
 
         One decimal, which is the slider's own resolution — the six decimals the
         detail table carries are for checking a file, not for reading a gripper.
+        The third row is the file, and it is here rather than only in the detail
+        table because two files produce the same provenance and the same travel:
+        without it a 载入文件 that worked looks like one that did nothing.
         """
         _write(env.user, USER_RAW)
         info = calibration.resolve()
-        assert info.summary() == [("来源", "用户标定"), ("行程", "85.0 mm")]
+        assert info.summary() == [
+            ("来源", "用户标定"),
+            ("文件", calibration.friendly_path(env.user)),
+            ("行程", "85.0 mm"),
+        ]
         assert not any("rad" in key.lower() for key, _ in info.summary())
         assert dict(info.as_table())["行程上限 (可命令)"] == "85.0 mm"
+
+    def test_the_summary_names_the_file_a_probe_left_in_memory(self) -> None:
+        """No path is not an empty row: a probe result that has not been written
+        out yet is a state with a name, and it is also the one thing on this page
+        that tells the operator the file has not been written."""
+        info = calibration.in_memory(0.5, -0.9, 61.0, 85.0)
+
+        assert ("文件", "（内存中的结果）") in info.summary()
 
     def test_the_summary_says_it_has_no_stroke_rather_than_a_wrong_one(self, env) -> None:
         info = calibration.resolve()

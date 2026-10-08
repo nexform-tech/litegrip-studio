@@ -43,6 +43,7 @@ from PyQt5.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -106,6 +107,13 @@ PHASE_LABELS = {
     TwoPointPhase.RECORD_OPEN.value: "等待记录张开极限",
     TwoPointPhase.RECORD_CLOSE.value: "等待记录闭合极限",
 }
+
+#: What the 应用标定 prompt came back with.  Strings rather than an enum because
+#: they cross the gap between :meth:`CalibrationPage._prompt_apply`, which a test
+#: stubs out, and :meth:`CalibrationPage._on_apply_choice`, which is what it
+#: tests.
+APPLY = "apply"
+DISCARD = "discard"
 
 #: The severity to paint each provenance with.  The factory file is informational
 #: like a user file, because it is the console's ordinary default rather than
@@ -176,9 +184,12 @@ class CalibrationPage(QWidget):
         self._gate_label.setTextFormat(Qt.RichText)
         self._gate_label.setWordWrap(True)
 
-        self._reload = QPushButton("重新读取")
+        #: 刷新显示 re-reads the file already in force; 载入文件… reads a
+        #: different one.  They were 重新读取 and 载入文件…, which named the same
+        #: act twice and left the operator unable to tell which of them had just
+        #: changed what was on screen.
+        self._refresh_button = QPushButton("刷新显示")
         self._load = QPushButton("载入文件…")
-        self._save = QPushButton("重新保存标定…")
 
         self._progress = QProgressBar()
         self._phase_label = QLabel()
@@ -227,7 +238,6 @@ class CalibrationPage(QWidget):
         """
         self._guided_start.setProperty("accent", True)
         self._guided_confirm.setProperty("accent", True)
-        self._save.setProperty("accent", True)
 
         probes = QHBoxLayout()
         probes.setSpacing(theme.GAP)
@@ -282,9 +292,8 @@ class CalibrationPage(QWidget):
         """Where that calibration came from, and how to change it."""
         files = QGridLayout()
         files.setSpacing(8)
-        files.addWidget(self._reload, 0, 0)
+        files.addWidget(self._refresh_button, 0, 0)
         files.addWidget(self._load, 0, 1)
-        files.addWidget(self._save, 0, 2)
 
         box = QGroupBox("标定文件")
         layout = QVBoxLayout(box)
@@ -362,8 +371,8 @@ class CalibrationPage(QWidget):
         text = QLabel(
             "标定期间电机零力矩，用手把夹爪分别摆到两个极限，每到一个按一次对应的"
             "「记录」：先记张开极限，再记闭合极限（闭合记为 0 mm）。"
-            "两个极限都记到之后标定自动完成并写入文件，不需要再按保存；"
-            "写入失败时可以用「重新保存标定…」重试。"
+            "两个极限都记到之后标定完成，控制台会问是否把结果应用为这台夹爪的标定；"
+            "应用之后才写入文件，运动限制也随之解除。"
         )
         text.setWordWrap(True)
 
@@ -414,9 +423,10 @@ class CalibrationPage(QWidget):
             lambda: self._submit(cmd.RecordCloseLimit())
         )
         self._manual_cancel.clicked.connect(self._on_cancel)
-        self._reload.clicked.connect(lambda: self._submit(cmd.LoadCalibration()))
+        self._refresh_button.clicked.connect(
+            lambda: self._submit(cmd.RefreshCalibration())
+        )
         self._load.clicked.connect(self._on_load_clicked)
-        self._save.clicked.connect(lambda: self._submit(cmd.SaveCalibration()))
 
     # ── slots from the worker ───────────────────────────────────────────────
     def set_calibration(self, info: CalibrationInfo | None) -> None:
@@ -588,9 +598,7 @@ class CalibrationPage(QWidget):
         self._banner.set(severity, info.headline(), detail)
         self._file_label.setText(
             f'<span style="color:{theme.TEXT_MUTED}">当前文件</span> '
-            f'<span style="font-family:{theme.MONO_FAMILY}">'
-            f"{calibration.friendly_path(info.path) if info.path else '（内存中的结果）'}"
-            f"</span>"
+            f'<span style="font-family:{theme.MONO_FAMILY}">{info.file_label}</span>'
         )
 
     def _refresh(self) -> None:
@@ -632,30 +640,56 @@ class CalibrationPage(QWidget):
         self._manual_open.setEnabled(self._phase == TwoPointPhase.RECORD_OPEN.value)
         self._manual_close.setEnabled(self._phase == TwoPointPhase.RECORD_CLOSE.value)
 
-        self._reload.setEnabled(not any_running)
+        self._refresh_button.setEnabled(not any_running)
         self._load.setEnabled(not any_running)
-        # Still only a calibration whose numbers are self-consistent, and still
-        # never the factory one.  The probe writes its own result out now, so
-        # this button is normally a retry for a write that failed on something
-        # outside the numbers (a read-only directory, a full disk, the SDK
-        # refusing) — and a usable in-memory result is exactly what a retry
-        # needs.  Two things are not for retrying.  Numbers the console has just
-        # called unusable come back with no limits, so writing them would save a
-        # file that only looks like a calibration.  The factory numbers are the
-        # one case the backend's own guard cannot catch: they can arrive with no
-        # path at all (the SDK's bundled fallback), and then the target is the
-        # *user* file, which is how they would be laundered into this gripper's
-        # own calibration on the next launch.
-        self._save.setEnabled(
-            not any_running
-            and info is not None
-            and info.usable
-            and info.provenance in (
-                calibration.PROVENANCE_MEMORY, calibration.PROVENANCE_USER
-            )
-        )
 
     # ── actions ─────────────────────────────────────────────────────────────
+    def set_ready_to_apply(self, info: CalibrationInfo) -> None:
+        """The worker says a probe produced a result worth keeping.
+
+        Split into the question and the answer the same way 载入文件… is split
+        into :meth:`_on_load_clicked` and :meth:`_load_file`: a modal dialog
+        cannot be driven from a test, and what the answer *does* is the part
+        worth testing.  The worker re-emits this after a write that failed, so
+        the same prompt doubles as the retry — 应用标定 is the whole of it.
+        """
+        self._on_apply_choice(self._prompt_apply(info), info)
+
+    def _apply_question(self, info: CalibrationInfo) -> tuple[str, str]:
+        """What the prompt says, split from the box that shows it.
+
+        Two lines rather than one, and the second carries the file.  A probe
+        result and the calibration it would replace read identically on the page
+        — same provenance, same travel — so this is the only place the operator
+        is told which one they are being asked about.
+        """
+        return (
+            f"标定完成：{info.headline()}",
+            f"结果来自 {info.file_label}。\n"
+            "是否把它保存为这台夹爪的标定？保存之后运动限制才会解除；"
+            "选择「暂不」则只留在内存里，控制台仍不会运动。",
+        )
+
+    def _prompt_apply(self, info: CalibrationInfo) -> str:
+        """Ask whether the result just measured should govern the machine."""
+        headline, detail = self._apply_question(info)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("应用标定")
+        box.setText(headline)
+        box.setInformativeText(detail)
+        apply_button = box.addButton("应用标定", QMessageBox.AcceptRole)
+        box.addButton("暂不", QMessageBox.RejectRole)
+        box.setDefaultButton(apply_button)
+        box.exec_()
+        return APPLY if box.clickedButton() is apply_button else DISCARD
+
+    def _on_apply_choice(self, choice: str, info: CalibrationInfo) -> None:
+        if choice == APPLY:
+            self._submit(cmd.ApplyCalibration())
+        else:
+            self._submit(cmd.DiscardCalibration())
+
     def _on_cancel(self) -> None:
         self._submit(cmd.CancelCalibration())
 
