@@ -382,16 +382,15 @@ class RealBackend(GripperBackend):
             raise NotReady("没有可保存的标定")
         target = path or self._calibration_path or str(calibration.default_user_path())
 
-        # A factory file is data, not state: it ships with the package and
-        # describes whichever unit it was taken on.  Overwriting one would
-        # replace the fallback every later install of this console relies on,
-        # and they are reachable without meaning to — the target is the stored
-        # path, which is whatever the console was told to load at launch, and
-        # the console's own copy sits inside the installed package.  The UI's
-        # own check is about the calibration in hand, not about where the write
-        # is going, and a finished probe writes itself out now, so the target
-        # needs a guard of its own.  Both copies are guarded, not just the one
-        # currently in force: which of them is read depends on the machine.
+        # A factory file is data, not state: it ships with the SDK and describes
+        # whichever unit it was taken on.  Overwriting it would replace the
+        # fallback every later install of this console relies on, and it is
+        # reachable without meaning to — the target is the stored path, which is
+        # whatever the console was told to load at launch, and that is often the
+        # factory file on a gripper nobody has calibrated yet.  The UI's own
+        # check is about the calibration in hand, not about where the write is
+        # going, and a finished probe writes itself out now, so the target needs
+        # a guard of its own.
         for fallback in calibration.factory_candidates():
             if _same_file(target, fallback):
                 raise BackendError(

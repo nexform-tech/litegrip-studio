@@ -98,31 +98,20 @@ def default_user_path() -> Path:
     return Path.home() / ".litegrip" / "litegrip_calibration.json"
 
 
-def bundled_factory_path() -> Path:
-    """The copy of the same fallback that ships inside this package.
+def _sdk_factory_path() -> Path:
+    """The SDK's own factory calibration (gripper.py:33).
 
-    The console carries its own copy so that a machine with no SDK checkout —
-    or one whose SDK data file never made it into the artifact — can still fall
-    back to real numbers instead of refusing to move.  Same content, one
-    console: see :func:`factory_candidates` for which is used when.
+    Resolved through ``litegrip.__file__`` so it is correct inside a PyInstaller
+    bundle (``sys._MEIPASS``), which is why the build must pass
+    ``--collect-data litegrip``.
 
-    Resolved through ``__file__`` for the same reason the SDK's is resolved
-    through ``litegrip.__file__``: a frozen build puts it under ``sys._MEIPASS``.
+    The SDK is vendored under ``src/litegrip`` and the console refuses to start
+    without it, so this import does not fail on a machine that is running the
+    console at all.  A failure here is a fact about the interpreter, and letting
+    it out says so; naming some other file instead would answer the question
+    nobody asked.
     """
-    return Path(__file__).resolve().parent / "factory_calibration.json"
-
-
-def _sdk_factory_path() -> Path | None:
-    """Where the installed SDK keeps its factory calibration (gripper.py:33).
-
-    ``None`` when there is no SDK to ask.  Resolved through ``litegrip.__file__``
-    so it is correct inside a PyInstaller bundle (``sys._MEIPASS``), which is why
-    the build must pass ``--collect-data litegrip``.
-    """
-    try:
-        import litegrip
-    except Exception:  # pragma: no cover - only without the SDK installed
-        return None
+    import litegrip
 
     return Path(litegrip.__file__).resolve().parent / "factory_calibration.json"
 
@@ -130,24 +119,22 @@ def _sdk_factory_path() -> Path | None:
 def factory_candidates() -> tuple[Path, ...]:
     """Every path a fallback calibration can be read from, best first.
 
-    Two places, one file: the SDK's data file, which belongs to the SDK
-    installation, and the console's own copy, which travels with the console.
-    The SDK's comes first so that adding ours cannot change which numbers a
-    machine already works on — this console then only ever *gains* a fallback,
-    on the machines that had none.
+    One path now that the SDK is vendored: the data file that ships inside the
+    ``litegrip`` package.  The console used to carry a second copy of the same
+    file, so that a machine with no SDK checkout still had real numbers to fall
+    back on — there is no such machine any more, and two candidates that hold
+    the same bytes everywhere are a way to load the wrong set of millimetres
+    without anything on screen to say so.
 
-    ``LITEGRIP_FACTORY_CALIB`` replaces the whole list rather than joining it.
-    A path set on purpose and then absent is a mistake to report, not a reason
-    to load a different file behind the operator's back.
+    ``LITEGRIP_FACTORY_CALIB`` replaces the list rather than joining it.  A path
+    set on purpose and then absent is a mistake to report, not a reason to load
+    a different file behind the operator's back.
     """
     env = os.environ.get("LITEGRIP_FACTORY_CALIB")
     if env:
         return (Path(env).expanduser(),)
 
-    sdk = _sdk_factory_path()
-    if sdk is None:
-        return (bundled_factory_path(),)
-    return (sdk, bundled_factory_path())
+    return (_sdk_factory_path(),)
 
 
 def factory_path() -> Path:
@@ -187,8 +174,9 @@ def friendly_path(path: str | os.PathLike[str] | None) -> str:
     directory the package sits in, anything under the home directory with a
     leading ``~``.  ``litegrip/factory_calibration.json`` says where that file
     lives; ``/opt/litegrip/litegrip/factory_calibration.json`` only says
-    which machine it was checked out on — and that matters here, because the two
-    fallback files are otherwise told apart by nothing on screen.
+    which machine it was checked out on — and that matters on screen, because
+    the line the operator reads has to say whether the numbers in force are the
+    ones the console shipped or the ones they saved themselves.
     """
     if not path:
         return "—"
@@ -205,10 +193,16 @@ def friendly_path(path: str | os.PathLike[str] | None) -> str:
 
 
 def _shown_roots() -> tuple[Path, ...]:
-    """The directories a path can be said to live in, most specific first."""
+    """The directories a path can be said to live in, most specific first.
+
+    Two of them only when the SDK is a checkout somewhere else — a developer
+    running against ``LITEGRIP_SDK_PATH``, whose ``src/`` is not this
+    repository's.  With the vendored SDK the two are the same directory, and
+    the duplicate is dropped rather than repeated.
+    """
     sdk = sdk_root()
     roots = [Path(__file__).resolve().parent.parent]
-    if sdk is not None:
+    if sdk is not None and sdk not in roots:
         roots.insert(0, sdk)
     return tuple(roots)
 

@@ -45,7 +45,6 @@ where = ["src"]
 # the code that reads them and not the files.
 [tool.setuptools.package-data]
 litegrip = ["py.typed", "*.json"]
-litegrip_studio = ["factory_calibration.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -354,29 +354,28 @@ def check_a_calibration_from_another_frame_is_refused() -> None:
     )
 
 
-def check_the_bundled_fallback_is_usable() -> None:
+def check_the_fallback_calibration_is_usable() -> None:
     """The one check that reads a file instead of doing arithmetic.
 
-    The console ships its own copy of the fallback calibration so that a machine
-    with no SDK checkout still has real numbers to fall back on.  That copy is
-    data beside the code, which is exactly why it can be absent from an artifact
+    The fallback is the SDK's own ``factory_calibration.json``, which is data
+    beside the code, and that is exactly why it can be absent from an artifact
     that is otherwise complete — a wheel built without its package data, a
-    bundle built without ``--collect-data`` — and the symptom on the target
-    machine is a console that refuses to move.  Nothing else in this file would
-    notice, and the machine that needs this answer is the one where the GUI was
-    not the first thing to be tried.
+    bundle built without ``--collect-data litegrip`` — and the symptom on the
+    target machine is a console that refuses to move.  Nothing else in this file
+    would notice, and the machine that needs this answer is the one where the
+    GUI was not the first thing to be tried.
     """
-    path = calibration.bundled_factory_path()
-    assert path.is_file(), f"自带的出厂标定文件不在产物里：{path}（打包时漏了数据文件）"
+    path = calibration.factory_path()
+    assert path.is_file(), f"出厂标定文件不在产物里：{path}（打包时漏了数据文件）"
 
     raw, problems = calibration.parse_calibration_json(path.read_text(encoding="utf-8"))
-    assert not problems, f"自带的出厂标定读不出来：{problems}"
+    assert not problems, f"出厂标定读不出来：{problems}"
 
     limits = calibration.limits_from_raw(raw, constants.DEFAULT_TRAVEL_MM)
     hard, _soft = calibration.validate_limits(
         limits, constants.DEFAULT_TRAVEL_MM, calibration.file_scale(raw)
     )
-    assert not hard, f"自带的出厂标定没通过校验：{hard}"
+    assert not hard, f"出厂标定没通过校验：{hard}"
 
 
 CHECKS = (
@@ -389,7 +388,7 @@ CHECKS = (
     Check("一次运动能到位并停住", check_a_move_arrives_and_stops),
     Check("顶住硬物时力矩有上限", check_a_stall_is_detected_rather_than_fought),
     Check("急停后电机失能", check_the_estop_zeroes_the_torque),
-    Check("自带的出厂标定文件可用", check_the_bundled_fallback_is_usable),
+    Check("出厂标定文件可用", check_the_fallback_calibration_is_usable),
 )
 
 
