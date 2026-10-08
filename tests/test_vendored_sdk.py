@@ -22,6 +22,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC = REPO_ROOT / "src"
 VENDORED_SDK = SRC / "litegrip"
@@ -129,6 +131,41 @@ class TestAMachineWithNothingButThisCheckout:
 
         assert result.returncode == 0, result.stderr
         assert Path(result.stdout.strip()).is_relative_to(elsewhere)
+
+    @pytest.mark.parametrize("inherited", ("nothing", "src-first"))
+    def test_the_override_also_wins_over_the_bootstrap(
+        self, tmp_path, inherited: str
+    ) -> None:
+        """The same claim for ``conftest.py``, which is the *other* thing that
+        decides which ``litegrip`` this suite imports.
+
+        It cannot be observed from in here: by the time a test body runs, both
+        directories are on ``sys.path`` and the import has happened.  So the
+        child imports ``conftest`` itself, from a process that starts in the same
+        position a bare ``pytest`` is in.
+
+        ``src-first`` is the case a "not already on the path" guard gets wrong:
+        with an inherited ``PYTHONPATH`` naming the vendored tree before the
+        checkout, skipping both leaves the vendored copy in front and the
+        override silently idle.
+        """
+        elsewhere = tmp_path / "sdk-checkout"
+        (elsewhere / "litegrip").mkdir(parents=True)
+        (elsewhere / "litegrip" / "__init__.py").write_text(
+            "MARKER = 'not the vendored one'\n", encoding="utf-8"
+        )
+
+        env = clean_env(LITEGRIP_SDK_PATH=str(elsewhere))
+        if inherited == "src-first":
+            env["PYTHONPATH"] = f"{SRC}{os.pathsep}{elsewhere}"
+
+        result = run_python(
+            "import conftest, litegrip; print(litegrip.__file__)",
+            env=env,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert Path(result.stdout.strip()).is_relative_to(elsewhere), inherited
 
 
 class TestItStaysWhatItSaysItIs:
