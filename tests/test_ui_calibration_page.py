@@ -14,7 +14,7 @@ import dataclasses
 from pathlib import Path
 
 import pytest
-from PyQt5.QtWidgets import QLabel, QScrollArea, QWidget
+from PyQt5.QtWidgets import QLabel, QPushButton, QScrollArea, QWidget
 
 from litegrip_studio import calibration
 from litegrip_studio.calibration import CalibrationInfo
@@ -28,6 +28,8 @@ from litegrip_studio.core.worker import (
 from litegrip_studio.settings import KEY_ALLOW_FACTORY, Settings
 from litegrip_studio.telemetry import EMPTY_FRAME, TelemetryFrame
 from litegrip_studio.ui.calibration_page import (
+    APPLY,
+    DISCARD,
     CalibrationPage,
     guided_active,
     manual_active,
@@ -134,6 +136,11 @@ def page(qapp) -> CalibrationPage:
     recorder = Recorder()
     widget = CalibrationPage(recorder)
     widget.recorder = recorder  # type: ignore[attr-defined]
+    # The 应用标定 prompt is a modal dialog, and a modal dialog put up offscreen
+    # does not fail a test — it stops the whole suite.  Stubbing it here is also
+    # what makes the question and the answer separately testable: the text is
+    # asserted through ``_apply_question``, and the two answers are chosen here.
+    widget._prompt_apply = lambda info: APPLY  # type: ignore[assignment]
     widget.set_conn_state(CONN_CONNECTED)
     widget.update_frame(frame(enabled=True))
     return widget
@@ -214,6 +221,35 @@ class TestTheProvenanceIsShown:
         summary = [child.text() for child in page._summary_holder.findChildren(QLabel)]
         assert "用户标定" in summary
         assert "120.0 mm" in summary
+
+    def test_the_file_row_is_on_screen_without_the_detail_toggle(self, page) -> None:
+        """The confusion this row exists to end: two different calibration files
+        produce the same provenance and the same travel, so a 载入文件 that worked
+        and one that did nothing looked identical.  The filename is the one thing
+        that differs, and it must not be behind a checkbox."""
+        page.set_calibration(USER_CAL)
+
+        summary = [child.text() for child in page._summary_holder.findChildren(QLabel)]
+        assert any("litegrip_calibration.json" in text for text in summary)
+
+    def test_loading_another_file_changes_what_is_on_screen(self, monkeypatch, page) -> None:
+        """End to end through the widget: two files in, two different rows out."""
+        monkeypatch.setattr(calibration, "sdk_root", lambda: SDK_ROOT)
+        page.set_calibration(FACTORY_CAL)
+        before = [child.text() for child in page._summary_holder.findChildren(QLabel)]
+
+        page.set_calibration(USER_CAL)
+
+        after = [child.text() for child in page._summary_holder.findChildren(QLabel)]
+        assert after != before
+        assert any("litegrip_calibration.json" in text for text in after)
+        assert not any("factory_calibration.json" in text for text in after)
+
+    def test_a_probe_result_in_memory_says_it_has_no_file(self, page) -> None:
+        page.set_calibration(MEMORY_CAL)
+
+        summary = [child.text() for child in page._summary_holder.findChildren(QLabel)]
+        assert any("内存中的结果" in text for text in summary)
 
     def test_the_file_is_shown_relative_rather_than_absolute(
         self, page, monkeypatch
@@ -436,10 +472,16 @@ class TestTheCommandsItSends:
         page._manual_close.click()
         assert isinstance(page.recorder.last(), cmd.RecordCloseLimit)
 
-    def test_reloading_and_saving_are_commands(self, page) -> None:
+    def test_refreshing_asks_the_worker_to_re_read_the_file_in_force(self, page) -> None:
+        """Not ``LoadCalibration()``: that resolves the default, so a file that
+        has been renamed comes back as the factory numbers and the console looks
+        refreshed while running on another gripper."""
         page.recorder.commands.clear()
-        page._reload.click()
-        assert isinstance(page.recorder.of(cmd.LoadCalibration)[-1], cmd.LoadCalibration)
+
+        page._refresh_button.click()
+
+        assert isinstance(page.recorder.last(), cmd.RefreshCalibration)
+        assert not page.recorder.of(cmd.LoadCalibration)
 
     def test_choosing_a_file_loads_that_path(self, page) -> None:
         """The dialog cannot be driven in a test, so the path handling is
@@ -459,58 +501,69 @@ class TestTheCommandsItSends:
         assert not hasattr(page, "travel_mm")
 
 
-class TestSaving:
-    def test_a_user_calibration_can_be_rewritten(self, page) -> None:
-        page.set_calibration(USER_CAL)
+class TestTheApplyPrompt:
+    """A finished probe asks before it writes.
 
-        assert page._save.isEnabled()
+    The write used to happen on its own, on the argument that the two presses of
+    记录 were already the request.  They are a request for a *measurement*; whether
+    it should govern the machine is a separate question, and the only moment it
+    can be asked is while the result is still in memory and the operator is
+    looking at it.
+    """
 
-    def test_an_unsaved_result_can_be_saved(self, page) -> None:
-        """An in-memory result blocks motion, and that is precisely why the
-        button has to stay live: a finished probe writes itself out, so what is
-        left for the button is the retry after that write failed — and a retry
-        on a result that is merely unsaved is the whole case it exists for."""
+    def test_the_question_is_put_and_answering_yes_applies(self, page) -> None:
+        page.set_calibration(MEMORY_CAL)
+        page.recorder.commands.clear()
+
+        page.set_ready_to_apply(MEMORY_CAL)
+
+        assert page.recorder.of(cmd.ApplyCalibration)
+
+    def test_answering_no_sends_the_refusal_instead(self, page) -> None:
+        page.set_calibration(MEMORY_CAL)
+        page.recorder.commands.clear()
+        page._prompt_apply = lambda info: DISCARD  # type: ignore[assignment]
+
+        page.set_ready_to_apply(MEMORY_CAL)
+
+        assert page.recorder.of(cmd.DiscardCalibration)
+        assert not page.recorder.of(cmd.ApplyCalibration)
+
+    def test_the_prompt_names_the_file_it_came_from(self, page) -> None:
+        """The one thing that tells the operator which result they are being
+        asked about — a probe result and the file it would replace look alike."""
         page.set_calibration(MEMORY_CAL)
 
-        assert not MEMORY_CAL.motion_allowed, "still gated, and still savable"
-        assert page._save.isEnabled()
+        _headline, detail = page._apply_question(MEMORY_CAL)
 
-    def test_a_broken_memory_result_offers_nothing_to_save(self, page) -> None:
-        """A result that failed validation comes back with no limits, and a
-        file written from it would only look like a calibration — the next
-        launch would load it as this gripper's own and refuse to move."""
-        page.set_calibration(BROKEN_MEMORY_CAL)
+        assert "内存中的结果" in detail
 
-        assert not page._save.isEnabled()
+    def test_the_prompt_says_what_refusing_costs(self, page) -> None:
+        """暂不 is not obviously harmless: it leaves a console that has just said
+        标定完成 and still will not move.  Saying so here is cheaper than the
+        operator finding out by pressing 闭合."""
+        page.set_calibration(MEMORY_CAL)
 
-    def test_the_factory_file_is_not_the_operator_s_to_overwrite(self, page) -> None:
-        """Saving the factory numbers into the user path would launder them into
-        a user calibration, and the next launch would show them as this
-        gripper's own.
+        _headline, detail = page._apply_question(MEMORY_CAL)
 
-        The backend refuses the factory path by name as well, but that guard
-        cannot see this case: a factory calibration the SDK fell back to has no
-        path of its own, so the target would be the *user* file."""
-        page.set_calibration(FACTORY_CAL)
+        assert "暂不" in detail
+        assert "不会运动" in detail
 
-        assert not page._save.isEnabled()
+    def test_there_is_no_save_button_left(self, page) -> None:
+        """It is gone rather than disabled: the answer to the prompt is the only
+        way to write a calibration now, and a greyed-out 重新保存标定… would read
+        as a step of the procedure that had been skipped."""
+        assert not hasattr(page, "_save")
 
-    def test_an_unusable_file_is_not_worth_writing_out(self, page) -> None:
-        page.set_calibration(INVALID_CAL)
-
-        assert not page._save.isEnabled()
-
-    def test_the_button_says_it_is_a_retry(self, page) -> None:
-        """No probe ever needs it pressed, so it must not read like a step of
-        the procedure."""
-        assert page._save.text() == "重新保存标定…"
+        texts = {b.text() for b in page.findChildren(QPushButton)}
+        assert {"刷新显示", "载入文件…"} <= texts
+        assert not any("保存" in text for text in texts), texts
 
     def test_nothing_is_offered_while_a_probe_runs(self, page) -> None:
         page.set_calibration(USER_CAL)
         page.set_progress(GuidedPhase.OPEN_PROBE.value, 0.1)
 
-        assert not page._save.isEnabled()
-        assert not page._reload.isEnabled()
+        assert not page._refresh_button.isEnabled()
         assert not page._load.isEnabled()
 
 

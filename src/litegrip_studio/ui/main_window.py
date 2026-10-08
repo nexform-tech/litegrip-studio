@@ -296,6 +296,10 @@ class MainWindow(QMainWindow):
         worker.gate_state.connect(self._on_gate_state)
         worker.calib_info.connect(self._on_calib_info)
         worker.calib_progress.connect(self._on_calib_progress)
+        worker.calib_ready_to_apply.connect(
+            self.calibration_page.set_ready_to_apply
+        )
+        worker.calibration_applied.connect(self._on_calibration_applied)
         worker.log.connect(self._on_log)
         worker.alert.connect(self._on_alert)
         worker.alert_cleared.connect(self._on_alert_cleared)
@@ -442,6 +446,24 @@ class MainWindow(QMainWindow):
             # guided probe steers itself and asks for nothing mid-step, so it
             # does not take the tab the operator chose.
             self.tabs.setCurrentWidget(self.calibration_page)
+
+    def _on_calibration_applied(self, path: str) -> None:
+        """Remember where the applied calibration lives, so the next launch uses it.
+
+        Without this the write would be remembered by nobody: the console loads
+        the path it was told, and a file nobody named is not the file in effect —
+        so the operator would apply a calibration, restart, and find the factory
+        numbers back.
+
+        The simulator is excluded by the backend, not by this method: its file
+        describes a plant, and a later real run that loaded it would measure the
+        bench with a simulation's numbers.
+        """
+        if self._settings is None:
+            return
+        if not getattr(self.worker.backend, "remember_calibration_path", False):
+            return
+        self._settings.calibration_path = path
 
     def _on_log(self, level: str, text: str) -> None:
         self._append(level, text)

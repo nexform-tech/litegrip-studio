@@ -321,20 +321,36 @@ steps, loading a *correct* calibration sends the axis straight for the other end
 
 A probe result lives only in memory at first (`in_memory_unsaved`), and **the gate stays shut
 while it does**: you look at what was measured before deciding it should govern motion. A probe
-that runs to the end therefore **writes itself out** rather than waiting to be told — the two
-presses of 记录 are already the request for a calibration, and leaving the axis locked until the
-operator works out that a third press is needed is how a finished calibration looks like a broken
-console. Saving is followed by the backend reading the file back, and only then does the provenance
-become `user_file` and the gate `READY`. Both the real and the simulated backend do this: a
-simulation that wrote without reading back would leave the operator with the gate shut after a
-successful calibration.
+that runs to the end therefore **asks** — a dialog with 应用标定 and 暂不, naming the file the
+result would be written to. Nothing is written until that question is answered, because the two
+presses of 记录 are the request to *measure*, not the request to *move by what was measured*.
 
-Two things the automatic write deliberately will not do. It will not save a result that failed
-validation, because the file it would replace is a working calibration — the operator keeps a
-console that refuses to move over one that moves on numbers it has just called unusable. And it
-will not save over the SDK's own factory file, which ships with the package and describes whichever
-unit it was taken on. 重新保存标定… stays on the page for the one case that is left: the write
-itself failing, on a read-only directory or a disk that has filled up.
+应用标定 writes the result and has the backend read the file back; only then does the provenance
+become `user_file` and the gate `READY`. The path is then remembered in the settings file, so the
+next launch loads it explicitly rather than falling back to the factory numbers. 暂不 leaves the
+result in memory: the gate stays shut, and the axis holds the angle the probe measured rather than
+snapping back. Both the real and the simulated backend read back what they write: a simulation
+that wrote without reading back would leave the operator with the gate shut after a successful
+calibration.
+
+The simulator does not remember the path, and the backend decides that rather than the window: a
+remembered path is read on every later launch, including a real one, so remembering
+`litegrip_calibration.sim.json` would have the bench gripper measuring on simulated geometry.
+`SimBackend.remember_calibration_path` is `False` for that reason.
+
+Two things the write deliberately will not do. It will not save a result that failed validation,
+because the file it would replace is a working calibration — the operator keeps a console that
+refuses to move over one that moves on numbers it has just called unusable. And it will not save
+over the SDK's own factory file, which ships with the package and describes whichever unit it was
+taken on. Either refusal reports why and **asks again**, so 应用标定 is its own retry: there is no
+second button whose only job is to repeat the first one.
+
+The file in force is identified on the page, not just by its label. 载入文件… picks a file and
+actually reads it, and the page then shows which path the numbers came from — two different user
+files used to read identically in the always-on table, which is what made a successful load look
+like nothing had happened. 刷新显示 re-reads **the file in force**, and only that file: if it has
+gone, the page says so and keeps the previous result, because quietly falling back to the default
+source is the same ambiguity from the other side.
 
 ### Enabling: read a position first, then hold it
 

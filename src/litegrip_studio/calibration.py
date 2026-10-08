@@ -251,6 +251,19 @@ class CalibrationInfo:
         return self.usable and self.provenance in (PROVENANCE_USER, PROVENANCE_FACTORY)
 
     @property
+    def file_label(self) -> str:
+        """Which file the numbers came from, as a person reads a path.
+
+        The one string that says whether a load did anything.  Two different
+        files produce identical provenance and identical travel, so without this
+        a successful 载入文件 and a click that did nothing look the same — which
+        is the confusion that put this row on the summary in the first place.
+        """
+        if not self.path:
+            return "（内存中的结果）"
+        return friendly_path(self.path)
+
+    @property
     def is_user(self) -> bool:
         return self.provenance == PROVENANCE_USER
 
@@ -288,16 +301,19 @@ class CalibrationInfo:
     def summary(self) -> list[tuple[str, str]]:
         """The rows an operator acts on, always on screen.
 
-        Two rows, and not three: where the numbers came from and how wide the
-        gripper is.  Which file said so belongs with the file buttons, where the
-        operator opens and saves it, and repeating it here would be the same
-        clutter in a shorter form.  The rad values and gains that back these two
-        are real and are one checkbox away — they are what gets read while
-        something is wrong, not what anyone reads before pressing 闭合.
+        Three rows: where the numbers came from, which file said so, and how wide
+        the gripper is.  The file row used to live only in the detail table,
+        which is behind a checkbox — and two different files produce the same
+        provenance and the same travel, so a 载入文件 that worked looked exactly
+        like one that had not.  Naming the file is the cheapest way to make a
+        load visible.  The rad values and gains that back these rows are still
+        one checkbox away: they are what gets read while something is wrong, not
+        what anyone reads before pressing 闭合.
         """
         lim = self.limits
         return [
             ("来源", self.label),
+            ("文件", self.file_label),
             ("行程", f"{lim.max_stroke_mm:.1f} mm" if lim else "—"),
         ]
 
@@ -313,7 +329,7 @@ class CalibrationInfo:
         raw = self.raw
         rows = [
             ("来源", self.label),
-            ("文件", friendly_path(self.path)),
+            ("文件", self.file_label),
             ("zero_position_rad (闭合)", _fmt(lim.closed_rad) if lim else "—"),
             ("max_position_rad (张开)", _fmt(lim.open_rad) if lim else "—"),
             ("travel_range_rad", _fmt(lim.travel_rad) if lim else "—"),

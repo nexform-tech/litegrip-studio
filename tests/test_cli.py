@@ -228,6 +228,26 @@ class TestStartupNeverAppliesACalibration:
         assert "LoadCalibration" not in source
         assert "SaveCalibration" not in source
 
+    def test_the_source_applies_nothing_either(self) -> None:
+        """Applying writes a file and opens the gate, and both are answers to a
+        question only the operator can be asked — the startup path has nobody to
+        ask, so it must not reach for either.  Refreshing is excluded for the
+        same reason: there is nothing in force to re-read before a connection."""
+        source = Path(cli.__file__).read_text(encoding="utf-8")
+
+        assert "ApplyCalibration" not in source
+        assert "DiscardCalibration" not in source
+
+    def test_the_path_it_resolves_is_only_ever_handed_to_the_backend(self) -> None:
+        """The remembered path is a *request*, not a load: it reaches the worker
+        as the path the backend is constructed with, and the load happens on
+        connect — after which the file is checked and the gate reports it."""
+        args = parse("--backend", "real")
+        settings = FakeSettings(calibration_path="/tmp/bench.json")
+
+        assert cli.resolve_calibration_path(args, settings) == "/tmp/bench.json"
+        assert not hasattr(cli, "load_calibration")
+
 
 class TestSelftest:
     def test_it_runs_and_reports_success(self, capsys) -> None:
