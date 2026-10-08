@@ -12,6 +12,7 @@ that has a broken one.
 
 from __future__ import annotations
 
+import math
 import sys
 import traceback
 from collections.abc import Callable
@@ -24,25 +25,39 @@ from .core.motion import MotionFSM, MotionParams, MotionState
 from .units import Limits, frame_mismatch
 
 #: The three calibrations this console has to get right, as (closed, open,
-#: file_scale, description).  The first is the SDK's uncalibrated default pair,
-#: whose two angles are ordered the other way round and whose range this bench's
-#: encoder readings fall outside of — the two facts the checks below turn on.
+#: file_scale, agrees, description).  The first is the SDK's uncalibrated default
+#: pair, whose two angles are ordered the other way round and whose range this
+#: bench's encoder readings fall outside of — the two facts the checks below turn
+#: on.
 #:
-#: The second is the SDK's shipped template, ``calibration_normal.json``, whose
-#: own mm/rad is a scale for a unit and not for this one: 1.651026 rad of span at
-#: 52.69 is 87 mm, where the derivation over that span gives 52.0888.  It is
-#: *not* the factory file, which is a different file for a different unit as well
-#: and is checked as a file, by :func:`check_the_fallback_calibration_is_usable`.
+#: ``file_scale`` is the millimetres per rad the *file* carries, and ``agrees``
+#: says whether that number is the scale this console derives for the bench's own
+#: travel.  The console never moves by the file's number — it derives the scale
+#: from the recorded angles and the measured travel (``units.derive_scale``), and
+#: that is what keeps a slider from covering the middle of a travel nobody has
+#: seen the ends of.  On the first and third datasets the two differ, and those
+#: are the witnesses of it: put the file's number back and the travel check
+#: fails.  The second is the SDK's shipped template
+#: (``calibration_normal.json``), and there the two are the *same* number, because
+#: upstream re-measured the shipped files for this unit in ``b9caae8``: 61.012293
+#: is what the derivation gives over its span.  Equality is the fact to pin
+#: there, not the defect to catch, and ``agrees`` records which of the two a
+#: dataset is.
 #:
-#: ``file_scale`` is the millimetres per rad the *file* carries.  The console
-#: does not move by it — it derives the scale from the recorded angles and the
-#: measured travel — so it is kept here as the witness of that: the travel check
-#: is defeated by putting the file's number back.  No file the SDK ships agrees
-#: with the derivation, the factory file included.
+#: The template is *not* the factory file, though the two now carry the same
+#: angles: the factory file is a different schema and is checked as a file, by
+#: :func:`check_the_fallback_calibration_is_usable`.  The reverse template carries
+#: these same numbers mirrored, so it is the same case again.
 KNOWN_CALIBRATIONS = (
-    (0.0, 1.14, 120.0 / 1.14, "SDK 默认值（两个角次序相反，且在实测角度之外）"),
-    (0.0, -1.651026, 52.69, "SDK 模板（calibration_normal.json，自带系数对应 87 mm）"),
-    (1.775959, -0.064279, 65.21, "用户标定（示例）"),
+    (0.0, 1.14, 120.0 / 1.14, False, "SDK 默认值（两个角次序相反，且在实测角度之外）"),
+    (
+        0.052071,
+        -1.357481,
+        61.01229326764816,
+        True,
+        "SDK 模板（calibration_normal.json，上游已按本机重新实测）",
+    ),
+    (1.775959, -0.064279, 65.21, False, "用户标定（示例）"),
 )
 
 #: The two angles the bench unit this console was debugged against stands at, all
@@ -129,7 +144,7 @@ class _Clock:
 
 # ── the checks ──────────────────────────────────────────────────────────────
 def check_units_round_trip() -> None:
-    for closed, open_, _file_scale, _label in KNOWN_CALIBRATIONS:
+    for closed, open_, _file_scale, _agrees, _label in KNOWN_CALIBRATIONS:
         limits = _limits(closed, open_)
         for mm in (0.0, 1.0, 37.5, limits.stroke_mm):
             rad = limits.to_rad(mm)
@@ -151,7 +166,7 @@ def check_the_direction_is_read_from_the_two_angles() -> None:
     conversion agrees with the ordering the angles have, and the calibration's
     range contains the angles its own gripper is standing at.
     """
-    for closed, open_, _file_scale, label in KNOWN_CALIBRATIONS:
+    for closed, open_, _file_scale, _agrees, label in KNOWN_CALIBRATIONS:
         limits = _limits(closed, open_)
         assert limits.to_rad(0.0) == closed, f"{label}：0 mm 不是记录的闭合角"
         assert limits.to_rad(limits.max_stroke_mm) != closed, (
@@ -191,9 +206,8 @@ def check_the_travel_is_derived_from_the_recorded_angles() -> None:
     travel plus the probe's inset rather than the file's nominal stroke, and the
     top of the commanded range is that inset short of the recorded open one.
     Move by the file's own scale instead and the recorded span comes out as that
-    file's nominal — 120 mm for the defaults, 87 mm for the template — a slider
-    covering the middle of a travel nobody has seen the ends of, which is what
-    this check exists to catch.
+    file's nominal — 120 mm for the defaults — a slider covering the middle of a
+    travel nobody has seen the ends of, which is what this check exists to catch.
 
     All three are stated without a sign, and the first dataset is the one that
     needs that: its two angles are the other way up, and every one of them holds
@@ -201,7 +215,7 @@ def check_the_travel_is_derived_from_the_recorded_angles() -> None:
     """
     travel = constants.DEFAULT_TRAVEL_MM
     inset = constants.SPAN_INSET_MM
-    for closed, open_, file_scale, label in KNOWN_CALIBRATIONS:
+    for closed, open_, file_scale, agrees, label in KNOWN_CALIBRATIONS:
         limits = _limits(closed, open_)
         assert abs(limits.to_mm(closed)) < 1e-9, f"{label}：记录的闭合角不是 0 mm"
 
@@ -221,9 +235,18 @@ def check_the_travel_is_derived_from_the_recorded_angles() -> None:
             f"{label} 的量程顶端离记录的张开角 {gap_mm:.2f} mm，应为 {inset:.0f} mm"
         )
 
-        # The file's own number would not have: this is the difference the
-        # derivation is for, and it is large enough to see.
-        assert limits.rad_to_mm != file_scale, f"{label}：仍在用文件自带的 mm/rad"
+        # The file's own number is not what the console moves by.  On the first
+        # and third datasets it differs from the derivation by far more than
+        # rounding — 52.09 against 52.69, 46.73 against 65.21 — and that
+        # difference is the witness.  On the template the two are the same
+        # number, because the SDK's shipped files are this unit's again; the
+        # equality is the fact being pinned there, and the tolerance keeps it
+        # from turning into a claim about the last decimal of a stored float.
+        same = math.isclose(limits.rad_to_mm, file_scale, rel_tol=1e-9)
+        assert same is agrees, (
+            f"{label}：文件自带的 mm/rad（{file_scale}）与推导值（{limits.rad_to_mm}）"
+            f"{'应当' if agrees else '不应'}相同"
+        )
 
 
 def check_plant_settles_on_a_step() -> None:

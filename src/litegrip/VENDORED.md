@@ -12,9 +12,8 @@ that has nothing but this repository.
 | | |
 | --- | --- |
 | Upstream | <https://github.com/nexform-tech/litegrip-python> |
-| Commit | `4cec95da2fb12ce5eb2617477564e81b65ba117e` (2026-10-08) |
+| Commit | `b9caae84360d9a32332c811f1af348181616a2fd` (2026-10-08) |
 | License | Apache-2.0 — `LICENSE` is that commit's file, copied verbatim |
-| Factory calibration | <https://github.com/nexform-tech/litegrip-cpp> at `a2354fec5179cd968e24b8e1c00b7787d7009cce` (2026-10-08) — the one file that is not upstream Python's; see Local override below |
 
 `src/litegrip/` holds the modules, the `can/` and `protocols/` subpackages, `py.typed`, and the
 three JSON data files the code resolves through `dirname(__file__)`: `factory_calibration.json`,
@@ -28,9 +27,8 @@ suite about upstream's internals; the console pins the part of the SDK surface i
 (`tests/test_vendored_sdk.py`, `tests/test_real_backend_api.py`) and records the tree hash below so
 drift cannot go unnoticed.
 
-`factory_calibration.json` is the one file here that does **not** come from that commit. It is
-copied from the C++ SDK, and the reason is recorded in **Local override: the factory calibration**
-below.
+Every file here is that commit's byte for byte, with no local override. That was not always true —
+see **No local override** for the divergence this repository used to carry and why it is gone.
 
 ## Do not edit these files
 
@@ -40,25 +38,19 @@ upstream and re-vendor, or — when a local divergence is genuinely unavoidable 
 this file with the reason, so the person re-vendoring sees it.
 
 The tree hash below is what makes a silent edit visible: `tests/test_vendored_sdk.py` recomputes it
-and fails when it no longer matches. The factory calibration is the one divergence taken that way —
-a deliberate one, copied from the other upstream repository and written down under
-**Local override: the factory calibration**. Every other file here is expected to be upstream's
-byte for byte.
+and fails when it no longer matches. There is no divergence to declare today, so the tree hash is
+the whole of the check, and any edit at all — the calibration data included — moves it.
 
 ## Tree hash
 
 ```text
-0c7c22a7e764ed896ee93aadcc7bcf8f6354de46d10f59ae3a636b0a6ec34fbf
+9b8b57df1a3ed4b5bf66f1bb8526f0cbf04f81ae6667c4de73acf2f289be2bad
 ```
 
 The recipe, so it can be recomputed without reading the test: take every file under `src/litegrip/`
 except `VENDORED.md` (this file holds the hash, so it cannot be part of it) and `__pycache__`,
 ordered by its POSIX path relative to `src/litegrip/`; feed each path, a newline, then the file's
 bytes into one SHA-256 stream; read the hex digest.
-
-This hash covers every file, the locally overridden factory calibration included, so an edit to it
-is caught the same way as an edit to anything else. *Which* copy of that file is here is a second
-question, and it has a second hash — the one below.
 
 ```bash
 python3 - <<'PY'
@@ -73,43 +65,36 @@ print(h.hexdigest())
 PY
 ```
 
-## Local override: the factory calibration
+## No local override
 
-`factory_calibration.json` in this directory is copied verbatim from
-[litegrip-cpp](https://github.com/nexform-tech/litegrip-cpp) at
-`a2354fec5179cd968e24b8e1c00b7787d7009cce` (2026-10-08), byte for byte that commit's
-`calibration/factory_calibration.json`. Its own hash:
+The two upstream repositories used to disagree about `factory_calibration.json`, and this repository
+carried the C++ one: [litegrip-cpp](https://github.com/nexform-tech/litegrip-cpp) at
+`a2354fec5179cd968e24b8e1c00b7787d7009cce`. Upstream Python's copy held another unit's reading —
+`0.0 / -1.651026 / 1.651026 / 52.69`, a span implying 86.99 mm where this bench travels 85 mm.
 
-```text
-448f6a6881bd08f4a89754acab1b178dc68125e51f158b772eba00a046147833
-```
+Upstream's `b9caae8` ("fix: ship the factory geometry in the calibration files") closed the gap. All
+three shipped calibration files now carry `0.052071 / -1.357481 / 1.409552 / 61.01229326764816`,
+which is the unit on this bench, and the same numbers the override was carrying. Taking upstream's
+file back is therefore not a change of numbers, and the override is gone rather than moved.
 
-The two upstream repositories disagree about this file, which is why it is written down here. The
-Python SDK's copy carries `0.0 / -1.651026 / 1.651026 / 52.69` and a `work_stroke_mm` of 80; the C++
-SDK's copy carries `0.052071 / -1.357481 / 1.409552 / 61.01229326764816`, `kp 5.0`, and no
-`work_stroke_mm` at all. The C++ repository's own commit is titled "sync the packaged factory
-calibration with the re-measured unit". These are the numbers the unit on this bench was measured
-at, and they are the scale the console derives for itself from an 86 mm travel
-(`61.01229326764816 × 1.409552` is 86.0 mm), so the file is consistent with the console rather than
-merely a fallback it tolerates.
+One key still differs from the C++ copy: upstream's file carries `work_stroke_mm: 80.0` and the C++
+one has no such key at all. Upstream's commit says why it kept it — dropping it "would let open() run
+to the mechanical stop instead of the 6 mm-short work stroke that was chosen deliberately".
 
-`work_stroke_mm` is not a decoration, and its absence here is not one either. The SDK's
-`load_calibration` maps it into `GripperConfig.work_stroke_mm`, and `Gripper.open` stops at that
-stroke instead of pressing the open-side mechanical limit when it is set and smaller than the
-travel. The key was 80 mm of an 86 mm travel in both the user calibration on this bench and the
-Python factory file, so those open to 80 mm; this file opens to the limit. Which of the two the
-console should do is the operator's call, and this note does not make it — what it records is that
-dropping the key changes a motion rather than only a scale.
+**That key never reaches this console, in any file.** `work_stroke_mm` is read in exactly one place
+in the SDK, `Gripper.open`, through `work_limit_target` (`actions.py:402`), and the console does not
+call `Gripper.open` — or `close`, or `grasp`, or any other SDK convenience method. It streams its own
+MIT frames from `send_mit_frame` / `poll` / `get_state` / `stop`; the reasons are structural and
+listed in `backend/real.py` and `backend/__init__.py`. The console's own `open` drives to
+`Limits.max_stroke_mm`, which is the travel measured with calipers, and `load_calibration` never
+writes that field (`backend/real.py`).
 
-Copy it from a commit, never from a checkout:
-
-```bash
-git -C <a-litegrip-cpp-checkout> show NEW_CPP_SHA:calibration/factory_calibration.json \
-    > src/litegrip/factory_calibration.json
-```
-
-Re-vendoring from `litegrip-python` overwrites this file with the other unit's numbers, and the
-diff says nothing about which unit they belong to. Re-apply this override after every re-vendor.
+An earlier version of this note claimed the key changed a motion here. It did not, and the decision
+that removed it from the vendored copy was made on the strength of that claim: nobody should read
+the removal of the override as reversing a motion, because there was no motion to reverse. A
+consumer that does call the SDK's `Gripper.open` — upstream's own users, or the C++ SDK — does get
+80 mm rather than the stop, which is upstream's stated intent for this unit and not this
+repository's decision to make.
 
 ## How to re-vendor
 
@@ -126,26 +111,26 @@ git -C ../litegrip-python show NEW_SHA:LICENSE > src/litegrip/LICENSE
 
 **Do not** copy the checkout's working tree instead (`cp -r ../litegrip-python/src/litegrip src/`).
 A checkout sits on whatever branch it was last switched to, and that branch decides the numbers in
-its `factory_calibration.json` — this file's own history is the evidence: upstream changed that file
-in `4cec95d`, from `0.052071 / -1.357481 / 1.409552 / 61.01229326764816` to
-`0.0 / -1.651026 / 1.651026 / 52.69` and a `work_stroke_mm` of 80. The console runs on whichever of
-the two is vendored here, and a checkout left on a branch from before that change still carries the
-other one. A `cp` from there would have moved the numbers the console measures with, and nothing in
-the diff would have said so: the file loads either way, and a key whose value changes a motion is
-no more refused than one that changes a scale. To see what a commit carries before copying it, ask
-the commit: `git -C ../litegrip-python show NEW_SHA:src/litegrip/factory_calibration.json`.
+its `factory_calibration.json` — and upstream has now changed those numbers in both directions:
+`4cec95d` replaced this unit's with another unit's, and `b9caae8` put this unit's back. A checkout
+left on a branch from before the second change carries the other one, and nothing in the diff would
+say so: the file loads either way, and its own `rad_to_mm` is not what the console moves by. To see
+what a commit carries before copying it, ask the commit:
+`git -C ../litegrip-python show NEW_SHA:src/litegrip/factory_calibration.json`.
 
 Then, in one commit:
 
 1. Update the commit and date in the table above.
 2. Recompute the tree hash with the recipe above and replace it.
-3. Re-apply the factory-calibration override, and update its hash too if the C++ repository has
-   moved since. Skipping this ships the Python repository's copy, which is the other unit's.
-4. Run the suite: `env -u LITEGRIP_SDK_PATH python3 -m pytest -q`. The SDK-surface tests are the
+3. Run the suite: `env -u LITEGRIP_SDK_PATH python3 -m pytest -q`. The SDK-surface tests are the
    contract — if upstream changed a signature the console calls, they fail here rather than on the
    bench.
-5. Read `git -C ../litegrip-python log --oneline OLD_SHA..NEW_SHA` before trusting the diff; a
+4. Read `git -C ../litegrip-python log --oneline OLD_SHA..NEW_SHA` before trusting the diff; a
    behaviour change the console does not test for will not announce itself.
+5. Move the calibration numbers this repository repeats by hand. `src/litegrip_studio/selftest.py`
+   carries the shipped files' angles and scales as literals (`KNOWN_CALIBRATIONS`) and asserts how
+   each stands to the console's own derivation; a re-vendor that changes them does not move that
+   table, and the assertions about the difference are exactly what fails when the two drift apart.
 
 ## Known divergence: the reported version
 

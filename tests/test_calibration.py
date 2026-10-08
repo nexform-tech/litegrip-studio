@@ -48,9 +48,10 @@ from conftest import REPO_ROOT, shipped_factory_calibrations
 # change in the SDK's shipped numbers shows up as a test failure here.
 #
 # ``FACTORY_RAW`` is this repository's ``factory_calibration.json``, verbatim,
-# key set included — the file ships here as the C++ SDK's copy of it, and
-# ``TestTheFixtureIsTheFileItClaims`` below compares the two so a fixture that
-# drifts from the file cannot pass quietly.
+# key set included, and ``TestTheFixtureIsTheFileItClaims`` below compares the
+# two so a fixture that drifts from the file cannot pass quietly.  The file used
+# to be the C++ SDK's copy of it; upstream ``b9caae8`` re-measured the Python
+# SDK's shipped files for this unit, which is how the override went away.
 #
 # Its ``rad_to_mm`` is 61.01229326764816, which is also the scale the console
 # derives for itself: 1.409552 rad of span under ``DEFAULT_TRAVEL_MM`` plus
@@ -59,6 +60,10 @@ from conftest import REPO_ROOT, shipped_factory_calibrations
 # agreement is not assumed anywhere, it is pinned in
 # ``TestTheFixtureIsTheFileItClaims`` as the thing that says these numbers
 # describe the gripper the console is configured for.
+#
+# ``work_stroke_mm`` is upstream's and reaches nothing in this console: the SDK
+# reads it only in ``Gripper.open``, which the console never calls.  It is here
+# because the guard compares the whole key set, and the key set is the file's.
 FACTORY_RAW = {
     "channel": "can0",
     "can_id": 8,
@@ -68,6 +73,7 @@ FACTORY_RAW = {
     "max_position_rad": -1.357481,
     "travel_range_rad": 1.409552,
     "rad_to_mm": 61.01229326764816,
+    "work_stroke_mm": 80.0,
     "motor_type": "DM4310",
     "kp": 5.0,
     "kd": 2.0,

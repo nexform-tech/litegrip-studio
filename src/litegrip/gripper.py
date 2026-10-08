@@ -1244,9 +1244,11 @@ class LiteGrip:
         """Adaptive grasp — close until stall, then hold with a set force.
 
         Blocking.  Closes on a ramp (stall detection catches the object),
-        then keeps streaming MIT frames holding the position with a
-        feed-forward torque of ``force_n × 0.1`` Nm, re-reading the
-        position every ``MotionConfig.hold_interval``.
+        then streams MIT frames carrying a feed-forward torque of
+        ``force_n × 0.1`` Nm and no position or velocity gain, so the grip
+        force is the same whether the object yields or holds firm.  The
+        status is re-read every ``MotionConfig.hold_interval`` to catch a
+        fault.
 
         Args:
             force_n: Gripping force in N; ``None`` = ``MotionConfig.force_n``.
@@ -1348,7 +1350,13 @@ class LiteGrip:
     def set_force(self, force_n: float, duration: float = 0.3) -> bool:
         """Apply a gripping force at the current position.
 
-        Sends MIT frames with feed-forward torque while holding position.
+        The streamed frames carry the feed-forward torque alone
+        (``kp = kd = 0``), so the force does not depend on where the jaws are:
+        if the object yields under load, the jaws follow it and the grip force
+        stays at the setpoint.  A position or velocity gain would subtract from
+        the feed-forward as soon as the jaws moved — with the default
+        ``rad_to_mm``, a jaw creeping at 3 mm/s lost about 15 N of a 20 N
+        setting.
 
         Args:
             force_n: Target force in newtons.
@@ -1367,7 +1375,7 @@ class LiteGrip:
         try:
             return self._can.control_mit_stream(
                 q_target=current_pos,
-                kp=150.0, kd=2.0,
+                kp=0.0, kd=0.0,
                 duration_s=duration,
                 tau_feedforward=tau_nm,
             )

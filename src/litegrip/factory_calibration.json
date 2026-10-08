@@ -7,6 +7,7 @@
   "max_position_rad": -1.357481,
   "travel_range_rad": 1.409552,
   "rad_to_mm": 61.01229326764816,
+  "work_stroke_mm": 80.0,
   "motor_type": "DM4310",
   "kp": 5.0,
   "kd": 2.0,
