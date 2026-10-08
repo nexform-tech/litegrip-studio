@@ -9,9 +9,10 @@
 # Qt widgets under the offscreen platform plugin. `conftest.py` selects that
 # plugin, so no display is required.
 #
-# The LiteGrip SDK is a checkout beside this repository rather than a
-# dependency (see the README): a runner has none, and the tests that are about
-# its surface skip themselves, which is what the skip count in the log means.
+# The LiteGrip SDK is vendored under src/litegrip (see the README), so a runner
+# has it without checking out anything else. Every test runs here — nothing is
+# skipped for want of an SDK — which is also what keeps the vendored copy honest:
+# a drift between it and the surface the console calls fails in this job.
 #
 # AGENTS.md is deliberately not linted: it is canonical content synced from
 # repo-template and must not be edited here.
@@ -43,7 +44,7 @@ jobs:
           node-version: 22
 
       - name: Lint Markdown
-        run: npx --yes markdownlint-cli2@0.23.3 "README.md" "README_ZH.md"
+        run: npx --yes markdownlint-cli2@0.23.3 "README.md" "README_ZH.md" "src/litegrip/VENDORED.md"
 
       - name: Validate repository standards
         run: |

@@ -2,19 +2,20 @@
 #
 # 启动脚本。所有路径都加引号——这个仓库的目录名里带空格。
 #
-# 主路径不安装 SDK：它唯一的声明依赖 eclipse-zenoh 在库代码里根本没有 import，
-# 常常也没装，所以把 SDK 检出目录与 src/ 一起放进 PYTHONPATH，而不是 pip
-# install。SDK 默认取本仓库的同级目录 ../lite-grip，也可以用 LITEGRIP_SDK_PATH
-# 指到别处。想改成安装路线也可以：
-#   python -m pip install -e ../lite-grip --no-deps
+# 主路径不安装 SDK：SDK 已经随本仓库发在 src/litegrip/ 下（来源见
+# src/litegrip/VENDORED.md），把 src/ 放进 PYTHONPATH 就够了——不用 pip install，
+# 也不用在别处再检出一份。它唯一的声明依赖 eclipse-zenoh 在库代码里根本没有
+# import，所以连依赖都不用装。
+#
+# 要对着 SDK 的 HEAD 跑，用 LITEGRIP_SDK_PATH 指到那份检出，它排在 src/ 前面，
+# 于是覆盖仓库里这份。
 #
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-SDK="${LITEGRIP_SDK_PATH:-$HERE/../lite-grip}"
 
-export PYTHONPATH="$HERE/src:$SDK${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="${LITEGRIP_SDK_PATH:+$LITEGRIP_SDK_PATH:}$HERE/src${PYTHONPATH:+:$PYTHONPATH}"
 
 usage() {
     cat <<EOF
@@ -31,7 +32,7 @@ usage() {
   $(basename "$0") gui --log-level DEBUG
 
 当前解释器：$PYTHON_BIN
-SDK 路径：  $SDK
+SDK 路径：  ${LITEGRIP_SDK_PATH:-$HERE/src/litegrip}${LITEGRIP_SDK_PATH:+（由 LITEGRIP_SDK_PATH 指定）}
 EOF
 }
 

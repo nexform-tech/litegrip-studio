@@ -30,6 +30,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
+import litegrip
 import pytest
 
 from litegrip_studio import calibration, constants
@@ -857,9 +858,8 @@ class TestPaths:
             Path.home() / ".litegrip" / "litegrip_calibration.json"
         )
 
-    def test_the_factory_path_points_inside_the_installed_sdk(self, monkeypatch) -> None:
+    def test_the_factory_path_points_inside_the_sdk(self, monkeypatch) -> None:
         monkeypatch.delenv("LITEGRIP_FACTORY_CALIB", raising=False)
-        litegrip = pytest.importorskip("litegrip")
         assert calibration.factory_path() == (
             Path(litegrip.__file__).resolve().parent / "factory_calibration.json"
         )
@@ -868,10 +868,9 @@ class TestPaths:
         """The fallback path is only a fallback if it is valid — otherwise the
         console would be refusing to start on a machine that has no problem."""
         monkeypatch.delenv("LITEGRIP_FACTORY_CALIB", raising=False)
-        pytest.importorskip("litegrip")
         path = calibration.factory_path()
         if not path.is_file():  # pragma: no cover - SDK without its data file
-            pytest.skip("the installed SDK ships no factory calibration")
+            pytest.skip("the SDK ships no factory calibration")
         info = calibration.resolve(path)
         assert info.problems == ()
         assert info.usable
@@ -904,10 +903,9 @@ class TestPaths:
         installation and stays first, so this console only ever gains a
         fallback, on the machines that had none."""
         monkeypatch.delenv("LITEGRIP_FACTORY_CALIB", raising=False)
-        litegrip = pytest.importorskip("litegrip")
         sdk = Path(litegrip.__file__).resolve().parent / "factory_calibration.json"
         if not sdk.is_file():  # pragma: no cover - SDK without its data file
-            pytest.skip("the installed SDK ships no factory calibration")
+            pytest.skip("the SDK ships no factory calibration")
 
         assert calibration.factory_candidates() == (
             sdk,
@@ -938,10 +936,9 @@ class TestPaths:
         this is what keeps them there.
         """
         monkeypatch.delenv("LITEGRIP_FACTORY_CALIB", raising=False)
-        litegrip = pytest.importorskip("litegrip")
         sdk = Path(litegrip.__file__).resolve().parent / "factory_calibration.json"
         if not sdk.is_file():  # pragma: no cover - SDK without its data file
-            pytest.skip("the installed SDK ships no factory calibration")
+            pytest.skip("the SDK ships no factory calibration")
 
         assert json.loads(sdk.read_text(encoding="utf-8")) == json.loads(
             calibration.bundled_factory_path().read_text(encoding="utf-8")
@@ -954,7 +951,6 @@ class TestPathsAreShownRelative:
     ``sys._MEIPASS``, and neither survives being made relative."""
 
     def test_the_factory_file_is_shown_relative_to_the_sdk(self) -> None:
-        pytest.importorskip("litegrip")
         assert calibration.friendly_path(calibration.factory_path()) == (
             "litegrip/factory_calibration.json"
         )

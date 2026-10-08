@@ -23,11 +23,6 @@ from pathlib import Path
 
 from . import constants, logging_setup, version
 
-#: Where the SDK lives when it is not installed: the sibling checkout, which
-#: is where a workspace holding both repositories puts it.  Overridable from
-#: the environment so a checkout somewhere else needs no edit here.
-DEFAULT_SDK_PATH = str(Path(__file__).resolve().parents[3] / "lite-grip")
-
 BACKENDS = ("sim", "real")
 
 log = logging.getLogger(__name__)
@@ -85,27 +80,54 @@ def build_parser(release: str | None = None) -> argparse.ArgumentParser:
 def ensure_sdk() -> bool:
     """Make ``import litegrip`` work, or say why it did not.
 
-    The SDK is deliberately not a resolved dependency — its one declared
-    dependency is never imported by its library code and is not installed here —
-    so a checkout is put on the path rather than installed.
+    The SDK is vendored under ``src/litegrip`` and travels with this package, so
+    normally nothing has to happen here: it is importable already.  It is
+    deliberately not a resolved dependency — its one declared dependency is
+    never imported by its library code — so there is no distribution to install.
+
+    ``LITEGRIP_SDK_PATH`` points at a different checkout instead, which is how a
+    developer tests against SDK HEAD.  A path set on purpose and then found
+    unusable is reported rather than quietly falling back to the vendored copy:
+    the operator asked for that one.
     """
-    try:
-        import litegrip  # noqa: F401
-    except ImportError:
-        path = os.environ.get("LITEGRIP_SDK_PATH", DEFAULT_SDK_PATH)
-        if path not in sys.path:
-            sys.path.insert(0, path)
-        try:
-            import litegrip  # noqa: F401
-        except ImportError as exc:
+    override = os.environ.get("LITEGRIP_SDK_PATH")
+    if override:
+        path = _sdk_checkout(Path(override).expanduser())
+        if path is None:
             print(
-                f"找不到 litegrip SDK：{exc}\n"
-                f"已尝试把 {path} 加入 sys.path。请设置 LITEGRIP_SDK_PATH，"
-                f"或用 --backend sim 跑仿真。",
+                f"LITEGRIP_SDK_PATH 指到的地方没有 litegrip 包：{override}\n"
+                f"它要么是 SDK 检出的根目录，要么是那个检出里的 src/。",
                 file=sys.stderr,
             )
             return False
+        if str(path) not in sys.path:
+            sys.path.insert(0, str(path))
+
+    try:
+        import litegrip  # noqa: F401
+    except ImportError as exc:
+        print(
+            f"找不到 litegrip SDK：{exc}\n"
+            f"SDK 随本仓库一起发在 src/litegrip，跑 run_litegrip_studio.sh 即可；"
+            f"也可用 LITEGRIP_SDK_PATH 指到另一份检出，或用 --backend sim 跑仿真。",
+            file=sys.stderr,
+        )
+        return False
     return True
+
+
+def _sdk_checkout(root: Path) -> Path | None:
+    """``root`` or ``root/src``, whichever holds the ``litegrip`` package.
+
+    Two layouts exist and both are worth accepting without a second guess: a
+    checkout is sometimes the package itself (``<repo>/litegrip/``), sometimes a
+    source tree with it one level down (``<repo>/src/litegrip/``).  ``None`` when
+    neither holds one.
+    """
+    for candidate in (root, root / "src"):
+        if (candidate / "litegrip" / "__init__.py").is_file():
+            return candidate
+    return None
 
 
 def make_backend(args):

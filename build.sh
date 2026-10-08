@@ -2,7 +2,10 @@
 #
 # 打包成单文件可执行程序。
 #
-# 两个参数一虚一实，都是必须的：
+# SDK 已 vendor 在 src/litegrip/ 下（来源见 src/litegrip/VENDORED.md），所以
+# --paths src 一条就把控制台和 SDK 都交给了 PyInstaller，不用再指第二个目录。
+#
+# 这些参数是必须的：
 #
 #   --collect-data litegrip      把 SDK 的 factory_calibration.json 打进产物。
 #                                SDK 用 dirname(litegrip.__file__) 找它，在
@@ -21,12 +24,12 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-SDK="${LITEGRIP_SDK_PATH:-$HERE/../lite-grip}"
 
 cd "$HERE"
 
 # build.sh 自己也需要能 import litegrip，否则 --collect-* 无从下手。
-export PYTHONPATH="$HERE/src:$SDK${PYTHONPATH:+:$PYTHONPATH}"
+# LITEGRIP_SDK_PATH 指过去时，那份检出排在 src/ 前面，于是打的是它。
+export PYTHONPATH="${LITEGRIP_SDK_PATH:+$LITEGRIP_SDK_PATH:}$HERE/src${PYTHONPATH:+:$PYTHONPATH}"
 
 # ── 收尾 ─────────────────────────────────────────────────────────────────────
 # 构建期写进源码树的东西一律在退出时清掉，失败退出也要清。
@@ -90,7 +93,6 @@ echo "用 $PYTHON_BIN 打包 litegrip-studio …"
     --noconfirm \
     --name "litegrip-studio" \
     --paths src \
-    --paths "$SDK" \
     --collect-submodules litegrip \
     --collect-data litegrip \
     --collect-data litegrip_studio \

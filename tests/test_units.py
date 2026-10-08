@@ -9,6 +9,7 @@ than against the formulas themselves.
 from __future__ import annotations
 
 import math
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -273,3 +274,35 @@ class TestForceScaling:
         assert clamp_force_torque(constants.FORCE_THEORETICAL_MAX_N) < (
             constants.FORCE_THEORETICAL_MAX_N * constants.N_TO_NM
         )
+
+
+class TestErrorText:
+    """The fault strings the operator reads after a motor trips.
+
+    ``constants.describe_error`` calls the SDK's own function and keeps a local
+    copy of its strings for the case where the SDK cannot be imported.  The copy
+    is the half that nothing else reaches — with the SDK vendored it is dead code
+    in every other test — so a string that drifts there would show up on the
+    bench and nowhere in CI.  Here the two are compared, and the copy is entered
+    on purpose by taking the SDK out of ``sys.modules`` for one call.
+    """
+
+    def test_error_text_matches_sdk(self) -> None:
+        import litegrip
+
+        for code, text in constants._FALLBACK_ERROR_TEXT.items():
+            # A code the SDK does not know comes back as prose about being
+            # unknown, which is how a made-up code is caught here rather than
+            # matching a string that happens to look plausible.
+            assert not litegrip.describe_error(code).startswith("未知错误"), (
+                f"0x{code:X} is not an error code the SDK reports"
+            )
+            assert text == litegrip.describe_error(code), f"code 0x{code:X} differs"
+
+    def test_the_copy_is_what_answers_when_the_sdk_cannot_be_imported(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setitem(sys.modules, "litegrip", None)
+
+        assert constants.describe_error(constants.ERROR_OC) == "过流故障 (OC)"
+        assert constants.describe_error(0x55) == "未知错误 (0x55)"

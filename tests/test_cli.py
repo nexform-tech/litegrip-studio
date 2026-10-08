@@ -25,6 +25,9 @@ from litegrip_studio.can_link import CanLink
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+#: The SDK that ships with this repository, as opposed to one somewhere else.
+VENDORED_SDK = REPO_ROOT / "src" / "litegrip"
+
 
 class Recorder:
     """A backend stand-in that records what the factory did to it."""
@@ -52,10 +55,6 @@ def real_backend(monkeypatch):
     The point is the argument plumbing, without a CAN interface; what the real
     backend then does with those arguments has its own tests.
     """
-    # Importing the real backend imports the SDK, which is a checkout beside
-    # this one rather than a dependency.  The plumbing below is worth testing
-    # either way, so these tests skip on a machine that has no such checkout.
-    pytest.importorskip("litegrip")
     import litegrip_studio.backend.real as real
 
     monkeypatch.setattr(cli, "ensure_sdk", lambda: True)
@@ -270,49 +269,70 @@ class TestSelftest:
 
 
 class TestEnsureSdk:
-    @staticmethod
-    def _hide_the_sdk(monkeypatch) -> None:
-        """Make ``import litegrip`` fail, however the SDK got on the path.
-
-        Stripping ``sys.path`` is not enough to say "the SDK is not here": the
-        SDK can be *installed*, and an editable install resolves it through a
-        meta-path finder rather than through a ``sys.path`` entry, so the import
-        would still succeed and ``ensure_sdk()`` would return before it looked at
-        anything.  A ``None`` in ``sys.modules`` halts the import whatever the
-        finders say, which is the condition these two tests are about.
-        """
-        monkeypatch.setitem(sys.modules, "litegrip", None)
-        # A copy, so the path ``ensure_sdk()`` inserts is undone with the rest.
-        monkeypatch.setattr(sys, "path", list(sys.path))
-
-    def test_it_finds_the_checkout_on_the_path(self) -> None:
-        # About finding a checkout, so it needs one to find.
-        pytest.importorskip("litegrip")
+    def test_it_finds_the_vendored_sdk_with_nothing_set(
+        self, monkeypatch, capsys
+    ) -> None:
+        """The whole point of vendoring: no environment, no install, it imports."""
+        monkeypatch.delenv("LITEGRIP_SDK_PATH", raising=False)
 
         assert cli.ensure_sdk() is True
+        assert not capsys.readouterr().err
 
-    def test_it_reports_failure_and_says_where_it_looked(
+        import litegrip
+
+        # The one under this repository's own src/, not some installed copy that
+        # happens to be found first.
+        assert Path(litegrip.__file__).resolve().is_relative_to(VENDORED_SDK)
+
+    def test_a_set_path_that_holds_no_sdk_is_reported(
         self, monkeypatch, tmp_path, capsys
     ) -> None:
-        monkeypatch.setattr(cli, "DEFAULT_SDK_PATH", str(tmp_path))
-        monkeypatch.delenv("LITEGRIP_SDK_PATH", raising=False)
-        self._hide_the_sdk(monkeypatch)
+        """An override set on purpose and wrong is a mistake, not a fallback.
+
+        It does not quietly keep the vendored copy: the operator asked for that
+        checkout, and finding out later — on the bench — is worse than not
+        starting.
+        """
+        monkeypatch.setenv("LITEGRIP_SDK_PATH", str(tmp_path))
 
         assert cli.ensure_sdk() is False
         assert str(tmp_path) in capsys.readouterr().err
-        assert str(tmp_path) in sys.path
 
-    def test_the_environment_overrides_the_built_in_path(
+    def test_a_set_path_comes_ahead_of_the_vendored_copy(
         self, monkeypatch, tmp_path, capsys
     ) -> None:
         elsewhere = tmp_path / "sdk-elsewhere"
-        monkeypatch.setattr(cli, "DEFAULT_SDK_PATH", str(tmp_path / "nowhere"))
+        (elsewhere / "litegrip").mkdir(parents=True)
+        (elsewhere / "litegrip" / "__init__.py").write_text(".", encoding="utf-8")
         monkeypatch.setenv("LITEGRIP_SDK_PATH", str(elsewhere))
-        self._hide_the_sdk(monkeypatch)
+        monkeypatch.setattr(sys, "path", list(sys.path))
 
-        cli.ensure_sdk()
+        assert cli.ensure_sdk() is True
 
-        assert str(elsewhere) in sys.path
+        # First, not merely present: `src` is already on the path, so anything
+        # later would still import the vendored copy and the override would be a
+        # silent no-op. tests/test_vendored_sdk.py proves the import follows.
+        assert sys.path[0] == str(elsewhere)
+        assert not capsys.readouterr().err
+
+    def test_a_source_tree_layout_is_accepted_too(
+        self, monkeypatch, tmp_path, capsys
+    ) -> None:
+        """`<repo>` or `<repo>/src`, whichever holds the package.
+
+        The SDK upstream uses the `src/` layout; pointing the override at the
+        checkout root is the obvious mistake, and accepting it costs one `is_file`.
+        """
+        root = tmp_path / "sdk-checkout"
+        (root / "src" / "litegrip").mkdir(parents=True)
+        (root / "src" / "litegrip" / "__init__.py").write_text(".", encoding="utf-8")
+        monkeypatch.setenv("LITEGRIP_SDK_PATH", str(root))
+        monkeypatch.setattr(sys, "path", list(sys.path))
+
+        assert cli.ensure_sdk() is True
+
+        assert sys.path[0] == str(root / "src")
+        assert not capsys.readouterr().err
 
 
 class TestTheSignalHandler:

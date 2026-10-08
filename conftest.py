@@ -19,11 +19,14 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
 SRC = REPO_ROOT / "src"
-#: A checkout beside this one, which is where a workspace holding both
-#: repositories puts it; LITEGRIP_SDK_PATH overrides that.
-SDK = Path(os.environ.get("LITEGRIP_SDK_PATH") or REPO_ROOT.parent / "lite-grip")
+#: The SDK is vendored under ``src/litegrip``, so ``SRC`` alone puts it on the
+#: path.  ``LITEGRIP_SDK_PATH`` points the suite at a different checkout instead
+#: — a developer testing against SDK HEAD — and goes ahead of ``SRC`` so that
+#: one is the ``litegrip`` the tests import.
+SDK_OVERRIDE = os.environ.get("LITEGRIP_SDK_PATH")
 
-for _path in (str(SRC), str(SDK)):
+# Inserted last-first, because every insert lands at the front.
+for _path in reversed([p for p in (str(SRC), SDK_OVERRIDE) if p]):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
