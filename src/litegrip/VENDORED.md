@@ -85,12 +85,21 @@ PY
 ```
 
 The two upstream repositories disagree about this file, which is why it is written down here. The
-Python SDK's copy carries `0.0 / -1.651026 / 1.651026 / 52.69` plus a `work_stroke_mm` the console
-does not read; the C++ SDK's copy carries `0.052071 / -1.357481 / 1.409552 / 61.01229326764816` and
-`kp 5.0`, and the C++ repository's own commit is titled "sync the packaged factory calibration with
-the re-measured unit". These are the numbers the unit on this bench was measured at, and they are
-the scale the console derives for itself from an 86 mm travel (`61.01229326764816 × 1.409552` is
-86.0 mm), so the file is consistent with the console rather than merely a fallback it tolerates.
+Python SDK's copy carries `0.0 / -1.651026 / 1.651026 / 52.69` and a `work_stroke_mm` of 80; the C++
+SDK's copy carries `0.052071 / -1.357481 / 1.409552 / 61.01229326764816`, `kp 5.0`, and no
+`work_stroke_mm` at all. The C++ repository's own commit is titled "sync the packaged factory
+calibration with the re-measured unit". These are the numbers the unit on this bench was measured
+at, and they are the scale the console derives for itself from an 86 mm travel
+(`61.01229326764816 × 1.409552` is 86.0 mm), so the file is consistent with the console rather than
+merely a fallback it tolerates.
+
+`work_stroke_mm` is not a decoration, and its absence here is not one either. The SDK's
+`load_calibration` maps it into `GripperConfig.work_stroke_mm`, and `Gripper.open` stops at that
+stroke instead of pressing the open-side mechanical limit when it is set and smaller than the
+travel. The key was 80 mm of an 86 mm travel in both the user calibration on this bench and the
+Python factory file, so those open to 80 mm; this file opens to the limit. Which of the two the
+console should do is the operator's call, and this note does not make it — what it records is that
+dropping the key changes a motion rather than only a scale.
 
 Copy it from a commit, never from a checkout:
 
@@ -119,12 +128,12 @@ git -C ../litegrip-python show NEW_SHA:LICENSE > src/litegrip/LICENSE
 A checkout sits on whatever branch it was last switched to, and that branch decides the numbers in
 its `factory_calibration.json` — this file's own history is the evidence: upstream changed that file
 in `4cec95d`, from `0.052071 / -1.357481 / 1.409552 / 61.01229326764816` to
-`0.0 / -1.651026 / 1.651026 / 52.69` plus a `work_stroke_mm` key the console ignores. The console
-runs on whichever of the two is vendored here, and a checkout left on a branch from before that
-change still carries the other one. A `cp` from there would have moved the numbers the console
-measures with, and nothing in the diff would have said so — a key the console does not know is not
-refused, so the file loads either way. To see what a commit carries before copying it, ask the
-commit: `git -C ../litegrip-python show NEW_SHA:src/litegrip/factory_calibration.json`.
+`0.0 / -1.651026 / 1.651026 / 52.69` and a `work_stroke_mm` of 80. The console runs on whichever of
+the two is vendored here, and a checkout left on a branch from before that change still carries the
+other one. A `cp` from there would have moved the numbers the console measures with, and nothing in
+the diff would have said so: the file loads either way, and a key whose value changes a motion is
+no more refused than one that changes a scale. To see what a commit carries before copying it, ask
+the commit: `git -C ../litegrip-python show NEW_SHA:src/litegrip/factory_calibration.json`.
 
 Then, in one commit:
 
