@@ -47,28 +47,27 @@ from conftest import REPO_ROOT, shipped_factory_calibrations
 # The three real datasets, copied from the SDK tree rather than invented, so a
 # change in the SDK's shipped numbers shows up as a test failure here.
 #
-# ``FACTORY_RAW`` is the SDK's ``factory_calibration.json``, verbatim, including
-# ``work_stroke_mm`` — a key this console does not read and must still carry, or
-# the comparison below would be against a file of its own invention.
+# ``FACTORY_RAW`` is this repository's ``factory_calibration.json``, verbatim,
+# key set included — the file ships here as the C++ SDK's copy of it, and
+# ``TestTheFixtureIsTheFileItClaims`` below compares the two so a fixture that
+# drifts from the file cannot pass quietly.
 #
-# Its ``rad_to_mm`` is upstream's scale for the unit that file was recorded on:
-# 1.651026 rad of span times 52.69 is 87 mm.  It is deliberately *not* the scale
-# the console moves by — that one is derived from the travel the operator
-# measured, and over this span ``DEFAULT_TRAVEL_MM`` gives 52.0888, about 1.2 %
-# away.  The derivation is the whole point of the console's limits, so a fixture
-# that assumed the file agreed with it would be pinning the wrong number.
-# ``TestTheFixtureIsTheFileItClaims`` below compares this against the file the
-# repository ships.
+# Its ``rad_to_mm`` is 61.01229326764816, which is also the scale the console
+# derives for itself: 1.409552 rad of span under ``DEFAULT_TRAVEL_MM`` plus
+# ``SPAN_INSET_MM`` is 86 / 1.409552, the same number.  The console derives
+# rather than trusts, and a file that disagreed would only warn — so the
+# agreement is not assumed anywhere, it is pinned in
+# ``TestTheFixtureIsTheFileItClaims`` as the thing that says these numbers
+# describe the gripper the console is configured for.
 FACTORY_RAW = {
     "channel": "can0",
     "can_id": 8,
     "mst_id": 24,
     "canfd_mode": False,
-    "zero_position_rad": 0.0,
-    "max_position_rad": -1.651026,
-    "travel_range_rad": 1.651026,
-    "rad_to_mm": 52.69,
-    "work_stroke_mm": 80.0,
+    "zero_position_rad": 0.052071,
+    "max_position_rad": -1.357481,
+    "travel_range_rad": 1.409552,
+    "rad_to_mm": 61.01229326764816,
     "motor_type": "DM4310",
     "kp": 5.0,
     "kd": 2.0,
@@ -965,3 +964,17 @@ class TestTheFixtureIsTheFileItClaims:
             assert json.loads(path.read_text(encoding="utf-8")) == FACTORY_RAW, (
                 f"{path.relative_to(REPO_ROOT)} 与 FACTORY_RAW 已经不一致了，两份要一起改"
             )
+
+    def test_the_scale_it_carries_is_the_one_the_console_derives(self) -> None:
+        """The file's own ``rad_to_mm`` and the console's derivation agree.
+
+        The code does not require this — the console derives from the angles and
+        only *warns* when the file disagrees — which is why it is worth pinning
+        here: agreeing is what says this file and this console are describing the
+        same gripper.  A file from another unit loads perfectly well and would
+        fail only this test.
+        """
+        limits = calibration.limits_from_raw(FACTORY_RAW)
+
+        assert limits.rad_to_mm == pytest.approx(FACTORY_RAW["rad_to_mm"])
+        assert limits.stroke_mm == pytest.approx(86.0)

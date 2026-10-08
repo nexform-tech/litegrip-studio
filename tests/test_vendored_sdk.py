@@ -176,6 +176,9 @@ class TestItStaysWhatItSaysItIs:
         assert re.search(r"\b[0-9a-f]{40}\b", text), "no commit sha in the note"
 
     def test_the_tree_still_matches_the_recorded_hash(self) -> None:
+        # The note records two hashes: the tree first, the locally overridden
+        # factory calibration second.  This one is about the tree, so it takes
+        # the first — the order of the note's sections is what says which.
         text = PROVENANCE.read_text(encoding="utf-8")
         recorded = re.search(r"^([0-9a-f]{64})$", text, re.MULTILINE)
 
@@ -183,6 +186,26 @@ class TestItStaysWhatItSaysItIs:
         assert tree_hash(VENDORED_SDK) == recorded.group(1), (
             "src/litegrip 已经被就地改动，与 VENDORED.md 记的哈希对不上了："
             "要么改回去，要么按 VENDORED.md 的步骤重新 vendor 并更新哈希"
+        )
+
+    def test_the_factory_calibration_is_the_copy_the_note_names(self) -> None:
+        """The one file that is not upstream Python's, pinned by its own hash.
+
+        The tree hash above cannot say *which* factory calibration is here — it
+        only says the bytes have not moved since the note was written.  Two
+        upstream repositories ship different numbers for this file, and the
+        console measures with whichever one is here, so which one it is has to
+        be checkable and not just documented.
+        """
+        hashes = re.findall(
+            r"^([0-9a-f]{64})$", PROVENANCE.read_text(encoding="utf-8"), re.MULTILINE
+        )
+
+        assert len(hashes) == 2, "the note records both the tree hash and the override's"
+        shipped = VENDORED_SDK / "factory_calibration.json"
+        assert hashlib.sha256(shipped.read_bytes()).hexdigest() == hashes[1], (
+            "出厂标定不是 VENDORED.md 记的那一份：要么改回去，"
+            "要么按「Local override: the factory calibration」那节重新取并更新哈希"
         )
 
     def test_the_data_files_it_resolves_by_name_travel_with_it(self) -> None:
