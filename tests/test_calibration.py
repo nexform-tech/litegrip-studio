@@ -134,16 +134,31 @@ def _write(path: Path, data: object) -> Path:
 def env(tmp_path, monkeypatch):
     """An isolated calibration environment.
 
-    Both lookups are redirected into ``tmp_path``, so ``resolve()`` can be tested
-    through its real defaults — the environment variables are how the paths are
-    overridden in production, and testing around them would leave the override
-    itself unexercised.
+    Both lookups are redirected into ``tmp_path``, so the tests exercise the real
+    code paths rather than a patched-over copy of them.
+
+    ``LITEGRIP_CALIB`` is set, and that is worth being precise about: it now
+    *names* a file, the same way ``--calibration`` does, so setting it is how
+    these tests say "there is a user calibration in effect".  The console's own
+    default — the factory file, with nothing named — is what is left when it is
+    unset, and the tests that mean that call :func:`only_the_factory`.
     """
     user = tmp_path / "user.json"
     factory = tmp_path / "factory.json"
     monkeypatch.setenv("LITEGRIP_CALIB", str(user))
     monkeypatch.setenv("LITEGRIP_FACTORY_CALIB", str(factory))
     return type("Env", (), {"user": user, "factory": factory, "dir": tmp_path})()
+
+
+def only_the_factory(monkeypatch) -> None:
+    """Take the named user file out of the picture, leaving the default.
+
+    Not the same thing as naming a file that is not there: a name is honoured
+    whether or not the file exists, which is the whole point of it being
+    explicit.  This is how a test asks what the console does when nobody has
+    told it anything.
+    """
+    monkeypatch.delenv("LITEGRIP_CALIB", raising=False)
 
 
 # ── schema ──────────────────────────────────────────────────────────────────
@@ -222,17 +237,55 @@ class TestProvenance:
             constants.DEFAULT_TRAVEL_MM + constants.SPAN_INSET_MM, abs=0.01
         )
 
-    def test_an_absent_user_file_falls_back_to_factory_and_says_so(self, env) -> None:
+    def test_the_factory_file_is_the_default_when_nothing_is_named(
+        self, env, monkeypatch
+    ) -> None:
+        """The console's own calibration, on a machine nobody has told anything.
+
+        It is a source like any other rather than a fallback: it is what ships,
+        and the bench is expected to run on it until someone calibrates.
+        """
+        only_the_factory(monkeypatch)
         _write(env.factory, FACTORY_RAW)
+
         info = calibration.resolve()
+
         assert info.provenance == PROVENANCE_FACTORY
         assert info.usable and info.is_factory
         assert info.path == str(env.factory)
-        joined = " ".join(info.warnings)
-        assert "未找到用户标定文件" in joined
-        assert "同一台" in joined, "the operator must be told the risk, not just the fact"
+        assert info.motion_allowed, "the default has to be usable with no ceremony"
+        assert "若不是本机" in " ".join(info.warnings), (
+            "the operator must still be told what this file's numbers assume"
+        )
 
-    def test_nothing_anywhere_is_missing_and_blocks(self, env) -> None:
+    def test_a_named_file_wins_over_the_factory_default(self, env, monkeypatch) -> None:
+        """The whole precedence, in one place: what the operator named, then
+        what the console ships.  Naming a file is the only way off the default,
+        and nothing else is consulted once one is named."""
+        only_the_factory(monkeypatch)
+        _write(env.factory, FACTORY_RAW)
+        _write(env.user, USER_RAW)
+
+        assert calibration.resolve().provenance == PROVENANCE_FACTORY
+        assert calibration.resolve(env.user).provenance == PROVENANCE_USER
+
+    def test_a_named_file_that_is_absent_is_reported_not_replaced(self, env) -> None:
+        """Naming a file is a decision, and the console answers it.
+
+        Falling through to the factory numbers here would leave the operator
+        looking at a gripper measured with a file they did not choose, and the
+        screen would look exactly like the case where it worked.
+        """
+        _write(env.factory, FACTORY_RAW)
+        info = calibration.resolve()
+
+        assert info.provenance == PROVENANCE_MISSING
+        assert not info.usable
+        assert info.path == str(env.user), "the file the console was told to read"
+        assert "不存在" in " ".join(info.problems)
+
+    def test_nothing_anywhere_is_missing_and_blocks(self, env, monkeypatch) -> None:
+        only_the_factory(monkeypatch)
         info = calibration.resolve()
         assert info.provenance == PROVENANCE_MISSING
         assert not info.usable
@@ -268,7 +321,10 @@ class TestProvenance:
         assert info.provenance == PROVENANCE_INVALID
         assert "无法读取" in " ".join(info.problems)
 
-    def test_an_invalid_factory_file_is_reported_as_invalid(self, env) -> None:
+    def test_an_invalid_factory_file_is_reported_as_invalid(
+        self, env, monkeypatch
+    ) -> None:
+        only_the_factory(monkeypatch)
         _write(env.factory, [1, 2])
         info = calibration.resolve()
         assert info.provenance == PROVENANCE_INVALID
@@ -280,10 +336,19 @@ class TestProvenance:
         assert info.provenance == PROVENANCE_USER
         assert info.path == str(other)
 
-    def test_an_explicit_path_that_does_not_exist_falls_back(self, env) -> None:
+    def test_an_explicit_path_that_does_not_exist_is_reported(self, env) -> None:
+        """The same rule as a named file that is absent, from the other way in.
+
+        An argument is even more deliberate than a setting, and it used to end
+        at the factory numbers — which is precisely the outcome that makes "the
+        file I chose is not what is in effect" impossible to see.
+        """
         _write(env.factory, FACTORY_RAW)
         info = calibration.resolve(env.dir / "nope.json")
-        assert info.provenance == PROVENANCE_FACTORY
+
+        assert info.provenance == PROVENANCE_MISSING
+        assert not info.usable
+        assert info.path == str(env.dir / "nope.json")
 
 
 # ── the direction check ─────────────────────────────────────────────────────
@@ -355,10 +420,12 @@ class TestMotionAllowed:
         info = calibration.resolve()
         assert info.usable and info.motion_allowed
 
-    def test_the_factory_fallback_is_allowed_here_and_gated_by_the_worker(self, env) -> None:
-        """This property is a statement about the file, so it says the file is
-        usable.  Requiring the operator to accept the risk is the worker's job,
-        because that is a decision rather than a fact."""
+    def test_the_factory_file_does(self, env, monkeypatch) -> None:
+        """This property is a statement about the file, and the factory file is
+        the console's default rather than a fallback to be accepted.  Whether it
+        describes *this* gripper is not a question about the file, and the gate
+        puts it to the encoder instead."""
+        only_the_factory(monkeypatch)
         _write(env.factory, FACTORY_RAW)
         info = calibration.resolve()
         assert info.motion_allowed
@@ -407,14 +474,19 @@ class TestMotionAllowed:
         ],
     )
     def test_every_provenance_has_a_decided_answer(
-        self, env, provenance_allowed: tuple[str, bool]
+        self, env, monkeypatch, provenance_allowed: tuple[str, bool]
     ) -> None:
         """Exhaustive over the provenances so a new one cannot be added without
         deciding what it means for motion."""
         provenance, expected = provenance_allowed
+
+        def use_the_factory() -> None:
+            only_the_factory(monkeypatch)
+            _write(env.factory, FACTORY_RAW)
+
         writers = {
             PROVENANCE_USER: lambda: _write(env.user, USER_RAW),
-            PROVENANCE_FACTORY: lambda: _write(env.factory, FACTORY_RAW),
+            PROVENANCE_FACTORY: use_the_factory,
             PROVENANCE_MEMORY: lambda: None,
             PROVENANCE_INVALID: lambda: _write(env.user, ZERO_TRAVEL_RAW),
             PROVENANCE_MISSING: lambda: None,
@@ -547,7 +619,7 @@ class TestSilentFallbackDefence:
         ids=["user", "factory"],
     )
     def test_a_usable_calibration_yields_an_explicit_readable_path(
-        self, env, raw: dict, provenance: str
+        self, env, monkeypatch, raw: dict, provenance: str
     ) -> None:
         """Both are handed over as a concrete path — including the factory one.
 
@@ -556,6 +628,7 @@ class TestSilentFallbackDefence:
         that it had.  We name the file so the branch is never entered.
         """
         if provenance == PROVENANCE_FACTORY:
+            only_the_factory(monkeypatch)
             _write(env.factory, raw)
         else:
             _write(env.user, raw)

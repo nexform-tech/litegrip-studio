@@ -94,28 +94,27 @@ log = logging.getLogger(__name__)
 class GateState(str, Enum):
     """Whether the axis may be commanded, and if not, why not.
 
-    Three states rather than two because the factory case is not the same kind of
-    thing as an uncalibrated one.  It is *surmountable*: the numbers are
-    self-consistent, they simply may belong to a different unit, and the operator
-    is the only one who can know.  A missing or wrong-frame calibration is never
-    surmountable — no acknowledgement makes those numbers describe this gripper.
+    Two states, because the question is yes or no.  The factory file used to be a
+    third — *surmountable*, since a self-consistent set of numbers that may
+    belong to another unit is something the operator can accept at their own
+    risk.  Making it the console's own default removed the question: there is
+    nobody left to ask, and a state the answer would always be the same for is
+    not a state.  What still blocks is a calibration that cannot describe this
+    gripper at all, and no acknowledgement ever made one of those usable.
     """
 
     READY = "READY"
-    FACTORY = "FACTORY"
     BLOCKED = "BLOCKED"
 
 
 GATE_LABELS = {
     GateState.READY: "就绪",
-    GateState.FACTORY: "出厂标定（待确认）",
     GateState.BLOCKED: "已阻断",
 }
 
 
 def evaluate_gate(
     info: CalibrationInfo | None,
-    allow_factory: bool = False,
     measured_rad: float | None = None,
 ) -> tuple[GateState, str]:
     """Decide whether ``info`` permits motion, and say why in the operator's terms.
@@ -128,6 +127,12 @@ def evaluate_gate(
     because a file can be wrong in a way that reading the file cannot reveal —
     see :func:`frame_mismatch`.  Passing ``None`` skips that one check and
     changes nothing else.
+
+    Both file-backed provenances are ready.  The factory file is the console's
+    default now, and whether it describes the gripper in front of you is what
+    :func:`frame_mismatch` above answers from the encoder rather than from a
+    question put to the operator — a file from another unit puts the live reading
+    outside its range, and that is refused here.
     """
     if info is None:
         return GateState.BLOCKED, "后端尚未报告标定信息；运动已禁止"
@@ -141,17 +146,8 @@ def evaluate_gate(
         if mismatch:
             return GateState.BLOCKED, mismatch
 
-    if info.provenance == PROVENANCE_USER:
+    if info.provenance in (PROVENANCE_USER, PROVENANCE_FACTORY):
         return GateState.READY, f"{info.label}：{info.path}"
-
-    if info.provenance == PROVENANCE_FACTORY:
-        if allow_factory:
-            return GateState.READY, "已确认使用出厂标定"
-        return (
-            GateState.FACTORY,
-            "正在使用出厂标定。若本机夹爪与出厂数据不是同一台，"
-            "所有 mm 与力的读数都会是错的 —— 请先自行标定，或确认风险后勾选允许",
-        )
 
     if info.provenance == PROVENANCE_MEMORY:
         return (
@@ -292,7 +288,6 @@ class WorkerLoop:
         self._info: CalibrationInfo | None = None
         self._gate: GateState | None = None
         self._gate_reason = ""
-        self._allow_factory = False
 
         self._probe: GuidedCalibFSM | TwoPointCalibFSM | None = None
         self._tele = Telemetry()
@@ -727,7 +722,7 @@ class WorkerLoop:
         # by the time this sees a live angle the tick it arrived on is the tick
         # that checks it — which is the tick before any frame could be sent.
         measured = self._measured_rad()
-        state, reason = evaluate_gate(self._info, self._allow_factory, measured)
+        state, reason = evaluate_gate(self._info, measured)
         if state is self._gate and reason == self._gate_reason:
             return
         previous = self._gate
@@ -862,10 +857,6 @@ class WorkerLoop:
     @property
     def estopped(self) -> bool:
         return self._estop.is_set()
-
-    def set_allow_factory(self, allow: bool) -> None:
-        """The operator's acknowledgement of the factory-calibration risk."""
-        self._allow_factory = bool(allow)
 
     def _service_commands(self) -> None:
         drained = self._queue.drain()
@@ -1088,7 +1079,7 @@ class WorkerLoop:
         # and the hold is taken in whichever units the gate leaves open —
         # millimetres when it is READY, the measured angle itself when it is not.
         # See :meth:`_hold_measured`.
-        state, reason = evaluate_gate(self._info, self._allow_factory)
+        state, reason = evaluate_gate(self._info)
         # Whatever this console claimed to know about the jaws is about to stop
         # being true: the axis has been free, and a hand — or gravity — may have
         # moved it since.  Forgetting it here, before the motor is energised, is
@@ -1168,7 +1159,7 @@ class WorkerLoop:
         # The gate is re-checked *before* the latch is released, not after: a
         # latch released on a gripper with no usable calibration would undo the
         # reason it latched.
-        state, reason = evaluate_gate(self._info, self._allow_factory)
+        state, reason = evaluate_gate(self._info)
         if state is not GateState.READY:
             # Watched as a refusal, and the refusal in force while the latch is
             # set is the latch itself: the operator's next move is to fix what
@@ -1867,9 +1858,6 @@ class GripperWorker(QThread):
 
     def estop(self, reason: str = "手动急停") -> None:
         self.loop.estop(reason)
-
-    def set_allow_factory(self, allow: bool) -> None:
-        self.loop.set_allow_factory(allow)
 
     def shutdown(self, timeout_ms: int = constants.SHUTDOWN_WAIT_MS) -> bool:
         """End the session.  True if the thread stopped inside the timeout.

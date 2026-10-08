@@ -107,11 +107,14 @@ PHASE_LABELS = {
     TwoPointPhase.RECORD_CLOSE.value: "等待记录闭合极限",
 }
 
-#: The severity to paint each provenance with.  The factory case is a warning
-#: rather than an error because it is surmountable — see the worker's gate.
+#: The severity to paint each provenance with.  The factory file is informational
+#: like a user file, because it is the console's ordinary default rather than
+#: something the operator has to notice and accept; what would make it wrong for
+#: this gripper is the live reading, and that is the gate's message, not this
+#: label's.
 PROVENANCE_SEVERITY = {
     calibration.PROVENANCE_USER: "info",
-    calibration.PROVENANCE_FACTORY: "warn",
+    calibration.PROVENANCE_FACTORY: "info",
     calibration.PROVENANCE_MEMORY: "warn",
     calibration.PROVENANCE_INVALID: "error",
     calibration.PROVENANCE_MISSING: "error",
@@ -131,11 +134,10 @@ def manual_active(phase: str) -> bool:
 class CalibrationPage(QWidget):
     """Provenance, file handling, and the two probes."""
 
-    def __init__(self, submit, allow_factory=None, settings: Settings | None = None,
+    def __init__(self, submit, settings: Settings | None = None,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._submit = submit
-        self._allow_factory = allow_factory
         self._settings = settings
         self._info: CalibrationInfo | None = None
         self._phase = GuidedPhase.IDLE.value
@@ -174,12 +176,6 @@ class CalibrationPage(QWidget):
         self._gate_label.setTextFormat(Qt.RichText)
         self._gate_label.setWordWrap(True)
 
-        self._allow = QCheckBox("我了解风险，允许使用出厂标定值")
-        self._allow.setToolTip(
-            "出厂标定随软件分发，未必属于这台夹爪。勾选后所有读数都可能是错的"
-        )
-        self._allow.toggled.connect(self._on_allow_toggled)
-
         self._reload = QPushButton("重新读取")
         self._load = QPushButton("载入文件…")
         self._save = QPushButton("重新保存标定…")
@@ -203,7 +199,6 @@ class CalibrationPage(QWidget):
 
         self._build()
         self._wire()
-        self._load_settings()
         self._refresh()
         theme.subscribe(self.restyle)
 
@@ -295,7 +290,6 @@ class CalibrationPage(QWidget):
         layout = QVBoxLayout(box)
         layout.addWidget(self._file_label)
         layout.addLayout(files)
-        layout.addWidget(self._allow)
         layout.addWidget(self._gate_label)
         layout.addStretch(1)
         return box
@@ -423,13 +417,6 @@ class CalibrationPage(QWidget):
         self._reload.clicked.connect(lambda: self._submit(cmd.LoadCalibration()))
         self._load.clicked.connect(self._on_load_clicked)
         self._save.clicked.connect(lambda: self._submit(cmd.SaveCalibration()))
-
-    def _load_settings(self) -> None:
-        allowed = (
-            False if self._settings is None
-            else self._settings.allow_factory_calibration
-        )
-        self._allow.setChecked(allowed)
 
     # ── slots from the worker ───────────────────────────────────────────────
     def set_calibration(self, info: CalibrationInfo | None) -> None:
@@ -667,10 +654,6 @@ class CalibrationPage(QWidget):
                 calibration.PROVENANCE_MEMORY, calibration.PROVENANCE_USER
             )
         )
-        # Shown only where it means something, but never unset behind the
-        # operator's back: the acknowledgement is a standing preference, and
-        # silently clearing it would make them tick it again on the next launch.
-        self._allow.setVisible(bool(info is not None and info.is_factory))
 
     # ── actions ─────────────────────────────────────────────────────────────
     def _on_cancel(self) -> None:
@@ -681,12 +664,6 @@ class CalibrationPage(QWidget):
 
     def _on_manual_start(self) -> None:
         self._submit(cmd.StartManualCalibration())
-
-    def _on_allow_toggled(self, allowed: bool) -> None:
-        if self._settings is not None:
-            self._settings.allow_factory_calibration = allowed
-        if self._allow_factory is not None:
-            self._allow_factory(allowed)
 
     def _on_load_clicked(self) -> None:
         path, _filter = QFileDialog.getOpenFileName(
@@ -701,7 +678,3 @@ class CalibrationPage(QWidget):
     @property
     def phase(self) -> str:
         return self._phase
-
-    @property
-    def allows_factory(self) -> bool:
-        return self._allow.isChecked()

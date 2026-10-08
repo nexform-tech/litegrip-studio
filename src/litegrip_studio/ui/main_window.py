@@ -98,9 +98,7 @@ class MainWindow(QMainWindow):
         self.control_page = ControlPage(worker.submit, settings)
         self.status_page = StatusPage()
         self.plots_page = PlotsPage()
-        self.calibration_page = CalibrationPage(
-            worker.submit, worker.set_allow_factory, settings
-        )
+        self.calibration_page = CalibrationPage(worker.submit, settings)
         self.connect_bar = ConnectBar(worker.submit)
 
         self.alert_banner = Banner()
@@ -422,7 +420,6 @@ class MainWindow(QMainWindow):
         """The status bar's gate word, in the colour of the gate."""
         colour = {
             GateState.READY: theme.OK,
-            GateState.FACTORY: theme.WARN,
             GateState.BLOCKED: theme.ERROR,
         }[gate]
         self._status_gate.setText(

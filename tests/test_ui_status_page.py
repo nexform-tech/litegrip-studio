@@ -285,13 +285,6 @@ class TestTheGate:
         assert "阻断" in headline
         assert detail == "缺少标定文件"
 
-    def test_the_factory_gate_is_a_warning_rather_than_an_error(self, page) -> None:
-        """It is overridable and the operator has to acknowledge it; painting it
-        the same red as a hard block would spend the colour that means "stop"."""
-        page.set_gate(GateState.FACTORY, "正在使用出厂标定")
-
-        assert page.gate_alert[0] == "warn"
-
     def test_opening_the_gate_clears_the_banner(self, page) -> None:
         page.set_gate(GateState.BLOCKED, "缺少标定文件")
         page.set_gate(GateState.READY, READY_REASON)

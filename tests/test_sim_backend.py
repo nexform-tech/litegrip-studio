@@ -164,7 +164,7 @@ class TestItsOwnCalibration:
 
         assert info.provenance == PROVENANCE_USER
         assert info.motion_allowed
-        assert evaluate_gate(info, allow_factory=False)[0] is GateState.READY
+        assert evaluate_gate(info)[0] is GateState.READY
 
     def test_connecting_does_not_change_the_answer(self, tmp_path, monkeypatch) -> None:
         """The regression, in the environment where it bit hardest: no calibration
@@ -279,7 +279,7 @@ class TestItsOwnCalibration:
         info = sim.calibration_info()
         assert info.provenance == PROVENANCE_INVALID
         assert not info.motion_allowed
-        assert evaluate_gate(info, allow_factory=True)[0] is GateState.BLOCKED
+        assert evaluate_gate(info)[0] is GateState.BLOCKED
 
     def test_a_file_recording_the_other_ordering_is_applied(self, tmp_path) -> None:
         """The other order of the same two angles, and it is not a defect: the
@@ -352,14 +352,14 @@ class TestASavedProbeResultStopsBeingInMemory:
         sim.connect()
         pending = sim.set_calibration_memory(**self.PROBE, max_stroke_mm=120.0)
         assert pending.provenance == calibration.PROVENANCE_MEMORY
-        assert evaluate_gate(pending, allow_factory=False)[0] is GateState.BLOCKED
+        assert evaluate_gate(pending)[0] is GateState.BLOCKED
 
         sim.save_calibration()
 
         info = sim.calibration_info()
         assert info.provenance == PROVENANCE_USER
         assert info.path == str(path)
-        assert evaluate_gate(info, allow_factory=False)[0] is GateState.READY
+        assert evaluate_gate(info)[0] is GateState.READY
 
     def test_what_comes_back_is_what_the_file_holds(self, tmp_path) -> None:
         """Read back off the disk, not carried over from memory: a simulator
