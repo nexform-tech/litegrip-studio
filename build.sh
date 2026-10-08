@@ -45,9 +45,17 @@ cleanup() {
 trap cleanup EXIT
 
 # ── 版本戳 ───────────────────────────────────────────────────────────────────
-# base 号从 version.py 的 BASE_VERSION 提取，保持单一来源；这里生成的不是发布
-# 版本号，发布版本由 semantic-release 按提交历史算，git tag 才是唯一事实来源。
-BASE="$(sed -n 's/^BASE_VERSION *= *"\([^"]*\)".*/\1/p' src/litegrip_studio/version.py | head -1)"
+# base 号先问 git 最近的一个 v* tag，于是从 v0.8.2 构建出来的产物自称
+# 0.8.2.<提交数>+g<sha>.<日期>，一眼能对上是哪个发布；没有 tag 才退回 version.py
+# 的 BASE_VERSION（单一来源）。这里生成的都不是发布版本号，发布版本由
+# semantic-release 按提交历史算，git tag 才是唯一事实来源。
+#
+# 「|| true」不能少：脚本在 pipefail 下运行，而这个仓库/目录可能根本没有 tag，
+# 那样 git describe 返回非零，整个赋值就会把脚本打退。
+BASE="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null | sed 's/^v//' || true)"
+if [ -z "$BASE" ]; then
+    BASE="$(sed -n 's/^BASE_VERSION *= *"\([^"]*\)".*/\1/p' src/litegrip_studio/version.py | head -1)"
+fi
 BASE="${BASE:-0.0.0}"
 if git rev-parse --git-dir >/dev/null 2>&1; then
     COUNT="$(git rev-list --count HEAD 2>/dev/null || echo 0)"

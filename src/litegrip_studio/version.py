@@ -8,9 +8,11 @@ file is generated and not committed, so a source checkout has no stamp and says
 
 Neither number here is a release version.  Releases are automated by
 semantic-release from the commit history and the git tag is their only source of
-truth (AGENTS.md §3); ``BASE_VERSION`` is where the build stamp starts counting,
-and it is deliberately not read from ``pyproject.toml``, whose version field is a
-placeholder semantic-release owns.
+truth (AGENTS.md §3).  A build stamp starts from the nearest ``v*`` tag when the
+tree has one, so an artifact can be matched to a release at a glance;
+``BASE_VERSION`` is what it starts from when it does not.  It is deliberately not
+read from ``pyproject.toml``, whose version field is a placeholder
+semantic-release owns.
 
 There is no ``git`` fallback probe, unlike the sibling motor tool.  A source run
 can ask git directly, and a console that spawns a subprocess on every start to
@@ -20,8 +22,16 @@ has.
 
 from __future__ import annotations
 
-#: Where a build stamp starts.  Not a release number — see the module docstring.
-BASE_VERSION = "0.1.0"
+#: Where a build stamp starts when git has no ``v*`` tag to offer.  Not a release
+#: number — see the module docstring.
+#:
+#: ``0.0.0`` rather than a plausible-looking release: this used to be ``0.1.0``,
+#: which a source run reports as ``0.1.0+source``, and ``v0.1.0`` is a real tag
+#: in this repository.  A current checkout therefore read as the first release to
+#: anyone comparing versions across machines.  ``0.0.0`` is the same "no release
+#: yet" placeholder ``pyproject.toml`` uses, and it cannot collide with a tag
+#: semantic-release would ever write.
+BASE_VERSION = "0.0.0"
 
 #: Appended when there is no stamp, so a source run cannot be mistaken for a
 #: built artifact.  PEP 440 local version syntax, which is also what the stamp's
