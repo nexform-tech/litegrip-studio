@@ -74,6 +74,16 @@ git -C ../litegrip-python archive --format=tar NEW_SHA src/litegrip \
 git -C ../litegrip-python show NEW_SHA:LICENSE > src/litegrip/LICENSE
 ```
 
+**Do not** copy the checkout's working tree instead (`cp -r ../litegrip-python/src/litegrip src/`).
+A checkout sits on whatever branch it was last switched to, and an unmerged one carries unmerged
+data: on 2026-10-08 the checkout beside this repository was on `feat/gripper-work-stroke`, whose
+`factory_calibration.json` reads `0.0 / -1.651026 / 1.651026 / 52.69` and adds a `work_stroke_mm`
+the console ignores, rather than the `0.052071 / -1.357481 / 1.409552 / 61.01229326764816` the
+console falls back to and moves by. Extra keys are not refused, so copying that tree would have
+changed the fallback numbers on every machine with no user calibration, and nothing in the diff
+would have said so. `git archive NEW_SHA` cannot do that, which is why every step above names a
+commit.
+
 Then, in one commit:
 
 1. Update the commit and date in the table above.
