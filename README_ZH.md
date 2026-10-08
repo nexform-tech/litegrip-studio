@@ -218,7 +218,7 @@ sudo ip link set can0 up
   能区分。对真机意味着毫米读数系统性错掉而界面看不出来。
 - **SDK 不强制标定**。`connect()` / `enable()` 都不会自动加载。不加载就用
   `GripperConfig` 默认值 `pos_closed_rad=0.0 / pos_open_rad=1.14`，而实机标定值是
-  **闭合数值更大**（随 SDK vendor 进来的那份兜底是 `0.0 / -1.651`）。映射式
+  **闭合数值更大**（随 SDK vendor 进来的那份兜底是 `0.052071 / -1.357`）。映射式
   `mm = (pos_closed_rad - position_rad) * rad_to_mm` 方向**恰好相反**，会算出负毫米并
   朝错误方向顶到硬限位。
 - **`load_calibration()` 会覆盖 `kp` / `kd` / `grasp_torque_threshold`**，且字段读取

@@ -258,7 +258,7 @@ itself rather than trusting the SDK's return value:
 - **The SDK does not require a calibration.** Neither `connect()` nor `enable()` loads one. Without
   it you get `GripperConfig`'s defaults, `pos_closed_rad=0.0 / pos_open_rad=1.14`, whereas on real
   hardware the closed value is the **larger** one (the fallback vendored with the SDK has
-  `0.0 / -1.651`). The mapping `mm = (pos_closed_rad - position_rad) * rad_to_mm` then runs
+  `0.052071 / -1.357`). The mapping `mm = (pos_closed_rad - position_rad) * rad_to_mm` then runs
   **exactly backwards**, computing negative millimetres and driving into the hard stop.
 - **`load_calibration()` overwrites `kp` / `kd` / `grasp_torque_threshold`**, and reads its fields
   without protection: a bad file raises `KeyError`.
