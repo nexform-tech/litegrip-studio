@@ -559,8 +559,34 @@ moving at 20 mm/s was declared "position not changing over time" after 2.7 mm wh
 **87 % of the commanded speed**. With the corroboration, the same move completes.
 `tests/test_motion_fsm.py::TestWhetherAGapIsAnObstruction` pins both cases.
 
-A move that **carries** a force setpoint is the one exception to what the arrival timeout does. It
-exists to stop a position that is not converging, and a grip that is not converging has already
+### A grip is made where the gap detector is blind
+
+The gap is only integrated while the trajectory is at **cruise**, because during the acceleration
+ramp the plant legitimately lags its moving reference by a few millimetres — an artefact of
+accelerating, not of obstruction. A close leaves cruise `speed²/(2·acc) + TOL_MM` before its
+target: 1.2 mm at 25 mm/s, 3.5 mm at 50, because that is where it starts braking. Meet the object
+inside that last stretch and the primary detector has already stopped looking, which is where a
+grip on a stiff or a thin object is made.
+
+So a move that **carries** a force setpoint has **three** contact channels, and they cover each
+other: the gap, the measured torque (`CONTACT_TAU_NM`, and the only channel that works off an old
+reading — a torque is what the drive applied, whenever it was read), and **stillness** —
+`ProfileOutput.stalled`, the trajectory asking for motion for 0.1 s while the jaws deliver less
+than `STALL_RAD` of it. Stillness takes no account of speed, so it reaches the slow end where the
+torque channel cannot, and it costs one thing: the approach gain's press for those 0.1 s.
+
+The numbers come from the simulated plant. A 20 N grasp at 25 mm/s against an object 1 mm short of
+the closed stop pressed **9.2 N for 5.3 s** on the gap and torque channels alone — the gap blind
+for the reason above, and 9.2 N well under the 15 N the torque channel needs — and then jumped to
+the setpoint on the move deadline. With stillness it hands over in **0.25 s**. That press is
+`kd·v_ref`-dominated, so it is the speed slider that sets it, not the setpoint: 9.2 N at 20 mm/s,
+11.4 at 25, 18.8 at the 50 mm/s default.
+`tests/test_motion_fsm.py::TestAGraspThatMeetsItsObjectInTheLastMillimetre` pins the hand-over, the
+requirement that the reading be current (stillness in a cached position is not evidence), and that
+a free approach is not mistaken for contact.
+
+A move that **carries** a force setpoint is also the one exception to what the arrival timeout does.
+It exists to stop a position that is not converging, and a grip that is not converging has already
 reached the state it was aiming for: the feed-forward alone. Taking the position hold instead
 leaves the jaws with nothing but whatever the object's own stiffness offers at the pose they froze
 at, which on the bench is a grip that sags away from its setpoint a few seconds after it took hold.

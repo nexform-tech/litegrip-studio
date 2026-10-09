@@ -83,7 +83,11 @@ class ProfileOutput:
     """True once ``|err| <= tol``.  The caller decides when that counts."""
 
     stalled: bool
-    """True when the reference is at full speed but the jaws have not moved."""
+    """True when the trajectory has asked for motion for ``STALL_WINDOW`` ticks
+    in a row and the jaws have delivered less than ``STALL_RAD`` of it each
+    tick.  Deliberately *not* a claim that the reference is at cruise: what it
+    says is "we are asking and getting nothing", which holds whatever the speed,
+    and a force-carrying move reads it as contact."""
 
     lost_mm: float
     """Motion the reference asked for that the jaws did not deliver.

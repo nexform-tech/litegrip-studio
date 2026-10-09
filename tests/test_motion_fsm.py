@@ -922,14 +922,109 @@ class TestForceControl:
         assert fsm.params.force_n == 0.0
 
 
+class TestAGraspThatMeetsItsObjectInTheLastMillimetre:
+    """The stretch where the primary detector has already stopped looking.
+
+    The lost-motion gap only integrates while the trajectory is at cruise, and a
+    close starts braking ``speed²/(2·acc) + TOL_MM`` before its target — 1.2 mm
+    at 25 mm/s, 3.5 at 50.  An object inside that stretch stops the jaws with
+    the gap detector blind and the torque channel needing 15 N, more than the
+    approach gain presses with, so the set force used to arrive on the move
+    deadline and nowhere sooner.  Measured at ``de6c8c6``: a 20 N grasp at
+    25 mm/s against an object 1 mm short of the closed stop pressed 9.2 N for
+    5.3 s and then jumped to the setpoint.  That 5.3 s is what these tests are
+    about, and it is why stillness is a contact channel of its own.
+    """
+
+    SPEED_MM_S = 25.0
+    SETPOINT_N = 20.0
+    OBJECT_MM = 1.0
+
+    def grasp_the_object(self, rig) -> tuple[float, float]:
+        """Close on the object; return the travel time and the move deadline."""
+        rig.fsm.set_speed(self.SPEED_MM_S)
+        assert rig.open()
+        start_mm = rig.position_mm
+        rig.sim.inject(obj_mm=self.OBJECT_MM)
+        rig.fsm.grasp(self.SETPOINT_N)
+        return (
+            (start_mm - self.OBJECT_MM) / self.SPEED_MM_S,
+            rig.fsm._move_deadline(start_mm),
+        )
+
+    def test_the_grip_arrives_with_the_jaws_not_with_the_deadline(self, rig) -> None:
+        travel_s, deadline_s = self.grasp_the_object(rig)
+
+        ticks = 0
+        while rig.fsm.state is not MotionState.HOLD_FORCE:
+            rig.tick()
+            ticks += 1
+            assert ticks * DT < deadline_s, "the deadline ended the grasp, not contact"
+
+        assert ticks * DT < travel_s + 0.5, (
+            f"the jaws meet the object at {travel_s:.2f}s and the grip must follow "
+            f"within a fraction of a second, not at {ticks * DT:.2f}s"
+        )
+        rig.run(0.5)
+        assert rig.force_n == pytest.approx(self.SETPOINT_N, abs=0.8)
+
+    def test_a_stale_reading_may_not_make_the_claim_and_a_fresh_one_may(self, rig) -> None:
+        """Stillness is a claim about now, like the lost-motion gap.
+
+        The reading in hand is a cache, and a console that has heard nothing
+        from the link for a while is looking at jaws it last saw some frames
+        ago.  What it must not do is read the stillness of that cache as an
+        object; what it must do the moment the link answers again is grip.
+        """
+        travel_s, _ = self.grasp_the_object(rig)
+
+        for _ in range(int(round((travel_s + 1.0) / DT))):
+            rig.tick(telemetry_current=False)
+        assert rig.fsm.state is MotionState.SERVO, (
+            "a stale reading decided the jaws were held"
+        )
+
+        ticks = 0
+        while rig.fsm.state is not MotionState.HOLD_FORCE:
+            rig.tick()
+            ticks += 1
+            assert ticks * DT < 0.5, "a reading that describes now must be enough"
+        rig.run(0.5)  # let the feed-forward ramp reach the setpoint
+        assert rig.force_n == pytest.approx(self.SETPOINT_N, abs=0.8)
+
+    def test_a_free_approach_is_not_read_as_a_contact(self, rig) -> None:
+        """The other half of the same channel: jaws that are travelling.
+
+        Nothing is in the way, so the trajectory is being followed and the stall
+        counter must stay quiet, however long the travel — a grip that engaged
+        early would close at the feed-forward alone instead of at the slider's
+        speed.
+        """
+        rig.fsm.set_speed(self.SPEED_MM_S)
+        assert rig.open()
+        rig.sim.inject(obj_mm=60.0)
+        rig.fsm.grasp(self.SETPOINT_N)
+
+        rig.run(0.5)  # twelve millimetres in, the object is still twelve away
+        assert rig.fsm.state is MotionState.SERVO
+        assert rig.position_mm > 60.0
+
+        assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=2.0), rig.fsm.note
+        rig.run(0.5)
+        assert rig.force_n == pytest.approx(self.SETPOINT_N, abs=0.8)
+
+
 class TestTimeout:
-    """The deadline is the third and last of the three "it is not moving" guards.
+    """The deadline is the last of the "it is not moving" guards.
 
     A frozen axis trips the stall counter in 0.1 s; a jam met at cruise speed
-    trips lost-motion contact detection in about 20 ms.  What is left is a move
-    that never reaches cruise — so contact detection cannot see it — and that
-    moves more than the stall threshold counts as progress.  That is the case
-    these tests construct, because it is the only one the deadline is for.
+    trips lost-motion contact detection in about 20 ms; and a force-carrying
+    move has both — the gap detector where it is blind, and the stall counter
+    everywhere else (see
+    ``TestAGraspThatMeetsItsObjectInTheLastMillimetre``).  What is left is a
+    move that creeps: it keeps delivering more than the stall counter counts as
+    movement, so it never looks held, and it never arrives either.  That is the
+    case these tests construct, because it is the only one the deadline is for.
     """
 
     def test_a_move_that_never_converges_stops_and_reports_it(self) -> None:

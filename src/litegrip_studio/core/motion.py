@@ -377,14 +377,32 @@ class MotionFSM:
         # switch to pure torque instead of pushing — see the module docstring
         # for why the freeze and the zero position gain are both required.
         #
-        # The lost-motion half of the test is a claim about *now*, and a reading
-        # that arrived some frames ago cannot make it: a cached position
+        # Three channels, because no one of them covers a close on its own: the
+        # lost-motion gap, the measured torque, and stillness.
+        #
+        # The lost-motion gap is the primary one, but it only integrates at
+        # cruise, and the profile leaves cruise `speed²/(2·acc) + TOL_MM` before
+        # its target — 1.2 mm at 25 mm/s, 3.5 at 50.  An object that stops the
+        # jaws inside that last stretch is met by a detector that has stopped
+        # looking, and that is where most grips are made.  Stillness covers it,
+        # and it needs no speed: the trajectory has been asking for motion for
+        # STALL_WINDOW ticks and the jaws have delivered none of it.
+        #
+        # The two position-based channels are claims about *now*, and a reading
+        # that arrived some frames ago cannot make them: a cached position
         # accumulates the gap at the reference speed while the jaws travel
         # perfectly well, and the velocity in that same stale frame is zero, so
         # nothing downstream can veto it.  The torque channel needs no such
         # guard — a torque is what the drive is applying, whenever it was read.
-        contact = (out.contact and telemetry_current) or (
-            self._force_n > 0.0 and abs(telemetry.torque_nm) >= constants.CONTACT_TAU_NM
+        contact = (
+            (out.contact and telemetry_current)
+            or (
+                self._force_n > 0.0
+                and (
+                    abs(telemetry.torque_nm) >= constants.CONTACT_TAU_NM
+                    or (out.stalled and telemetry_current)
+                )
+            )
         )
         if contact:
             if self._force_n > 0.0:

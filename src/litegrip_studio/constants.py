@@ -102,19 +102,41 @@ GRASP_STALL_CYCLES = 20
 # longer travel clamps at its own top, so the move is short rather than refused.
 RELEASE_OPEN_MM = 10.0
 
-# Contact detection for a force-carrying move, in two independent channels.
+# Contact detection for a force-carrying move, in three independent channels.
 #
 # ``CONTACT_LOST_MM`` is the primary detector and needs no hardware knowledge:
 # the trajectory integrates the path it *would* have taken and compares it with
 # where the jaws actually are, so a growing gap means something is in the way.
 # The threshold is above the worst tracking lag of a free move (about 0.4 mm at
 # full acceleration) and small enough to catch contact within 20 ms at speed.
+#
+# "At speed" is the catch, and the reason a force-carrying move does not rest on
+# this channel alone: the gap only integrates while the trajectory is at cruise,
+# and a close leaves cruise ``speed²/(2·acc) + TOL_MM`` before its target — 1.2
+# mm at 25 mm/s, 3.5 at 50 — because that is where it starts braking.  Meet the
+# object inside that last stretch and the primary detector is blind, which is
+# where a grip on a stiff or a thin object is actually made.  Measured on the
+# simulated plant: a 20 N grasp at 25 mm/s, object 0.9 mm short of the closed
+# stop, pressed at the approach gain's 9.2 N (below ``CONTACT_TAU_NM``, so that
+# channel could not see it either) for 5.3 s, and only the move deadline handed
+# the setpoint over.  That is an operator's "it goes to 11 N, sits there, then
+# jumps to 20 N" — and the 5.3 s is the whole of what was wrong with it.
+#
+# So stillness is the third channel, and it is the one that takes no account of
+# speed at all: ``ProfileOutput.stalled`` — the trajectory has asked for motion
+# for ``STALL_WINDOW`` ticks and the jaws have delivered less than ``STALL_RAD``
+# of it each tick.  It costs ``STALL_WINDOW`` ticks of the approach gain's press
+# before the hand-over (0.1 s at the control rate, against 5.3 above), and like
+# the lost-motion channel it is a claim about *now*, so it needs a fresh reading
+# — see ``CONTACT_FRESH_MS``.
 CONTACT_LOST_MM = 1.0
 
 # ``CONTACT_TAU_NM`` is the fast path for a hard object met at low speed, where
-# the lost-motion gap accumulates slowly.  It sits above the ~0.6 Nm the
-# mechanism draws merely to accelerate itself, which is what stops it firing at
-# the start of every move — the reason it is not the primary detector.
+# the lost-motion gap accumulates slowly — and, being a torque, the only channel
+# that works off a stale reading.  It sits above the ~0.6 Nm the mechanism draws
+# merely to accelerate itself, which is what stops it firing at the start of
+# every move — the reason it is not the primary detector, and also why it cannot
+# see a press lighter than 15 N.
 CONTACT_TAU_NM = 1.5
 
 # On a *plain* move the lost-motion gap above is a model, and on its own it is
@@ -213,9 +235,20 @@ CONTACT_FRESH_MS = 30.0
 
 # Position gain while closing under a force setpoint.  Deliberately far below
 # KP_MOVE: whatever gain is in force during the approach becomes the squeeze
-# applied before contact is noticed (``kp`` × the lost-motion threshold), so a
-# stiff gain would put a spike through the setpoint on every grasp.  At the
-# values above that pre-contact squeeze is ~4 N, regardless of the setpoint.
+# applied before contact is noticed, so a stiff gain would put a spike through
+# the setpoint on every grasp.
+#
+# That squeeze is the whole of the frame's position and velocity terms, and the
+# velocity term is the larger one: with the jaws held, ``dq≈0`` and the damping
+# term becomes ``kd·v_ref``, so the press is set by the *speed slider*, not by
+# the setpoint.  Measured on the simulated plant with the default ``kd`` of 2.0:
+# 9.2 N at 20 mm/s, 11.4 at 25, 18.8 at the 50 mm/s default — against the ~0.5 N
+# the position term contributes.  It is a press for the fraction of a second it
+# takes to notice the jaws have stopped and no longer, which is what
+# ``CONTACT_LOST_MM`` and ``STALL_WINDOW`` between them bound; a lower ``kd`` is
+# not the fix for the number, because the same term is what makes the approach
+# track the slider at all (at ``kd`` 1.0 a force-carrying move trips lost-motion
+# contact 0.2 s in, on nothing, and then drives at the feed-forward).
 KP_GRASP_APPROACH = 25.0
 
 # Torque feed-forward is ramped in over this long rather than stepped.  A step
