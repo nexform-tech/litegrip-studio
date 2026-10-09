@@ -36,6 +36,17 @@ PLOT_HZ = 25
 
 # ── Motion ──────────────────────────────────────────────────────────────────
 # Speed range/default follow litearm-studio's gripper panel (5–150, default 50).
+#
+# The floor is not only a UI nicety: it also bounds the press cap of a
+# force-carrying approach (``MotionFSM._press_cap_mm_s``).  A small setpoint
+# wants a speed below it — 1 N works out at 2.0 mm/s — and the profile raises
+# that back to the floor.  Do not lower it to chase such a setpoint: measured on
+# the simulated plant, an empty close run at or below 2.5 mm/s hands over in
+# 0.1 s with the jaws still at the open stop, or stalls partway, because the
+# drive's stiction holds them still and the stillness channel reads that as
+# contact; only from 3.5 mm/s does it reach the object.  The cost of the floor is
+# that a setpoint under about 2.6 N is pressed at the floor's own ~2.5 N rather
+# than at its own.
 SPEED_MIN_MM_S = 5.0
 SPEED_MAX_MM_S = 150.0
 SPEED_DEFAULT_MM_S = 50.0

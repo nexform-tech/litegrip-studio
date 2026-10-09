@@ -206,6 +206,22 @@ rather than a jump. The rate is the constant on purpose — a ramp specified as 
 steepest in its first tick, which is a step with a slow tail, and the mechanism answers a step with
 a lurch.
 
+A grasp is two frames, not one, and the force plot draws both. Until the jaws meet something the
+approach is a **position** frame carrying the slider's speed and `tau_ff = 0`: the console commands
+no force at all, and the drive computes `kp·(q_cmd−q) + kd·(dq_cmd−dq)` itself. That torque is the
+first rise on the plot, and it is set by the *speed*, not the setpoint — a 5 N and a 30 N grasp run
+at the same speed press by the same amount. So a force-carrying approach is not run faster than the
+press its setpoint allows: above the speed whose own press *is* the setpoint, the approach is capped
+there, and the contact peaks at the setpoint instead of past it. A *plain* move carries no setpoint
+and keeps the slider's speed. The second rise is the ramp above, from that press to the setpoint.
+Two rises on the plot are expected, then; only the first was ever unbounded, and it no longer is.
+
+Do not lower `SPEED_MIN_MM_S` to chase a very small setpoint. The cap for a 1 N grasp is 2.0 mm/s,
+and the profile raises it back to the 5 mm/s floor — on purpose: measured on the plant, an empty
+close at or below 2.5 mm/s stalls and the stillness channel reads that as contact, handing over with
+the jaws still at the open stop. The floor bounds the cap, so a setpoint under about 2.6 N is pressed
+at the floor's own ~2.5 N rather than its own.
+
 Each end of the slider has a **one-press** button, placed next to the end it drives:
 
 | Button | Command | Where it goes |
