@@ -447,8 +447,30 @@ class MotionFSM:
         # perfectly well, and the velocity in that same stale frame is zero, so
         # nothing downstream can veto it.  The torque channel needs no such
         # guard — a torque is what the drive is applying, whenever it was read.
+        #
+        # A force-carrying move takes the lost-motion gap only when the jaws
+        # have actually stopped, for the reason the plain move below is
+        # corroborated the same way: the gap is a model, and a mechanism with
+        # friction to spare lags it while travelling perfectly well.  A force
+        # move is the more exposed of the two, not the less — it is given no
+        # lead (``SpeedProfile.step``), so the push behind the approach is the
+        # tick's own ``kp·v·dt`` and any friction eats into it, which is what
+        # sets the tracking lag and grows the gap.  Uncorroborated, the gap
+        # reaches ``CONTACT_LOST_MM`` while the jaws are still in free travel,
+        # the grip is declared at a pose the object is nowhere near, force mode
+        # then drives them the rest of the way at the ramp's rate rather than the
+        # slider's, and ``放开`` — which measures from the pose the grip was made
+        # at — opens all of that again.  Measured on the simulated unit at the
+        # slider's slow end, 0.05 Nm of Coulomb friction at 10 mm/s: the grip was
+        # made 35.4 mm short of the object, the force phase peaked at 115 mm/s
+        # against a 10 mm/s slider, and the release ran to the open stop, 45 mm
+        # clear.  A real obstruction is unaffected — the jaws are held against
+        # something, so their speed collapses against whatever was asked of them
+        # — and one that creeps instead of stopping is left to the stall counter
+        # and the move deadline, both unchanged.
+        stopped = self._jaws_have_stopped(telemetry, out.vel_mm_s)
         contact = (
-            (out.contact and telemetry_current)
+            (out.contact and telemetry_current and (self._force_n <= 0.0 or stopped))
             or (
                 self._force_n > 0.0
                 and (
@@ -461,7 +483,7 @@ class MotionFSM:
             if self._force_n > 0.0:
                 self.hold_force(self._force_n, pos_mm, source=self.source)
                 return self._force_frame(backend, pos_mm, telemetry, dt, "contact")
-            if self._jaws_have_stopped(telemetry, out.vel_mm_s):
+            if stopped:
                 self._stall_reported = True
                 self.hold(pos_mm)
                 self._note = "堵转：位置未随时间变化"

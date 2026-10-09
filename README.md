@@ -580,16 +580,26 @@ asked for — accumulates the same 1 mm while **moving perfectly normally**, and
 fault rather than a safety measure: what the operator sees is "it moves twice and stops", not the
 position they dragged to.
 
-So for a plain position move (no force setpoint) the 1 mm also needs **corroboration** before it
-counts as contact: the measured speed below 25 % of the reference speed (`CONTACT_STILL_RATIO`).
-Because the test is a **ratio** and not an absolute speed it holds at 5 mm/s and at 150 mm/s alike;
-a real obstruction collapses the speed and is still caught, and a mechanism that genuinely does not
-move is caught by the stall counter and the **arrival timeout**, neither of which changed.
+So the 1 mm also needs **corroboration** before it counts as contact, on any move: the measured
+speed below 25 % of the reference speed (`CONTACT_STILL_RATIO`). Because the test is a **ratio**
+and not an absolute speed it holds at 5 mm/s and at 150 mm/s alike; a real obstruction collapses
+the speed and is still caught, and a mechanism that genuinely does not move is caught by the stall
+counter and the **arrival timeout**, neither of which changed. A move that carries a force setpoint
+leans on that corroboration hardest: it is given no `lead`, so the push behind its approach is the
+tick's own `kp·v·dt` and whatever friction eats into that shows up as tracking lag, for the gap to
+integrate.
 
 The number has a measured origin: in the simulation, a mechanism with 0.3 Nm of Coulomb friction
 moving at 20 mm/s was declared "position not changing over time" after 2.7 mm while travelling at
-**87 % of the commanded speed**. With the corroboration, the same move completes.
-`tests/test_motion_fsm.py::TestWhetherAGapIsAnObstruction` pins both cases.
+**87 % of the commanded speed**. With the corroboration, the same move completes. The same defect
+reaches the operator as "at low speed the jaws race to the grasp position, and 放开 does not open
+1 cm": 0.05 Nm of Coulomb friction — five times what the simulated unit's own free travel draws —
+at 10 mm/s hands the grip over **35.4 mm short of the object**, force mode then drives the jaws at
+up to **115 mm/s** against that 10 mm/s slider, and 放开, which opens from the pose the grip was
+made at, runs to the open stop, **45 mm clear** of the object. With the corroboration the grip is
+made at the object and 放开 opens `RELEASE_OPEN_MM`.
+`tests/test_motion_fsm.py::TestWhetherAGapIsAnObstruction` and `TestAGraspAtTheSlidersSlowEnd` pin
+both cases.
 
 ### A grip is made where the gap detector is blind
 

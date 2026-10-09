@@ -1331,6 +1331,82 @@ class TestTheTwoRisesAGraspPutsOnThePlot:
         assert rig.fsm.profile.speed_mm_s == constants.SPEED_MIN_MM_S
 
 
+class TestAGraspAtTheSlidersSlowEnd:
+    """A free approach that lags its reference must not be read as a contact.
+
+    The other half of the lost-motion gap, and the one a force move is *more*
+    exposed to than a plain one: a force-carrying approach is given no lead, so
+    the push behind it is the tick's own ``kp·v·dt`` and whatever friction eats
+    into that shows up as tracking lag, which the gap integrates.  On a
+    mechanism with friction to spare the gap therefore reaches
+    ``CONTACT_LOST_MM`` in free travel, and the grip is made at a pose the object
+    is nowhere near.
+
+    The friction here is deliberately modest — five times what the simulated
+    unit's own free travel draws (``test_plant``), where the plain move's own
+    friction tests go to a hundred times.  It is not an extreme mechanism that
+    fails; it is an ordinary one at the slow end of the slider, which is where a
+    careful operator works.
+
+    Measured at ``e078d72`` with the same numbers: the grip was made 35.4 mm
+    short of the object, the force phase drove the jaws at up to 115 mm/s
+    against a 10 mm/s slider, and ``放开`` — which opens from the pose the grip
+    was made at — ended 45 mm clear of the object, hard against the open stop.
+    """
+
+    #: Five times the plant's own free-travel friction; see ``test_plant``.
+    FRICTION_NM = 0.05
+    SPEED_MM_S = 10.0
+    SETPOINT_N = 5.0
+    OBJECT_MM = 40.0
+
+    def _grasp(self, coulomb: float | None = None) -> Rig:
+        rig = Rig(
+            config=PlantConfig(
+                coulomb=self.FRICTION_NM if coulomb is None else coulomb
+            )
+        )
+        rig.fsm.set_speed(self.SPEED_MM_S)
+        assert rig.open()
+        rig.sim.inject(obj_mm=self.OBJECT_MM)
+        rig.fsm.grasp(self.SETPOINT_N)
+        return rig
+
+    def test_the_grip_is_made_where_the_object_is(self) -> None:
+        """The hand-over pose is the object, not wherever the gap ran out."""
+        rig = self._grasp()
+
+        assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=30.0), rig.fsm.note
+        assert rig.fsm.grip_mm == pytest.approx(
+            self.OBJECT_MM, abs=constants.TOL_MM + 0.5
+        ), f"the grip froze at {rig.fsm.grip_mm:.2f} mm, not at the object"
+
+    def test_the_release_opens_the_distance_it_promises(self) -> None:
+        """``放开`` opens ``RELEASE_OPEN_MM`` from the object, not from a grip
+        point the object was never at."""
+        rig = self._grasp()
+        assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=30.0), rig.fsm.note
+        rig.run(constants.FORCE_MAX_N / constants.FORCE_RAMP_N_S + 0.5)
+
+        base = max(rig.position_mm, rig.fsm.grip_mm or rig.position_mm)
+        rig.fsm.move_to_mm(base + constants.RELEASE_OPEN_MM, "back_off")
+        assert rig.run_until(MotionState.HOLD, timeout_s=30.0), rig.fsm.note
+
+        assert rig.position_mm == pytest.approx(
+            self.OBJECT_MM + constants.RELEASE_OPEN_MM, abs=constants.TOL_MM + 0.5
+        ), f"the release ended at {rig.position_mm:.2f} mm"
+
+    def test_a_mechanism_without_the_friction_still_reaches_the_object(self) -> None:
+        """The control: the plant's own free travel is light enough that the jaw
+        tracks its reference, and that case must not change."""
+        rig = self._grasp(coulomb=0.01)
+
+        assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=30.0), rig.fsm.note
+        assert rig.fsm.grip_mm == pytest.approx(
+            self.OBJECT_MM, abs=constants.TOL_MM + 0.5
+        )
+
+
 class TestWhatAHeldGripRemembersAboutWhereItWasMade:
     """The pose a grip *froze* at, which is not the pose the jaws are in.
 
