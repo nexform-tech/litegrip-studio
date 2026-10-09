@@ -199,6 +199,13 @@ arrived. One consequence is worth knowing before **Let go**: with nothing holdin
 was made at, the setpoint is reached by driving the jaws a little further *into* the object, so they
 hold it from a position that is not quite where they met it.
 
+Nor is the setpoint switched on. The torque climbs to it at `FORCE_RAMP_N_S`, 20 newtons per second,
+starting from the torque already in flight: a grasp that met its object and handed over at the ~10 N
+the approach had pressed with reaches 20 N half a second later, as a rise the operator can watch
+rather than a jump. The rate is the constant on purpose — a ramp specified as a *time* is at its
+steepest in its first tick, which is a step with a slow tail, and the mechanism answers a step with
+a lurch.
+
 Each end of the slider has a **one-press** button, placed next to the end it drives:
 
 | Button | Command | Where it goes |

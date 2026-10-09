@@ -856,7 +856,10 @@ class TestForceControl:
         rig.sim.inject(obj_mm=60.0)
         rig.fsm.grasp(force_n)
         assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=15.0), rig.fsm.note
-        rig.run(0.5)
+        # The grip climbs to its setpoint at FORCE_RAMP_N_S from wherever the
+        # approach left it, so the settle is the whole climb plus the plant's own
+        # settling — from zero, and never longer than this.
+        rig.run(constants.FORCE_MAX_N / constants.FORCE_RAMP_N_S + 0.5)
 
         assert rig.force_n == pytest.approx(force_n, abs=0.8)
         assert rig.position_mm > 55.0
@@ -881,13 +884,60 @@ class TestForceControl:
         term fight the rebound — it spiked a 40 N grip to 56 N."""
         fsm, backend = servo(start_mm=60.0)
         fsm.hold_force(40.0, 60.0)
-        outs = run_ticks(fsm, backend, 80)
+        outs = run_ticks(fsm, backend, 500)
         target = clamp_force_torque(40.0)
 
         assert outs[0].tau_nm < target * 0.2, "the first frame must not be a step"
         assert outs[-1].tau_nm == pytest.approx(target, rel=0.02)
         for prev, cur in zip(outs, outs[1:]):
             assert cur.tau_nm >= prev.tau_nm - 1e-12, "the ramp must be monotone"
+
+    def test_the_torque_climbs_at_one_rate_wherever_it_starts(self) -> None:
+        """The bench report: a step, not a climb.
+
+        A 20 N grasp that met its object jumped to the setpoint the moment force
+        mode took over.  The ramp it jumped on was exponential with a 0.05 s time
+        constant, so it covered 63% of the distance in 50 ms and 95% in 150, and
+        its *first* tick was its largest move — a step with a slow tail.  A fixed
+        rate in newtons per second is what makes the climb even, and it has to
+        start from the torque already in flight: a hand-over that restarted the
+        ramp from zero would step *down* to the press it was meant to continue.
+        """
+        step_nm = constants.FORCE_RAMP_N_S * DT / constants.NM_TO_N
+        target = clamp_force_torque(20.0)
+        for pressed_nm in (0.0, 1.0, 1.9):
+            fsm, backend = servo(start_mm=60.0)
+            backend.torque_nm = pressed_nm
+            fsm.hold_force(20.0, 60.0)
+            outs = run_ticks(fsm, backend, 400)
+            reached = next(i for i, o in enumerate(outs) if o.tau_nm == target)
+
+            assert outs[0].tau_nm == pytest.approx(pressed_nm + step_nm)
+            steps = [b.tau_nm - a.tau_nm for a, b in zip(outs[:reached], outs[1 : reached + 1])]
+            assert steps, "the ramp must climb"
+            assert all(s == pytest.approx(step_nm) for s in steps), (
+                "every climbing tick adds the same torque"
+            )
+            assert outs[-1].tau_nm == target, "it lands on the setpoint and stays"
+
+    def test_a_press_of_ten_newtons_climbs_to_twenty_in_half_a_second(self) -> None:
+        """The same climb in the units the operator works in.
+
+        Ten newtons is what the approach gain has pressed with when a grasp hands
+        over, so this is the crossing the bench watches: half a second of force
+        rising evenly, not a jump.
+        """
+        fsm, backend = servo(start_mm=60.0)
+        backend.torque_nm = torque_from_force(10.0)
+        fsm.hold_force(20.0, 60.0)
+        outs = run_ticks(fsm, backend, 400)
+
+        reached = next(i for i, o in enumerate(outs) if o.tau_nm == clamp_force_torque(20.0))
+        assert reached * DT == pytest.approx(0.5, abs=2 * DT)
+        # Linear in *time*: halfway through the climb is halfway up it.  The
+        # exponential this replaced would be at 19.9 N here.
+        midway = outs[reached // 2].tau_nm * constants.NM_TO_N
+        assert midway == pytest.approx(15.0, abs=0.2)
 
     def test_a_held_force_does_not_read_the_measured_velocity(self) -> None:
         """The frame a force hold sends must not depend on how fast the jaws
@@ -1155,7 +1205,10 @@ class TestTimeout:
             state["n"] += 1
             b.mm = 0.05 if state["n"] % 2 else 0.0
 
-        ticks = int(round((constants.STALL_TIMEOUT_MIN_S + 0.5) / DT))
+        # Past the deadline, then long enough for the grip to climb the whole way
+        # to its setpoint at FORCE_RAMP_N_S.
+        settle_s = constants.FORCE_MAX_N / constants.FORCE_RAMP_N_S + 0.5
+        ticks = int(round((constants.STALL_TIMEOUT_MIN_S + settle_s) / DT))
         run_ticks(fsm, backend, ticks, on_tick=buzz)
 
         assert fsm.state is MotionState.HOLD_FORCE

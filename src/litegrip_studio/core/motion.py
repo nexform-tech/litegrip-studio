@@ -9,7 +9,7 @@ block inside ``control_mit_stream`` with no abort hook.
 Force semantics
 ---------------
 A force setpoint is a torque feed-forward, and two things make it mean what it
-says.
+says.  A third decides what the mechanism does on the way there.
 
 **The frame carries no gains at all.**  ``kp=0`` and ``kd=0``, so the only
 torque in it is the feed-forward.  A MIT gain is a torque that depends on
@@ -30,6 +30,14 @@ the pose the jaws were in when force mode was entered, clamped to the calibrated
 travel, so an advancing reference cannot grow a position term without bound as
 it did when the SDK's reference kept moving past a blocked object (a 40 N
 setpoint delivered 59 N there).
+
+**It arrives at the setpoint at a fixed rate.**  The feed-forward climbs to the
+setpoint in newtons per second rather than being stepped to it, so the operator
+watches the force rise and stop rather than seeing it jump — see
+:data:`~litegrip_studio.constants.FORCE_RAMP_N_S`.  Entering force mode the ramp
+continues from the torque already in flight, so the hand-over from an approach is
+continuous: the press the approach gain had established is where the climb
+starts, and it is the *rate* that is chosen, not the duration.
 
 What is left is open-loop, and that is the price: the jaws can be pushed off the
 object by hand, and an empty grasp drives on to the mechanical stop at the
@@ -102,6 +110,18 @@ class MotionParams:
     force_n: float = constants.FORCE_DEFAULT_N
     kp: float = constants.KP_MOVE
     kd: float = constants.KD_DEFAULT
+
+
+def _toward(value: float, target: float, step: float) -> float:
+    """Move ``value`` towards ``target`` by at most ``step``, and land on it.
+
+    Landing on the target rather than near it is the point: a ramp that keeps
+    adding a fraction of the remaining distance never arrives, and a held force
+    is read by the operator as the number it settles at.
+    """
+    if value < target:
+        return min(value + step, target)
+    return max(value - step, target)
 
 
 class MotionFSM:
@@ -606,18 +626,20 @@ class MotionFSM:
         docstring for why every gain costs that equality, and for the SDK's #29
         reaching the same answer from ``hold_kp=150``/``hold_kd=2``.
 
-        The torque is ramped rather than stepped, which is what keeps the
-        fingers from bouncing off what they just touched: a *step* into a
-        contact is an impulse through the mechanism, and at 40 N it spiked the
-        grip to 56 N.  Entering force mode, the ramp continues from the torque in
-        flight, so the transition is continuous.
+        The torque is ramped to the setpoint at a fixed rate in newtons per
+        second, which is what keeps the fingers from bouncing off what they just
+        touched and what makes the force climb evenly instead of arriving in a
+        jump: a *step* into a contact is an impulse through the mechanism, and at
+        40 N it spiked the grip to 56 N.  Entering force mode the ramp continues
+        from the torque in flight, so the transition is continuous, and it lands
+        exactly on the setpoint rather than near it.  See
+        ``constants.FORCE_RAMP_N_S``.
 
         This is also why the force displayed during a *free* move is not zero:
         a braking torque is a real motor torque.  Only the settled value after
         the ramp is the grip force.
         """
         target = clamp_force_torque(self._force_n)
-        alpha = min(dt / constants.FORCE_RAMP_S, 1.0)
         if self._tau_cmd is None:
             # Entering force mode: continue from the torque in flight so the
             # transition is continuous.
@@ -625,7 +647,13 @@ class MotionFSM:
                 telemetry.torque_nm if abs(telemetry.torque_nm) < abs(target) else target
             )
 
-        self._tau_cmd += (target - self._tau_cmd) * alpha
+        # A fixed rate in newtons per second, so the force climbs evenly and
+        # stops at the setpoint.  Everything about the approach to the setpoint
+        # is here — see ``constants.FORCE_RAMP_N_S`` for what a step does to the
+        # mechanism, and for why an exponential with a short time constant is
+        # one.
+        step_nm = constants.FORCE_RAMP_N_S * dt / constants.NM_TO_N
+        self._tau_cmd = _toward(self._tau_cmd, target, step_nm)
 
         return self._send(backend, hold_mm, 0.0, 0.0, 0.0, self._tau_cmd, 0.0, note)
 

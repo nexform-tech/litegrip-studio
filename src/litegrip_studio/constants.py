@@ -256,13 +256,29 @@ CONTACT_FRESH_MS = 30.0
 # contact 0.2 s in, on nothing, and then drives at the feed-forward).
 KP_GRASP_APPROACH = 25.0
 
-# Torque feed-forward is ramped in over this long rather than stepped.  A step
-# into a contact is an impulse through the mechanism, and the fingers bounce off
-# what they just touched — with a velocity gain in the frame that bounce was
-# fought by a damping torque too, which spiked a 40 N grip to 56 N.  The gains
-# are gone (`MotionFSM._force_frame` sends the feed-forward alone), and the
-# ramp stays: the bounce is the mechanism's own, not the gain's.
-FORCE_RAMP_S = 0.05
+# A held force is ramped to its setpoint at this many newtons per second rather
+# than stepped to it, or ramped exponentially.  A step into a contact is an
+# impulse through the mechanism, and the fingers bounce off what they just
+# touched — with a velocity gain in the frame that bounce was fought by a
+# damping torque too, which spiked a 40 N grip to 56 N.  The gains are gone
+# (`MotionFSM._force_frame` sends the feed-forward alone) and the ramp stays:
+# the bounce is the mechanism's own, not the gain's.
+#
+# An exponential with a 0.05 s time constant is a step as far as the mechanism
+# is concerned.  It covers 63% of the distance in 50 ms and 95% in 150, at a
+# rate that is highest at the first tick and decays from there — so the frame
+# still leads with an impulse, and gets there by slowing down rather than by
+# arriving evenly.  Measured on the bench, a 20 N grasp went from the ~10 N the
+# approach had pressed with to the setpoint in one jump the operator could see,
+# and the console's own log recorded the jaws 5.6 mm further in than the pose
+# the grip was made at by the time they let go two seconds later.
+#
+# At this rate the hand-over from a grasp — about ten newtons of press — reaches
+# a 20 N setpoint in half a second, and a setpoint moved to at most the rated
+# 40 N takes two.  A rate is what makes the force climb evenly and stop at the
+# setpoint rather than arriving at it; it is one number, and it is the whole of
+# the choice.
+FORCE_RAMP_N_S = 20.0
 
 # ── Stroke ──────────────────────────────────────────────────────────────────
 #: The travel of the gripper this console drives, in millimetres.

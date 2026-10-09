@@ -1601,7 +1601,7 @@ class TestOpeningFurtherToLetGo:
         bench.backend.inject(obj_mm=self.OBJECT_MM)
         bench.send(cmd.Grasp(force_n=self.SETPOINT_N))
         self._until(bench, MotionState.HOLD_FORCE)
-        bench.tick(300)  # the feed-forward ramps over FORCE_RAMP_S
+        bench.tick(300)  # the feed-forward ramps at FORCE_RAMP_N_S
         made_at = bench.loop.motion.grip_mm
         assert made_at is not None
         return made_at
