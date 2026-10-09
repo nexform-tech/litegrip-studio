@@ -209,12 +209,15 @@ a lurch.
 A grasp is two frames, not one, and the force plot draws both. Until the jaws meet something the
 approach is a **position** frame carrying the slider's speed and `tau_ff = 0`: the console commands
 no force at all, and the drive computes `kp·(q_cmd−q) + kd·(dq_cmd−dq)` itself. That torque is the
-first rise on the plot, and it is set by the *speed*, not the setpoint — a 5 N and a 30 N grasp run
-at the same speed press by the same amount. So a force-carrying approach is not run faster than the
-press its setpoint allows: above the speed whose own press *is* the setpoint, the approach is capped
-there, and the contact peaks at the setpoint instead of past it. A *plain* move carries no setpoint
-and keeps the slider's speed. The second rise is the ramp above, from that press to the setpoint.
-Two rises on the plot are expected, then; only the first was ever unbounded, and it no longer is.
+first rise on the plot, and it is bounded by the setpoint's own torque. The press a frame applies
+when it meets something is `kp·(v·dt + lead) + kd·v`, and the two terms the console supplies — the
+damping the approach travels with (`MotionFSM._approach_kd`) and the lead it is given
+(`MotionFSM._approach_lead_rad`) — are sized so that whole expression fits inside the budget the
+setpoint names, at any speed. The slider keeps deciding how fast the approach travels; above the
+speed whose damping alone would spend the budget it is the damping that yields, not the speed. A
+*plain* move carries no setpoint and keeps the slider's speed and the operator's damping both. The
+second rise is the ramp above, from that press to the setpoint. Two rises on the plot are expected,
+then; only the first was ever unbounded, and it no longer is.
 
 The hand-over is logged: the pose the grip was made at, how far the jaws had travelled to reach it,
 and which of the three contact channels declared it. The pose alone does not say what happened — a
@@ -223,11 +226,17 @@ mechanism that had not broken away from rest yet being read as an obstruction, a
 mode drives the jaws the rest of the way at the ramp rather than the slider. The channel is what
 tells those apart after the run, and the log is the only place that survives it.
 
-Do not lower `SPEED_MIN_MM_S` to chase a very small setpoint. The cap for a 1 N grasp is 2.0 mm/s,
-and the profile raises it back to the 5 mm/s floor — on purpose: measured on the plant, an empty
-close at or below 2.5 mm/s stalls and the stillness channel reads that as contact, handing over with
-the jaws still at the open stop. The floor bounds the cap, so a setpoint under about 2.6 N is pressed
-at the floor's own ~2.5 N rather than its own.
+Do not lower `SPEED_MIN_MM_S` to chase a very small setpoint. The one speed a setpoint still
+decides is the speed whose tick's own step `kp·v·dt` would spend the whole budget: a setpoint that
+cannot cover it at the speed asked for has the approach slowed until it can
+(`MotionFSM._tick_press_cap_mm_s`), which on this bench is 36.8 mm/s for a 1 N grasp and 736 mm/s
+at 20 N. Those are the same order as the speeds the slider offers, so at the setpoints the bench
+uses the floor never binds; it binds only under 0.14 N, where the setpoint's own speed drops below
+it — a 0.1 N grasp asks for 3.7 mm/s and runs at 5. Measured on the plant, that 0.1 N grasp at the
+maximum slider speed never leaves the open stop at all — the jaws sit there, and the stillness
+channel reads that rest as contact, handing over to force mode without having travelled. The floor's
+job is to keep the approach a speed that moves, and a setpoint below it cannot fix that by being
+smaller.
 
 Each end of the slider has a **one-press** button, placed next to the end it drives:
 
