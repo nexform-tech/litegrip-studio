@@ -96,6 +96,16 @@ class ProfileOutput:
     "pressed against something" — see :attr:`SpeedProfile.virtual_mm`.
     """
 
+    lead_mm: float
+    """Of :attr:`lost_mm`, the part this tick actually commanded *ahead* of the
+    measurement — ``min(lost_mm, lead_rad·rad_to_mm)``.
+
+    The push, as distinct from the evidence: the position error the frame
+    carries is ``|vel_mm_s|·dt + lead_mm``, so a caller that has a torque budget
+    to keep can check its frame against it without re-deriving the profile's
+    arithmetic.  Zero on a move the jaws are keeping up with.
+    """
+
     contact: bool
     """True once :attr:`lost_mm` passes ``CONTACT_LOST_MM``."""
 
@@ -168,9 +178,10 @@ class SpeedProfile:
         It is the fix for the one case the anchored reference cannot serve: at
         cruise the error it commands is one tick of travel, so the torque behind
         it falls with the speed and a mechanism with more friction than that stops
-        — see :data:`~litegrip_studio.constants.CONTACT_LEAD_RAD`.  Zero (the
-        default) is the plain anchored law, and is what a force-carrying move
-        wants.
+        — see :data:`~litegrip_studio.constants.CONTACT_LEAD_RAD`, and
+        :meth:`~litegrip_studio.core.motion.MotionFSM._approach_lead_rad` for the
+        same lever used as a force-carrying approach's torque budget.  Zero (the
+        default) is the plain anchored law.
         """
         if math.isnan(measured_mm) or dt <= 0:
             return _output(self.limits.clamp_mm(self.target_mm), 0.0, 0.0)
@@ -276,6 +287,7 @@ class SpeedProfile:
             err,
             stalled=stalled,
             lost_mm=lost_mm,
+            lead_mm=lead_mm,
             contact=lost_mm + lead_mm >= constants.CONTACT_LOST_MM,
         )
 
@@ -288,6 +300,7 @@ def _output(
     arrived: bool = False,
     stalled: bool = False,
     lost_mm: float = 0.0,
+    lead_mm: float = 0.0,
     contact: bool = False,
 ) -> ProfileOutput:
     """Build a :class:`ProfileOutput`, defaulting the contact fields."""
@@ -298,6 +311,7 @@ def _output(
         arrived=arrived,
         stalled=stalled,
         lost_mm=lost_mm,
+        lead_mm=lead_mm,
         contact=contact,
     )
 

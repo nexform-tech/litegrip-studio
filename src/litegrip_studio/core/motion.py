@@ -39,15 +39,23 @@ continues from the torque already in flight, so the hand-over from an approach i
 continuous: the press the approach gain had established is where the climb
 starts, and it is the *rate* that is chosen, not the duration.
 
-**A force-carrying approach is not run faster than its setpoint allows.**  The
-approach is a position frame, so until force mode is entered it is the drive that
-computes the torque, and the moment the jaws are blocked the frame is left
-commanding ``kp·(v_ref·dt) + kd·v_ref`` — set by the speed slider rather than the
-setpoint.  That collapse cannot be caught a tick early, so the frame is bounded
-for the whole approach instead: its speed is capped at the speed whose press *is*
-the setpoint, and the mechanical lurch the operator feels as "it grabs and draws
-itself in" — the frame pressing at whatever the slider asked for — never reaches
-the object.  See :meth:`MotionFSM._press_cap_mm_s`.
+**A force-carrying approach presses no harder than its setpoint.**  The approach
+is a position frame, so until force mode is entered it is the drive that computes
+the torque: on meeting something the frame is left commanding
+``kp·(v_ref·dt + lead) + kd·v_ref``, and the press is whatever those three terms
+come to rather than anything the setpoint said.  The console supplies two of the
+three — the damping it travels with and the lead it is given — and a setpoint
+spends its torque budget across exactly those, so the press the approach is
+capable of *is* the setpoint, however far the slider is wound.  See
+:meth:`MotionFSM._approach_kd` and :meth:`MotionFSM._approach_lead_rad`.
+
+Spending the budget that way rather than in the speed is what keeps the slider
+meaning something.  Bounding the press by bounding the speed works, and it was
+what this console did, but it makes the frame's press and its speed the same
+quantity: above the bound the operator moves the slider and nothing changes.  The
+damping and the lead are the frame's own, so the approach travels at the speed it
+was asked for and only what it would *press* is the setpoint — and the lead is
+what moves the jaws at the slow end, where ``kd·v`` alone is a couple of newtons.
 
 What is left is open-loop, and that is the price: the jaws can be pushed off the
 object by hand, and an empty grasp drives on to the mechanical stop at the
@@ -188,6 +196,11 @@ class MotionFSM:
         self._deadline_s: float | None = None
         self._stall_reported = False
         self._note = ""
+        # The damping a SERVO frame carries.  The operator's ``kd`` for a plain
+        # move; a force-carrying approach derives its own from the setpoint, so
+        # that the press it would apply on meeting something is the setpoint
+        # rather than whatever the slider asks for — see ``_approach_kd``.
+        self._kd_servo: float = 0.0
         # The most recent ProfileOutput, for telemetry and diagnosis.
         self.last_profile_out = None
 
@@ -235,13 +248,20 @@ class MotionFSM:
         self._deadline_s = None
         self._stall_reported = False
         self._note = ""
+        # The previous move's last output is not evidence about this one: the
+        # lead is sized from the speed the approach is running at, and a stale
+        # velocity would size it for a move that has already ended.
+        self.last_profile_out = None
 
-        # A force-carrying approach is not run faster than the press its setpoint
-        # allows — see ``_press_cap_mm_s``.  A plain move carries no setpoint and
-        # keeps the slider's own speed.
+        # The slider decides how fast the approach travels whatever it carries;
+        # what a force setpoint bounds is the *press*, and that is carried by the
+        # frame's damping and by the lead it is allowed — see
+        # ``_approach_lead_rad`` and ``_approach_kd``.
         speed_mm_s = self.params.speed_mm_s
+        self._kd_servo = self.params.kd
         if self._force_n > 0.0:
-            speed_mm_s = min(speed_mm_s, self._press_cap_mm_s(constants.CTRL_DT))
+            speed_mm_s = min(speed_mm_s, self._tick_press_cap_mm_s())
+            self._kd_servo = self._approach_kd(speed_mm_s)
 
         if self.profile is None:
             self.profile = SpeedProfile(
@@ -442,13 +462,11 @@ class MotionFSM:
         # ── SERVO ───────────────────────────────────────────────────────────
         assert self.profile is not None
         self._elapsed += dt
-        # A plain move gets the bounded lead that keeps its push independent of
-        # the speed it was sent at; a force-carrying one does not, because there
-        # the position gain is the approach gain and the same lead on its own
-        # would read as the contact it is trying to detect.
-        out = self.profile.step(
-            pos_mm, dt, 0.0 if self._force_n > 0.0 else constants.CONTACT_LEAD_RAD
-        )
+        # The lead is the approach's push: bounded for a plain move by
+        # ``CONTACT_LEAD_RAD``, and for a force-carrying one by whatever is left
+        # of the setpoint's torque budget once its damping has taken its share —
+        # see ``_approach_lead_rad``.
+        out = self.profile.step(pos_mm, dt, self._approach_lead_rad())
         self.last_profile_out = out
         if self._deadline_s is None:
             self._deadline_s = self._move_deadline(abs(out.err_mm))
@@ -460,10 +478,11 @@ class MotionFSM:
         # Three channels, because no one of them covers a close on its own: the
         # lost-motion gap, the measured torque, and stillness.
         #
-        # The approach that reaches them is capped at the setpoint's press
-        # (``move_to_mm``), so whatever channel declares the contact, the frame
-        # that was pressing has already been held to what the operator asked for
-        # — the lurch is removed at the source, not detected and then caught.
+        # The approach that reaches them presses no harder than the setpoint
+        # (``_approach_kd`` and ``_approach_lead_rad``), so whatever channel
+        # declares the contact, the frame that was pressing has already been held
+        # to what the operator asked for — the lurch is removed at the source,
+        # not detected and then caught.
         #
         # The lost-motion gap is the primary one for a plain move, but it only
         # integrates at cruise, and the profile leaves cruise
@@ -484,14 +503,15 @@ class MotionFSM:
         # A force-carrying move takes the lost-motion gap only when the jaws
         # have actually stopped, for the reason the plain move below is
         # corroborated the same way: the gap is a model, and a mechanism with
-        # friction to spare lags it while travelling perfectly well.  A force
-        # move is the more exposed of the two, not the less — it is given no
-        # lead (``SpeedProfile.step``), so the push behind the approach is the
-        # tick's own ``kp·v·dt`` and any friction eats into it, which is what
-        # sets the tracking lag and grows the gap.  Uncorroborated, the gap
-        # reaches ``CONTACT_LOST_MM`` while the jaws are still in free travel,
-        # the grip is declared at a pose the object is nowhere near, force mode
-        # then drives them the rest of the way at the ramp's rate rather than the
+        # friction to spare lags it while travelling perfectly well.  The lead
+        # (``_approach_lead_rad``) is what answers that lag, but it cannot be
+        # relied on to remove it — at the slider's slow end the damping has
+        # already spent the budget and the lead is zero, and the gap is what
+        # sizes the lead wherever there is one, so a jaw that is merely stiff
+        # still opens a gap while travelling.  Uncorroborated, the gap reaches
+        # ``CONTACT_LOST_MM`` while the jaws are still in free travel, the grip
+        # is declared at a pose the object is nowhere near, force mode then
+        # drives them the rest of the way at the ramp's rate rather than the
         # slider's, and ``放开`` — which measures from the pose the grip was made
         # at — opens all of that again.  Measured on the simulated unit at the
         # slider's slow end, 0.05 Nm of Coulomb friction at 10 mm/s: the grip was
@@ -575,7 +595,7 @@ class MotionFSM:
             # force during the approach is the squeeze applied before contact is
             # detected, so it is a force-control parameter, not a servo one.
             constants.KP_GRASP_APPROACH if self._force_n > 0.0 else p.kp,
-            p.kd,
+            self._kd_servo,
             0.0,
             out.err_mm,
             "servo",
@@ -607,28 +627,96 @@ class MotionFSM:
         return FrameOut(None, 0.0, None, 0.0, 0.0, 0.0, False, self._note)
 
     # ── contact corroboration ───────────────────────────────────────────────
-    def _press_cap_mm_s(self, dt: float) -> float:
-        """The fastest a force-carrying approach may run.
+    def _press_budget_nm(self) -> float:
+        """The torque a force-carrying approach may press with, N·m."""
+        return clamp_force_torque(self._force_n) * constants.PRESS_CAP_SAFETY
+
+    def _tick_press_cap_mm_s(self) -> float:
+        """The fastest a force-carrying approach may travel at all.
+
+        One term of the press is not the console's to withhold: the command
+        leads the measured position by the tick's own travel whatever else is
+        done, so a frame moving at ``v`` presses ``kp·v·dt`` on meeting
+        something no matter what damping or lead it carries.  For every setpoint
+        the slider offers that is a fraction of the budget — anything above 4 N
+        covers it at the top of the range — but a setpoint below it cannot be
+        honoured at any speed, and the only honest answer is the speed whose own
+        press *is* the setpoint.  This is the one place the setpoint still
+        decides how fast the approach travels, and it is the tick's arithmetic
+        rather than a policy.
+        """
+        return (
+            self._press_budget_nm()
+            / (constants.KP_GRASP_APPROACH * constants.CTRL_DT)
+            * self.limits.rad_to_mm
+        )
+
+    def _approach_kd(self, speed_mm_s: float) -> float:
+        """The damping a force-carrying approach runs with.
 
         A blocked position frame answers the speed it was sent with its whole
         gain: ``kp·(v·dt) + kd·v``, the jaws supplying none of the velocity, so
-        the press the approach will apply when it meets something is set by the
-        *speed slider* and not by the setpoint.  The cap is the speed whose own
-        press *is* the setpoint, ``v = tau/(kp·dt + kd)``, so however far the
-        slider is wound the frame cannot drive past what the operator asked for.
-        See :data:`~litegrip_studio.constants.PRESS_CAP_SAFETY`.
+        the press the approach applies when it meets something is set by the
+        *speed slider* rather than by the setpoint.  Two of the three factors are
+        the console's, and either can carry the bound: the speed the approach
+        travels at, or the damping it travels with.  Written into the speed, the
+        bound stops the slider doing anything above it — the operator moves it
+        and nothing changes.  Written into the damping, it does not: the approach
+        still travels at the speed it was asked for, and only the torque it would
+        apply on meeting something is the setpoint.
 
-        It bites only above that speed, which is the point: at the bench's
-        25–30 mm/s and a 20 N setpoint it is ~40 mm/s, so a careful approach is
-        unchanged and only a fast one — the one that used to press 35 N — is
-        held to the setpoint.  ``PRESS_CAP_SAFETY`` keeps the measured force on
-        the safe side of the setpoint, since the servo lags the frame this is
-        computed from.  The ``kp·dt`` term keeps the denominator off zero even
-        with no damping.
+        This is the damping whose own press at the slider's speed *is* the
+        budget, ``kd = tau/v − kp·dt``, never above the operator's own ``kd`` and
+        never below zero — a setpoint too small to bound at this speed leaves the
+        last term to the lead, which sheds it rather than the approach driving
+        past.  The ``kp·dt`` term is the tick's share of the position error, which
+        is ``v·dt`` whenever the jaws keep up.
         """
-        kd = max(self.params.kd, 0.0)
-        target_torque = clamp_force_torque(self._force_n) * constants.PRESS_CAP_SAFETY
-        return target_torque / (constants.KP_GRASP_APPROACH * dt + kd) * self.limits.rad_to_mm
+        v_rad_s = abs(
+            mm_to_rad_per_s(
+                speed_mm_s, self.limits.rad_to_mm, direction=self.limits.direction
+            )
+        )
+        if v_rad_s <= 0.0:
+            return self.params.kd
+        residual = self._press_budget_nm() - constants.KP_GRASP_APPROACH * v_rad_s * (
+            constants.CTRL_DT
+        )
+        return max(0.0, min(self.params.kd, residual / v_rad_s))
+
+    def _approach_lead_rad(self) -> float:
+        """How far a force-carrying approach's command may lead the jaws.
+
+        What the damping above does not spend of the budget, the lead does.  Its
+        press is ``kp`` times the frame's position error, and the error the
+        profile is given is one tick of travel plus this lead, so the lead is
+        whatever keeps ``kp·(v·dt + lead) + kd·v`` — the press a frame meeting
+        something would apply — inside the setpoint.  At the speed the damping
+        was sized for the budget is already spent and this is zero; slower, or
+        decelerating into the target, it opens up, and it is what moves the jaws
+        at the slider's slow end, where ``kd·v`` alone is a couple of newtons.
+
+        The lead is applied by :class:`~litegrip_studio.core.profile.SpeedProfile`
+        only where a gap has already opened, so a free approach never sees it and
+        one held up is given exactly as much push as it needs, up to the setpoint.
+        See :data:`~litegrip_studio.constants.PRESS_CAP_SAFETY` for the margin
+        that keeps the measured force on the safe side of the setpoint.
+        """
+        if self._force_n <= 0.0:
+            return constants.CONTACT_LEAD_RAD
+        last = self.last_profile_out
+        v_mm_s = abs(last.vel_mm_s) if last is not None else self.profile.speed_mm_s
+        v_rad_s = abs(
+            mm_to_rad_per_s(
+                v_mm_s, self.limits.rad_to_mm, direction=self.limits.direction
+            )
+        )
+        residual = (
+            self._press_budget_nm()
+            - constants.KP_GRASP_APPROACH * v_rad_s * constants.CTRL_DT
+            - self._kd_servo * v_rad_s
+        )
+        return max(0.0, residual / constants.KP_GRASP_APPROACH)
 
     def _jaws_have_stopped(self, telemetry, ref_mm_s: float) -> bool:
         """Whether the jaws are held still, rather than merely lagging.
@@ -671,11 +759,12 @@ class MotionFSM:
         120 mm move at 5 mm/s take the 24 s it is supposed to take.
         """
         p = self.params
-        # The speed the move is actually running at, which a force-carrying
-        # approach has had capped to the setpoint's press (``move_to_mm``): a
-        # deadline computed from the uncapped slider speed would declare a capped
-        # move lost before it could arrive.  ``self.profile`` is set for the
-        # whole of a SERVO move, which is the only caller.
+        # The speed the move is actually running at, which is the profile's own
+        # and not the slider's: a setpoint too small for the tick's own press has
+        # had the approach slowed for it (``_tick_press_cap_mm_s``), and a
+        # deadline computed from the slider speed would declare that move lost
+        # before it could arrive.  ``self.profile`` is set for the whole of a
+        # SERVO move, which is the only caller.
         speed = max(self.profile.speed_mm_s if self.profile else p.speed_mm_s, 1e-9)
         acc = max(p.acc_mm_s2, 1e-9)
         distance = max(distance_mm, 0.0)

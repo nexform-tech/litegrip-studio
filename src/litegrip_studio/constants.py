@@ -37,16 +37,16 @@ PLOT_HZ = 25
 # ── Motion ──────────────────────────────────────────────────────────────────
 # Speed range/default follow litearm-studio's gripper panel (5–150, default 50).
 #
-# The floor is not only a UI nicety: it also bounds the press cap of a
-# force-carrying approach (``MotionFSM._press_cap_mm_s``).  A small setpoint
-# wants a speed below it — 1 N works out at 2.0 mm/s — and the profile raises
-# that back to the floor.  Do not lower it to chase such a setpoint: measured on
-# the simulated plant, an empty close run at or below 2.5 mm/s hands over in
-# 0.1 s with the jaws still at the open stop, or stalls partway, because the
-# drive's stiction holds them still and the stillness channel reads that as
-# contact; only from 3.5 mm/s does it reach the object.  The cost of the floor is
-# that a setpoint under about 2.6 N is pressed at the floor's own ~2.5 N rather
-# than at its own.
+# The floor is not only a UI nicety: it also bounds the one speed a setpoint
+# still decides, the speed whose tick's own step spends the whole budget
+# (``MotionFSM._tick_press_cap_mm_s``).  Do not lower it to chase a very small
+# setpoint: measured on the simulated plant, an empty close run at or below
+# 2.5 mm/s hands over in 0.1 s with the jaws still at the open stop, or stalls
+# partway, because the drive's stiction holds them still and the stillness
+# channel reads that as contact; only from 3.5 mm/s does it reach the object.
+# On this bench it binds only under 0.14 N — 1 N works out at 36.8 mm/s and
+# 20 N at 736, so at the setpoints the bench uses the floor never binds, and
+# lowering it buys nothing.
 SPEED_MIN_MM_S = 5.0
 SPEED_MAX_MM_S = 150.0
 SPEED_DEFAULT_MM_S = 50.0
@@ -230,8 +230,12 @@ CONTACT_STILL_RATIO = 0.25
 # what decides it, ``kp·lead`` being the push and ``kd`` what makes the approach
 # speed right, so this is a gain question wearing a millimetre's clothing.
 #
-# It does nothing for a force-carrying move, where the position gain is the
-# approach gain and this much lead would read as contact on its own.
+# It is not what a force-carrying move uses: that one's lead is sized from its
+# setpoint's torque budget rather than from this constant, because the press it
+# is allowed is a property of the force the operator asked for and not of the
+# console's own stiction margin — see
+# :meth:`~litegrip_studio.core.motion.MotionFSM._approach_lead_rad`.  This is the
+# plain move's lead, and the value below is sized for that.
 CONTACT_LEAD_RAD = 0.004
 
 # How old the reading may be and still count as evidence.
@@ -257,14 +261,14 @@ CONTACT_FRESH_MS = 30.0
 # That squeeze is the whole of the frame's position and velocity terms, and the
 # velocity term is the larger one: with the jaws held, ``dq≈0`` and the damping
 # term becomes ``kd·v_ref``, so the press is set by the *speed slider*, not by
-# the setpoint.  Measured on the simulated plant with the default ``kd`` of 2.0:
-# 9.2 N at 20 mm/s, 11.4 at 25, 18.8 at the 50 mm/s default — against the ~0.5 N
-# the position term contributes.  It is a press for the fraction of a second it
-# takes to notice the jaws have stopped and no longer, which is what
-# ``CONTACT_LOST_MM`` and ``STALL_WINDOW`` between them bound; a lower ``kd`` is
-# not the fix for the number, because the same term is what makes the approach
-# track the slider at all (at ``kd`` 1.0 a force-carrying move trips lost-motion
-# contact 0.2 s in, on nothing, and then drives at the feed-forward).
+# the setpoint.  At 20 mm/s the damping is 7.8 N on this bench against the
+# position term's 0.5, so the damping is the one to govern, and a setpoint
+# governs it by being the budget the approach's damping is derived from
+# (``MotionFSM._approach_kd``) rather than by the operator lowering ``kd``: the
+# same term is what makes the approach track the slider at all.  Measured on the
+# plant with 0.3 Nm of Coulomb friction at 10 mm/s, ``kd`` 0.5 hands the grip to
+# the friction at the open stop, 45 mm short of the object, while 1.0 and the
+# default 2.0 both reach it.
 KP_GRASP_APPROACH = 25.0
 
 # The press above is a lurch because the approach is a position frame and the
@@ -272,30 +276,42 @@ KP_GRASP_APPROACH = 25.0
 # the frame is left commanding ``kp·(v_ref·dt) + kd·v_ref`` — set by the speed
 # slider, not by the setpoint, and unbounded by anything the console sends.  It
 # cannot be caught after the fact: on the simulated plant a 150 mm/s approach
-# still reads 156 mm/s of jaw speed the tick before the block and 94 the tick
+# still reads 155 mm/s of jaw speed the tick before the block and 82 the tick
 # after, so by the time any detector sees the collapse the frame pressing with
-# the whole slider speed is already on its way out.  Measured, a 20 N grasp at
-# 150 mm/s presses 35.5 N before the grip is handed over, about 18 N at the
-# slider's default 50, and only under about 45 mm/s does the press stay below
-# what was asked for.
+# the whole slider speed is already on its way out.  Measured with the budget
+# taken out of the frame, a 20 N grasp against the plant's stiff object peaks at
+# 14.5 N at 30 mm/s, 17.4 at the slider's default 50 and 35.5 at 150: the press
+# grows with the speed, and at the fast end it is nearly twice what was asked
+# for.
 #
-# So a force-carrying approach is not run faster than the press the setpoint
-# allows: its speed is capped at ``v = tau/(kp·dt + kd)``, the speed whose own
-# press *is* the setpoint
-# (:meth:`~litegrip_studio.core.motion.MotionFSM._press_cap_mm_s`).  The cap is
-# proactive rather than a reaction to the collapse, precisely because the
-# collapse cannot be caught: it bounds the frame for the whole approach, so the
-# slider chooses the speed only up to the point where it would press past the
-# setpoint.  At the bench's 25–30 mm/s and a 20 N setpoint the cap is ~40 mm/s
-# and changes nothing; above it the approach runs at the cap, and the contact
-# peaks at 15–17 N on the plant instead of 28–36.  A *plain* move carries no
-# setpoint and is untouched, so this is the slider's own speed until the
-# operator asks for a force.
+# So a force-carrying approach is not *capable* of pressing harder than the
+# setpoint: the budget is spent across the two terms the console supplies, the
+# damping it travels with (``MotionFSM._approach_kd``) and the lead it is given
+# (``MotionFSM._approach_lead_rad``), so a frame meeting something presses at
+# most ``kp·(v·dt + lead) + kd·v = tau``.  The bound is proactive rather than a
+# reaction to the collapse, precisely because the collapse cannot be caught: it
+# holds for the whole approach.  Measured on the same plant and object, a 20 N
+# grasp now peaks at 4.8–18.1 N across the slider's 5–150 mm/s, a 5 N grasp at
+# 5.4 and a 30 N one at 17.5.
+#
+# The budget is spent in the damping and the lead and *not* in the speed, and
+# that is the part that matters to the operator.  Bounding it in the speed also
+# bounds the press, but it makes the frame's press and its speed one quantity:
+# above the bound the slider stops doing anything, and the operator's own
+# complaint — the jaws slamming shut on grasp, opening far too wide on open —
+# came from exactly that.  Written into the damping and the lead, the approach
+# travels at the speed it was asked for and only what it would press is the
+# setpoint.  A *plain* move carries no setpoint and is untouched.
 #
 # ``PRESS_CAP_SAFETY`` keeps the *measured* force on the safe side of the
-# setpoint: the cap is computed from the frame the console sends, and the servo
-# lags that frame while the plant has inertia, so at 1.0 the compliant object met
-# at 150 mm/s read 20.2 N against a 20 N setpoint.  At 0.9 it stays under.
+# setpoint: the budget is computed from the frame the console sends, and the
+# servo lags that frame while the plant has inertia, so what is measured at the
+# hand-over is not what the frame asked for.  At 1.0 a 20 N grasp at 150 mm/s
+# measures 15.2 N.  The margin is not enough at the setpoints barely above the
+# mechanism's own friction, where the tick's own step is the whole of the budget
+# and the plant's acceleration transient is not small next to it: a 5 N grasp at
+# 25 mm/s reads 5.7 N at 1.0 and 5.4 at 0.9, which is the one case that goes
+# over.
 PRESS_CAP_SAFETY = 0.9
 
 # A held force is ramped to its setpoint at this many newtons per second rather
