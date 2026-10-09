@@ -216,6 +216,13 @@ there, and the contact peaks at the setpoint instead of past it. A *plain* move 
 and keeps the slider's speed. The second rise is the ramp above, from that press to the setpoint.
 Two rises on the plot are expected, then; only the first was ever unbounded, and it no longer is.
 
+The hand-over is logged: the pose the grip was made at, how far the jaws had travelled to reach it,
+and which of the three contact channels declared it. The pose alone does not say what happened — a
+grip made at the object is a grasp, and the same reading taken a millimetre into a close is a
+mechanism that had not broken away from rest yet being read as an obstruction, after which force
+mode drives the jaws the rest of the way at the ramp rather than the slider. The channel is what
+tells those apart after the run, and the log is the only place that survives it.
+
 Do not lower `SPEED_MIN_MM_S` to chase a very small setpoint. The cap for a 1 N grasp is 2.0 mm/s,
 and the profile raises it back to the 5 mm/s floor — on purpose: measured on the plant, an empty
 close at or below 2.5 mm/s stalls and the stillness channel reads that as contact, handing over with

@@ -21,7 +21,14 @@ import pytest
 
 from litegrip_studio import constants
 from litegrip_studio.backend.plant import Plant, PlantConfig
-from litegrip_studio.core.motion import MotionFSM, MotionParams, MotionState
+from litegrip_studio.core.motion import (
+    GRIP_ARRIVED,
+    GRIP_DEADLINE,
+    MotionFSM,
+    MotionParams,
+    MotionState,
+    _contact_reason,
+)
 from litegrip_studio.telemetry import Telemetry
 from litegrip_studio.units import Limits, clamp_force_torque, torque_from_force
 
@@ -1064,6 +1071,105 @@ class TestAGraspThatMeetsItsObjectInTheLastMillimetre:
         assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=2.0), rig.fsm.note
         rig.run(0.5)
         assert rig.force_n == pytest.approx(self.SETPOINT_N, abs=0.8)
+
+
+class TestNamingTheChannelThatDeclaredTheGrip:
+    """Where a grip was made does not say what made it, and the two readings are
+    opposite conclusions.
+
+    ``39.9 mm`` against an object at 40 mm is a grasp; ``0.9 mm`` into a close
+    from the open stop is the mechanism being read as an obstruction before it
+    has broken away from rest, and force mode then drives it the rest of the way
+    at the ramp rather than the slider.  The pose alone cannot tell them apart —
+    both are "somewhere in the middle of a close" — so the channel is recorded
+    beside it, and this is what the operator's log line reads.
+    """
+
+    def test_the_channels_are_ranked_so_the_note_is_single_valued(self) -> None:
+        """A tick can trip more than one channel, and the note has to name one.
+
+        The gap is the primary detector for a move that is travelling, so it
+        outranks the other two when they coincide; a tick that trips all three is
+        a move that was already being read as an obstruction.
+        """
+        assert _contact_reason(True, True, True) == "接触：丢失位移"
+        assert _contact_reason(False, True, True) == "接触：力矩"
+        assert _contact_reason(False, False, True) == "接触：静止"
+
+    @pytest.mark.parametrize(
+        "speed_mm_s, setpoint_n, object_mm, channel",
+        [
+            # Inside the braking stretch, where the profile's gap detector has
+            # stopped looking and the capped approach never presses at the 15 N
+            # the torque channel wants.  Stillness is the only one left.
+            (25.0, 20.0, 1.0, "接触：静止"),
+            # Met at cruise: the ideal path runs away from jaws that have been
+            # stopped, and the gap reaches CONTACT_LOST_MM first.
+            (25.0, 20.0, 40.0, "接触：丢失位移"),
+            # The same object at the slider's fast end, where the press the
+            # approach applies is over the torque threshold before the gap has
+            # had time to integrate.
+            (150.0, 20.0, 40.0, "接触：力矩"),
+        ],
+    )
+    def test_a_grip_records_the_channel_that_declared_it(
+        self, rig, speed_mm_s: float, setpoint_n: float, object_mm: float, channel: str
+    ) -> None:
+        rig.fsm.set_speed(speed_mm_s)
+        assert rig.open()
+        rig.sim.inject(obj_mm=object_mm)
+        rig.fsm.grasp(setpoint_n)
+
+        assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=5.0), rig.fsm.note
+        assert rig.fsm.grip_channel == channel
+
+    def test_a_close_that_meets_nothing_says_it_arrived(self, rig) -> None:
+        """The other outcome, and the one that must never read as an object.
+
+        Nothing is between the jaws, so the grip is made where the travel ran
+        out.  A log that called this a contact would send the operator looking
+        for an obstruction that is not there.
+        """
+        rig.fsm.set_speed(50.0)
+        assert rig.open()
+        rig.fsm.grasp(5.0)
+
+        assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=20.0), rig.fsm.note
+        assert rig.fsm.grip_channel == GRIP_ARRIVED
+        assert rig.position_mm == pytest.approx(0.0, abs=1.0), "it must have reached the stop"
+
+    def test_a_move_that_never_arrives_says_that_too(self) -> None:
+        """A mechanism that delivers a third of the motion asked of it, for ever.
+
+        It never arrives and never looks stalled — it is travelling, at a third
+        of the speed — so the move deadline ends the grip.  The channel has to be
+        distinct from the three contacts for the same reason the arrived one is:
+        nothing was met.
+        """
+        fsm = MotionFSM(BENCH, MotionParams(speed_mm_s=20.0))
+        backend = Laggard(BENCH, ratio=0.3)
+
+        fsm.move_to_mm(60.0, "slider", force_n=20.0)
+        run_ticks(fsm, backend, 20000)
+        assert fsm.state is MotionState.HOLD_FORCE, fsm.note
+        assert "未到位" in fsm.note, "the deadline is what ended it, not a contact"
+        assert fsm.grip_channel == GRIP_DEADLINE
+
+    def test_no_channel_is_carried_out_of_force_mode(self, rig) -> None:
+        """The record belongs to the grip being held, not to the axis.
+
+        ``grip_mm`` is cleared the moment the grip ends for the same reason, and
+        a stale channel would outlive it in the operator's log.
+        """
+        rig.fsm.set_speed(25.0)
+        assert rig.open()
+        rig.sim.inject(obj_mm=40.0)
+        rig.fsm.grasp(20.0)
+        assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=5.0), rig.fsm.note
+        assert rig.fsm.grip_channel != ""
+
+        rig.fsm.open()
+        assert rig.fsm.grip_channel == ""
 
 
 class TestAForceApproachIsNotRunFasterThanItsSetpoint:

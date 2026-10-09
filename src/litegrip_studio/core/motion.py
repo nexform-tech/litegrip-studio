@@ -134,6 +134,29 @@ def _toward(value: float, target: float, step: float) -> float:
     return max(value - step, target)
 
 
+def _contact_reason(gap: bool, torque: bool, still: bool) -> str:
+    """Name the channel that declared a contact, for the operator's log.
+
+    The channels are not interchangeable and the pose alone does not say which
+    one fired: a grip declared a millimetre into a close is a mechanism that had
+    not broken away from rest yet being read as an obstruction, and a grip
+    declared at the object is a grasp.  Only the channel tells them apart
+    afterwards, and the log is the only place that survives the run.
+    """
+    if gap:
+        return "接触：丢失位移"
+    if torque:
+        return "接触：力矩"
+    return "接触：静止"
+
+
+#: The grip channels that are not a contact at all: the jaws ran out of travel
+#: rather than meeting anything.  Kept apart from the three above so a log line
+#: never reads a closed stop as an object.
+GRIP_ARRIVED = "到位：夹到目标位"
+GRIP_DEADLINE = "超时：未到位"
+
+
 class MotionFSM:
     """Owns the commanded trajectory.  Call :meth:`tick` once per control tick."""
 
@@ -147,6 +170,9 @@ class MotionFSM:
 
         self._force_n: float = 0.0  # setpoint carried by the active move
         self._frozen_mm: float | None = None
+        # Which channel declared the grip being held, for the operator's log.
+        # Meaningful only in HOLD_FORCE, like ``_frozen_mm``.
+        self._grip_channel = ""
         # The pose held by HOLD_RAD, in radians and never clamped.  Meaningful
         # only in that state; every other state that holds a pose holds it in
         # millimetres, and there is deliberately no path from one to the other.
@@ -272,13 +298,20 @@ class MotionFSM:
         self.source = "stop"
         self._note = ""
 
-    def hold_force(self, force_n: float, measured_mm: float, source: str = "hold_force") -> None:
+    def hold_force(
+        self,
+        force_n: float,
+        measured_mm: float,
+        source: str = "hold_force",
+        channel: str = "",
+    ) -> None:
         """Freeze at the current position and apply a grip force there."""
         self.state = MotionState.HOLD_FORCE
         self.profile = None
         self._force_n = clamp_force(force_n)
         self._tau_cmd = None
         self._frozen_mm = self.limits.clamp_mm(measured_mm)
+        self._grip_channel = channel
         self._frozen_rad = None
         self.last_command_mm = self._frozen_mm
         self.source = source
@@ -469,20 +502,20 @@ class MotionFSM:
         # — and one that creeps instead of stopping is left to the stall counter
         # and the move deadline, both unchanged.
         stopped = self._jaws_have_stopped(telemetry, out.vel_mm_s)
-        contact = (
-            (out.contact and telemetry_current and (self._force_n <= 0.0 or stopped))
-            or (
-                self._force_n > 0.0
-                and (
-                    abs(telemetry.torque_nm) >= constants.CONTACT_TAU_NM
-                    or (out.stalled and telemetry_current)
-                )
-            )
+        gap = out.contact and telemetry_current and (self._force_n <= 0.0 or stopped)
+        torque = (
+            self._force_n > 0.0
+            and abs(telemetry.torque_nm) >= constants.CONTACT_TAU_NM
         )
+        still = self._force_n > 0.0 and out.stalled and telemetry_current
+        contact = gap or torque or still
         if contact:
             if self._force_n > 0.0:
-                self.hold_force(self._force_n, pos_mm, source=self.source)
-                return self._force_frame(backend, pos_mm, telemetry, dt, "contact")
+                reason = _contact_reason(gap, torque, still)
+                self.hold_force(
+                    self._force_n, pos_mm, source=self.source, channel=reason
+                )
+                return self._force_frame(backend, pos_mm, telemetry, dt, reason)
             if stopped:
                 self._stall_reported = True
                 self.hold(pos_mm)
@@ -500,7 +533,9 @@ class MotionFSM:
             if self._force_n > 0.0:
                 # Reached the target (or the closed stop) under force: hold the
                 # force at the resting position.
-                self.hold_force(self._force_n, pos_mm, source=self.source)
+                self.hold_force(
+                    self._force_n, pos_mm, source=self.source, channel=GRIP_ARRIVED
+                )
                 return self._force_frame(backend, pos_mm, telemetry, dt, "grip")
             if self._settle_ticks * dt >= constants.SETTLE_S:
                 target = self.limits.clamp_mm(self.last_command_mm or pos_mm)
@@ -523,7 +558,9 @@ class MotionFSM:
                 # its setpoint a few seconds in, and keeps only whatever the
                 # mechanism's own stiffness offers at the pose it froze at.
                 force_n = self._force_n
-                self.hold_force(force_n, pos_mm, source=self.source)
+                self.hold_force(
+                    force_n, pos_mm, source=self.source, channel=GRIP_DEADLINE
+                )
                 self._note = f"{self._deadline_s:.0f}s 内未到位，保持 {force_n:.0f} N"
                 return self._force_frame(backend, pos_mm, telemetry, dt, "grip")
             self.hold(pos_mm)
@@ -784,6 +821,18 @@ class MotionFSM:
         ``None`` unless a grip is being held.
         """
         return self._frozen_mm if self.state is MotionState.HOLD_FORCE else None
+
+    @property
+    def grip_channel(self) -> str:
+        """Which channel declared the held grip, or ``""``.
+
+        The pose a grip was made at does not say what made it, and the two
+        readings are opposite conclusions: a grip declared at the object is a
+        grasp, and the same grip declared a millimetre into a close is a
+        mechanism that had not broken away from rest yet read as an
+        obstruction.  ``""`` unless a grip is being held.
+        """
+        return self._grip_channel if self.state is MotionState.HOLD_FORCE else ""
 
     def force_setpoint(self) -> float:
         return self._force_n if self.state is MotionState.HOLD_FORCE else 0.0

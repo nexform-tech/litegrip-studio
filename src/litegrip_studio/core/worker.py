@@ -343,6 +343,11 @@ class WorkerLoop:
         # first paint happens before there has been time for two.
         self._pub_accum = 1.0
         self._last_state = ""
+        #: Where the jaws were when the last force-carrying close was commanded,
+        #: so the hand-over can log how far into the move the grip was declared.
+        #: That distance is what separates a grasp from a mechanism that had not
+        #: broken away from rest yet — see :meth:`_log_hand_over`.
+        self._force_from_mm: float | None = None
 
     # ── lifecycle ───────────────────────────────────────────────────────────
     def run(self) -> None:
@@ -543,6 +548,31 @@ class WorkerLoop:
         if self._motion.state.value != self._last_state:
             self._last_state = self._motion.state.value
             self._signals.motion_state.emit(self._last_state)
+            if self._motion.state is MotionState.HOLD_FORCE:
+                self._log_hand_over()
+
+    def _log_hand_over(self) -> None:
+        """Record where a grip was declared, how far in, and on which channel.
+
+        The pose alone cannot say whether a grasp met its object.  A grip
+        declared a millimetre into a close is a mechanism that had not broken
+        away from rest yet being read as an obstruction, and the operator sees
+        the consequence rather than the cause: force mode then drives the jaws
+        the rest of the way at the feed-forward, and ``放开``, which opens from
+        the pose the grip was made at, opens all of it again.  Neither number is
+        visible anywhere else after the run, and without them the channel that
+        fired has to be argued about instead of read.
+        """
+        grip = self._motion.grip_mm
+        if grip is None:
+            return
+        travelled = (
+            ""
+            if self._force_from_mm is None
+            else f"，已驶出 {abs(self._force_from_mm - grip):.1f} mm"
+        )
+        channel = self._motion.grip_channel or "未知"
+        self._log("info", f"夹取：在 {grip:.1f} mm 交棒{travelled}，原因 {channel}")
 
     def _motion_label(self) -> str:
         """What the axis is doing, for the status line.
@@ -900,8 +930,10 @@ class WorkerLoop:
             elif isinstance(command, cmd.Open):
                 self._motion.open(command.source)
             elif isinstance(command, cmd.Close):
+                self._force_from_mm = self._measured_mm()
                 self._motion.close(command.source, force_n=command.force_n)
             else:
+                self._force_from_mm = self._measured_mm()
                 self._motion.grasp(command.force_n, command.source)
         elif isinstance(command, cmd.BackOff):
             # Gated exactly like the moves above, and for the same reason: it is

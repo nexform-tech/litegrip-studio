@@ -1777,6 +1777,79 @@ class TestOpeningFurtherToLetGo:
         assert not self._commanded(bench)
 
 
+class TestTheHandOverTheOperatorReads:
+    """What the log says when a grip is made, and why the pose is not enough.
+
+    A line carrying only a millimetre reading cannot be told from the case the
+    operator hit: every grip in the bench log of 2026-10-09 was made 1.4–2.2 mm
+    into the close and the release then opened all of that again, and nothing in
+    the console said whether the jaws had met an object or were a mechanism that
+    had not broken away from rest being read as one.  The channel and the
+    distance travelled are those two readings, and they survive only here.
+    """
+
+    OBJECT_MM = 40.0
+    SETPOINT_N = 20.0
+
+    def _bench(self) -> Bench:
+        clock = FakeClock()
+        bench = Bench(RecordingSim(clock=clock), clock=clock)
+        bench.bring_up()
+        return bench
+
+    def _grasp(self, bench: Bench, speed_mm_s: float, obj_mm: float | None) -> None:
+        bench.loop.motion.set_speed(speed_mm_s)
+        bench.send(cmd.Open())
+        for _ in range(4000):
+            if bench.loop.motion.state is MotionState.HOLD:
+                break
+            bench.tick()
+        else:
+            raise AssertionError(f"未张开到位；当前 {bench.loop.motion.state.value}")
+        if obj_mm is not None:
+            bench.backend.inject(obj_mm=obj_mm)
+        bench.send(cmd.Grasp(force_n=self.SETPOINT_N))
+        for _ in range(4000):
+            if bench.loop.motion.state is MotionState.HOLD_FORCE:
+                # The hand-over is logged by the publish that notices the
+                # transition, and publishing runs at TELEMETRY_HZ against the
+                # loop's own rate — so the state can turn over a few ticks
+                # before anything is written.
+                bench.tick(4)
+                return
+            bench.tick()
+        raise AssertionError(f"未进入力保持；当前 {bench.loop.motion.state.value}")
+
+    def _hand_over(self, bench: Bench) -> str:
+        lines = [text for text in bench.signals.logs() if text.startswith("夹取：")]
+        assert lines, f"没有交棒日志：{bench.signals.logs()}"
+        return lines[-1]
+
+    def test_a_grasp_names_the_object_it_met_and_how_far_it_travelled(self) -> None:
+        bench = self._bench()
+
+        self._grasp(bench, speed_mm_s=25.0, obj_mm=self.OBJECT_MM)
+
+        grip = bench.loop.motion.grip_mm
+        assert grip == pytest.approx(self.OBJECT_MM, abs=1.0)
+        line = self._hand_over(bench)
+        assert f"在 {grip:.1f} mm 交棒" in line
+        # The jaws started at the open stop, so the travel is the whole close.
+        assert "已驶出" in line, line
+        assert "接触：丢失位移" in line, line
+
+    def test_a_close_that_met_nothing_is_not_logged_as_a_contact(self) -> None:
+        """The wrong answer here is worse than no line at all: it sends the
+        operator looking for an obstruction that is not there."""
+        bench = self._bench()
+
+        self._grasp(bench, speed_mm_s=50.0, obj_mm=None)
+
+        line = self._hand_over(bench)
+        assert "接触：" not in line, line
+        assert "到位：" in line, line
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Calibration through the worker
 # ═══════════════════════════════════════════════════════════════════════════
