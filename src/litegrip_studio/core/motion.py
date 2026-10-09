@@ -33,7 +33,17 @@ setpoint delivered 59 N there).
 
 What is left is open-loop, and that is the price: the jaws can be pushed off the
 object by hand, and an empty grasp drives on to the mechanical stop at the
-setpoint.  The two guards below still bound it:
+setpoint.  One consequence of it is easy to miss and is not optional — the grip
+is *not held at the pose it froze at*.  With no position term in the frame, the
+setpoint is reached by driving the jaws into the object until its own stiffness
+balances the torque: millimetres of travel against a compliant one, a fraction
+of a millimetre against a stiff one.  So anything that has to measure from the
+object has to measure from the pose the grip was *made* at, which is what
+:attr:`MotionFSM.grip_mm` is for, and not from the pose the jaws have reached
+since.  ``放开`` is where that shows: measured from the draw-in, ten millimetres
+of release is ten millimetres minus the draw-in of clearance around the object.
+
+The two guards below still bound it:
 
 * the reference is clamped to the calibrated travel, so even with no object the
   fingers halt at the closed stop;
@@ -656,6 +666,23 @@ class MotionFSM:
     @property
     def is_moving(self) -> bool:
         return self.state is MotionState.SERVO
+
+    @property
+    def grip_mm(self) -> float | None:
+        """The pose the grip being held was made at, or ``None``.
+
+        Force mode freezes where the jaws met the object, and then the torque
+        climbs to its setpoint by driving them *into* it — with no position term
+        in the frame, nothing holds the frozen pose, and they stop wherever the
+        object's own stiffness balances the setpoint.  Against a compliant
+        object that draw-in is millimetres of real travel (see
+        :data:`~litegrip_studio.constants.RELEASE_OPEN_MM`), which is why this
+        is not the pose the jaws are in now: it is the millimetre a release has
+        to be measured from if the distance it opens is to be the *clearance*
+        around the object rather than a distance eaten into by the draw-in.
+        ``None`` unless a grip is being held.
+        """
+        return self._frozen_mm if self.state is MotionState.HOLD_FORCE else None
 
     def force_setpoint(self) -> float:
         return self._force_n if self.state is MotionState.HOLD_FORCE else 0.0

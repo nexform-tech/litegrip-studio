@@ -22,6 +22,7 @@ import pytest
 
 from litegrip_studio import calibration, constants
 from litegrip_studio.backend import GripperBackend
+from litegrip_studio.backend.plant import PlantConfig
 from litegrip_studio.backend.sim import SimBackend
 from litegrip_studio.calibration import CalibrationInfo
 from litegrip_studio.core import commands as cmd
@@ -1553,14 +1554,25 @@ class TestStopping:
 # 放开: opening further than where the jaws are
 # ═══════════════════════════════════════════════════════════════════════════
 class TestOpeningFurtherToLetGo:
-    """The release after a grasp, and the reason it is measured from the jaws.
+    """The release after a grasp, and the two poses it can be measured from.
 
     A grasp is :meth:`MotionFSM.grasp` — a move to 0 mm under a force cap — so
     its target is the *closed* end.  "The target plus ten millimetres" is
     therefore 10 mm, a command back into the object being held, and the jaws
     stopped somewhere the target never described.  Every test below is one
-    consequence of measuring from the reading instead.
+    consequence of measuring from the reading instead — except while a grip is
+    being held, where the reading has moved on from the object: a held force has
+    no position gain in it, so the jaws are driven into the object as the torque
+    climbs to its setpoint, and ten millimetres from *there* is ten millimetres
+    minus that draw-in of clearance around the object.
     """
+
+    #: A compliant object: 20 N pushes the jaws ~9 mm into it, so a release
+    #: measured from where they have got to spends most of its ten millimetres
+    #: on the draw-in.  The default plant bends 0.2 mm.
+    SOFT = 8.0
+    SETPOINT_N = 20.0
+    OBJECT_MM = 40.0
 
     def _held_at(self, mm: float) -> Bench:
         """A bench whose jaws are pinched at ``mm`` with the gate open."""
@@ -1568,6 +1580,31 @@ class TestOpeningFurtherToLetGo:
         bench.backend.q_rad = LIMITS.to_rad(mm)
         bench.bring_up()
         return bench
+
+    @staticmethod
+    def _until(bench: Bench, state: MotionState, ticks: int = 4000) -> None:
+        for _ in range(ticks):
+            if bench.loop.motion.state is state:
+                return
+            bench.tick()
+        raise AssertionError(f"未到达 {state.value}；当前 {bench.loop.motion.state.value}")
+
+    def _grasp_and_settle(self, bench: Bench) -> float:
+        """Grasp the injected object and hand back the pose the grip was made at.
+
+        The jaws are opened first: the simulated unit starts near the closed
+        stop, and an object injected there is a spring already compressed
+        against it, which pushes the jaws open instead of being closed on.
+        """
+        bench.send(cmd.Open())
+        self._until(bench, MotionState.HOLD)
+        bench.backend.inject(obj_mm=self.OBJECT_MM)
+        bench.send(cmd.Grasp(force_n=self.SETPOINT_N))
+        self._until(bench, MotionState.HOLD_FORCE)
+        bench.tick(300)  # the feed-forward ramps over FORCE_RAMP_S
+        made_at = bench.loop.motion.grip_mm
+        assert made_at is not None
+        return made_at
 
     def _sent_q(self, bench: Bench) -> list[float]:
         return [
@@ -1611,6 +1648,83 @@ class TestOpeningFurtherToLetGo:
 
         bench.send(cmd.BackOff(), count=4)
         assert bench.loop.motion.last_command_mm == pytest.approx(38.0, abs=1e-6)
+
+    def test_a_grip_that_drew_itself_in_is_measured_from_where_it_was_made(self) -> None:
+        """The grip is made at 28 mm and the jaws are later at 19 mm.
+
+        Nothing holds the pose once force mode starts — the frame carries no
+        position gain — so the object's own stiffness decides where they come to
+        rest, and a release from *there* would command 29 mm: ten millimetres of
+        button, nine of them spent on the draw-in, and the jaws still on the
+        object.
+        """
+        bench = self._held_at(28.0)
+        bench.send(cmd.Grasp(force_n=18.0), count=30)
+        assert bench.loop.motion.state is MotionState.HOLD_FORCE
+
+        bench.backend.q_rad = LIMITS.to_rad(19.0)  # driven in by the setpoint
+        bench.tick(4)
+        assert bench.backend.read().position_mm == pytest.approx(19.0, abs=1e-6)
+
+        bench.send(cmd.BackOff(), count=4)
+
+        assert bench.loop.motion.last_command_mm == pytest.approx(38.0, abs=1e-6)
+        assert any("已内收 9.0 mm" in line for line in bench.signals.logs()), (
+            "how far it drew in is the number nobody can otherwise see"
+        )
+
+    def test_a_grip_pushed_out_is_measured_from_where_the_jaws_are(self) -> None:
+        """The other sign of the same subtraction.
+
+        The jaws can also be pushed *out* of the grip — by hand, or by an object
+        that springs back under the load.  There the reading is the further end
+        and the one to open from; the pose the grip was made at is behind it.
+        """
+        bench = self._held_at(28.0)
+        bench.send(cmd.Grasp(force_n=18.0), count=30)
+
+        bench.backend.q_rad = LIMITS.to_rad(31.0)
+        bench.tick(4)
+
+        bench.send(cmd.BackOff(), count=4)
+
+        assert bench.loop.motion.last_command_mm == pytest.approx(41.0, abs=1e-6)
+
+    def test_one_press_frees_a_grip_that_drew_itself_in(self) -> None:
+        """The reported failure, end to end against the plant.
+
+        A 20 N grasp of a compliant object draws the jaws ~9 mm in, and the
+        release measured from where they are ends up *on* the object rather than
+        clear of it: the operator presses again — 夹取 20 N, 放开, 放开, the
+        shape of every cycle in the bench log of 2026-10-09.  Measured from the
+        pose the grip was made at, one press is the ten millimetres of clearance
+        the button has always claimed to be.
+        """
+        clock = FakeClock()
+        bench = Bench(
+            RecordingSim(config=PlantConfig(contact_k=self.SOFT), clock=clock), clock=clock
+        )
+        bench.bring_up()
+        made_at = self._grasp_and_settle(bench)
+
+        drawn_in = made_at - bench.backend.read().position_mm
+        assert drawn_in > 5.0, f"the draw-in should be visible here: {drawn_in:.2f} mm"
+
+        bench.send(cmd.BackOff())
+        self._until(bench, MotionState.HOLD)
+
+        released = bench.backend.read()
+        assert released.position_mm >= self.OBJECT_MM + 5.0, "clear of the object"
+        # Not zero: with the jaws off the object what the drive reports is its
+        # own torque, which the plant's friction puts at 1–2 N.  What matters is
+        # that it is nowhere near the 20 N the grip was holding with.
+        assert abs(released.force_n) < 2.5, f"still squeezing at {released.force_n:.2f} N"
+
+        # The arithmetic that got it there, against the physics: ten millimetres
+        # from the pose the grip was made at, not from the draw-in.
+        assert released.position_mm == pytest.approx(
+            made_at + constants.RELEASE_OPEN_MM, abs=constants.TOL_MM
+        )
 
     def test_a_release_at_the_top_of_the_travel_is_clamped_not_refused(self) -> None:
         """Nothing left to open: the move is short, and it is still a move.

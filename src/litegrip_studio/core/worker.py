@@ -919,7 +919,27 @@ class WorkerLoop:
             # closed end, so a target-relative release would drive back into the
             # object.  ``move_to_mm`` clamps, so a release at the top of the
             # travel is a move of zero length rather than an out-of-range one.
-            self._motion.move_to_mm(measured + command.delta_mm, command.source)
+            #
+            # Except while a grip is being held, which is the one case this
+            # command exists for.  A held grip is not held *at* the pose it froze
+            # at: the torque climbs to its setpoint by driving the jaws into the
+            # object, and they settle wherever its stiffness balances that —
+            # millimetres in at 20 N against a compliant object.  Opening from
+            # there means opening that much less than the button claims, which is
+            # how a single press stopped freeing what the jaws were holding.
+            # Measured from the pose the grip was made at, the distance opened is
+            # the clearance the object gets.  ``max`` because the jaws can also
+            # have been pushed *out* — by hand, or by an object that springs back
+            # — and there the reading is the further end and the one to use.
+            grip = self._motion.grip_mm
+            base = measured if grip is None else max(measured, grip)
+            if base > measured:
+                self._log(
+                    "info",
+                    f"放开：夹取后已内收 {base - measured:.1f} mm，"
+                    f"从夹取点 {base:.1f} mm 再张开 {command.delta_mm:.1f} mm",
+                )
+            self._motion.move_to_mm(base + command.delta_mm, command.source)
         elif isinstance(command, cmd.Stop):
             self._end_probe_on_interrupt(command.describe())
             if self._estop.is_set():

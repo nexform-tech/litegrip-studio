@@ -25,6 +25,8 @@ from litegrip_studio.core.motion import MotionFSM, MotionParams, MotionState
 from litegrip_studio.telemetry import Telemetry
 from litegrip_studio.units import Limits, clamp_force_torque, torque_from_force
 
+from conftest import Rig
+
 DT = constants.CTRL_DT
 #: The SDK's example 120 mm unit.  Pinned here rather than taken from the
 #: defaults because these tests are about the motion law, and a limit that moved
@@ -1012,6 +1014,93 @@ class TestAGraspThatMeetsItsObjectInTheLastMillimetre:
         assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=2.0), rig.fsm.note
         rig.run(0.5)
         assert rig.force_n == pytest.approx(self.SETPOINT_N, abs=0.8)
+
+
+class TestWhatAHeldGripRemembersAboutWhereItWasMade:
+    """The pose a grip *froze* at, which is not the pose the jaws are in.
+
+    A held grip carries no position gain, so the torque climbs to its setpoint
+    by driving the jaws into the object and they come to rest wherever its
+    stiffness balances that — millimetres of real travel against a compliant
+    one.  Everything that has to measure from the object needs the pose the grip
+    was made at rather than the pose the jaws have since reached; the release is
+    the one that is visible to an operator, and the bench log of 2026-10-09 has
+    it: `夹取 20 N`, `放开`, `放开` — twice, on every cycle, because one press
+    was being eaten by the draw-in.
+    """
+
+    #: A compliant object: at 20 N the jaws are pushed ~9 mm into it, which is
+    #: most of `RELEASE_OPEN_MM`.  The default plant bends 0.2 mm — a stiff
+    #: object makes the draw-in invisible, not absent.
+    SOFT = PlantConfig(contact_k=8.0)
+    SETPOINT_N = 20.0
+    OBJECT_MM = 40.0
+
+    def _held(self, rig) -> None:
+        assert rig.open()
+        rig.sim.inject(obj_mm=self.OBJECT_MM)
+        rig.fsm.grasp(self.SETPOINT_N)
+        assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=15.0), rig.fsm.note
+        rig.run(1.5)
+
+    def test_a_held_grip_remembers_the_pose_it_froze_at(self) -> None:
+        fsm, backend = servo(start_mm=60.0)
+        fsm.hold_force(self.SETPOINT_N, 60.0)
+        assert fsm.grip_mm == pytest.approx(60.0)
+
+        backend.mm = 55.0  # the jaws are driven into what they are holding
+        run_ticks(fsm, backend, 10)
+
+        assert fsm.state is MotionState.HOLD_FORCE
+        assert fsm.grip_mm == pytest.approx(60.0), "not where the jaws are now"
+
+    def test_the_draw_in_is_travel(self) -> None:
+        """The measurement this class exists for, against the plant."""
+        rig = Rig(config=self.SOFT)
+        self._held(rig)
+
+        made_at = rig.fsm.grip_mm
+        assert made_at is not None
+        drawn_in = made_at - rig.position_mm
+
+        assert drawn_in > 2.0, f"the drawn-in travel should be visible: {drawn_in:.2f} mm"
+        assert rig.force_n == pytest.approx(self.SETPOINT_N, abs=0.8), "at the setpoint"
+
+    def test_the_object_is_what_makes_it_draw_in(self) -> None:
+        """The same console against two objects: the difference is the object.
+
+        Which is what makes the pose the grip was made at the only stable
+        reference — the pose the jaws sit at is a consequence of what is being
+        held, and at 20 N against something soft enough it is most of the way to
+        the ten millimetres a release opens.
+        """
+        firm = Rig(config=PlantConfig(contact_k=500.0))
+        soft = Rig(config=self.SOFT)
+        self._held(firm)
+        self._held(soft)
+
+        assert abs(firm.fsm.grip_mm - firm.position_mm) < 0.5
+        assert abs(soft.fsm.grip_mm - soft.position_mm) > 2.0
+
+    @pytest.mark.parametrize("state", ["idle", "hold", "servo", "release"])
+    def test_nothing_but_a_held_grip_has_a_grip_pose(self, state: str) -> None:
+        """``None`` everywhere else, so the release falls back to the reading.
+
+        The pose is kept on the state machine between states, and a stale one is
+        worse than none: a release measured from the last grip's pose after the
+        operator has moved the jaws would open from somewhere they are not.
+        """
+        fsm, backend = servo(start_mm=60.0)
+        fsm.hold_force(self.SETPOINT_N, 60.0)
+        leave = {
+            "idle": fsm.idle,
+            "hold": lambda: fsm.hold(60.0),
+            "servo": lambda: fsm.move_to_mm(70.0, "slider"),
+            "release": fsm.release,
+        }[state]
+        leave()
+
+        assert fsm.grip_mm is None
 
 
 class TestTimeout:

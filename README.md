@@ -195,7 +195,9 @@ The frame a held grip sends carries **no gains at all** — `kp=0` and `kd=0` �
 the setpoint and nothing else. Any gain adds a term that depends on something other than the
 setpoint, and the grip stops being the number on the slider: a position term makes it depend on how
 far the jaws sank into the object, a velocity term on how fast they were still moving when they
-arrived.
+arrived. One consequence is worth knowing before **Let go**: with nothing holding the pose the grip
+was made at, the setpoint is reached by driving the jaws a little further *into* the object, so they
+hold it from a position that is not quite where they met it.
 
 Each end of the slider has a **one-press** button, placed next to the end it drives:
 
@@ -212,13 +214,20 @@ tooltip quotes the **range** (`max_stroke_mm`), not the span the calibration fil
 mm/rad has been derived from the measured travel the two differ, and quoting the span sends people
 looking for travel that cannot be reached.
 
-Directly under **Grasp** in the force box is a **Let go** button: it opens 10 mm further than where
-the jaws **are** (`RELEASE_OPEN_MM`), to release whatever they are holding. It measures from the
-**measurement**, not from the last command's target — a grasp drives to 0 mm under a force cap, so
-its target is always the closed end and "target + 10 mm" is a command straight back into the
-object. At the top of the range it is a move of zero length (`move_to_mm` clamps) rather than an
-error. It is a millimetre command, so the gate refuses it like any other move; with an unusable
-calibration the two ways to let go are **zero gravity (back-drivable)** and **stop**.
+Directly under **Grasp** in the force box is a **Let go** button: it opens 10 mm clear of the object
+being held (`RELEASE_OPEN_MM`), to release it. It measures from the **measurement**, not from the
+last command's target — a grasp drives to 0 mm under a force cap, so its target is always the closed
+end and "target + 10 mm" is a command straight back into the object. There is one exception, and it
+is the case the button exists for: while a grip is held the reference is the pose the grip was
+**made** at. A held force carries no position term, so the setpoint is reached by driving the jaws
+*into* the object until its own stiffness balances the torque — millimetres of travel against a
+compliant object, a fraction of one against a stiff object. Measuring from where the jaws are now
+would spend part of the 10 mm on that draw-in and leave them resting on the object, and the button
+would open less than it says; measured from where the grip was made, the 10 mm is the clearance the
+object gets. The draw-in is logged, so the number is visible. At the top of the range it is a move
+of zero length (`move_to_mm` clamps) rather than an error. It is a millimetre command, so the gate
+refuses it like any other move; with an unusable calibration the two ways to let go are **zero
+gravity (back-drivable)** and **stop**.
 
 ### The force plot autoscales
 
