@@ -256,6 +256,37 @@ CONTACT_FRESH_MS = 30.0
 # contact 0.2 s in, on nothing, and then drives at the feed-forward).
 KP_GRASP_APPROACH = 25.0
 
+# The press above is a lurch because the approach is a position frame and the
+# drive computes its torque: the moment the jaws are blocked ``dq`` collapses and
+# the frame is left commanding ``kp·(v_ref·dt) + kd·v_ref`` — set by the speed
+# slider, not by the setpoint, and unbounded by anything the console sends.  It
+# cannot be caught after the fact: on the simulated plant a 150 mm/s approach
+# still reads 156 mm/s of jaw speed the tick before the block and 94 the tick
+# after, so by the time any detector sees the collapse the frame pressing with
+# the whole slider speed is already on its way out.  Measured, a 20 N grasp at
+# 150 mm/s presses 35.5 N before the grip is handed over, about 18 N at the
+# slider's default 50, and only under about 45 mm/s does the press stay below
+# what was asked for.
+#
+# So a force-carrying approach is not run faster than the press the setpoint
+# allows: its speed is capped at ``v = tau/(kp·dt + kd)``, the speed whose own
+# press *is* the setpoint
+# (:meth:`~litegrip_studio.core.motion.MotionFSM._press_cap_mm_s`).  The cap is
+# proactive rather than a reaction to the collapse, precisely because the
+# collapse cannot be caught: it bounds the frame for the whole approach, so the
+# slider chooses the speed only up to the point where it would press past the
+# setpoint.  At the bench's 25–30 mm/s and a 20 N setpoint the cap is ~40 mm/s
+# and changes nothing; above it the approach runs at the cap, and the contact
+# peaks at 15–17 N on the plant instead of 28–36.  A *plain* move carries no
+# setpoint and is untouched, so this is the slider's own speed until the
+# operator asks for a force.
+#
+# ``PRESS_CAP_SAFETY`` keeps the *measured* force on the safe side of the
+# setpoint: the cap is computed from the frame the console sends, and the servo
+# lags that frame while the plant has inertia, so at 1.0 the compliant object met
+# at 150 mm/s read 20.2 N against a 20 N setpoint.  At 0.9 it stays under.
+PRESS_CAP_SAFETY = 0.9
+
 # A held force is ramped to its setpoint at this many newtons per second rather
 # than stepped to it, or ramped exponentially.  A step into a contact is an
 # impulse through the mechanism, and the fingers bounce off what they just

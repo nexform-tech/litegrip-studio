@@ -39,6 +39,16 @@ continues from the torque already in flight, so the hand-over from an approach i
 continuous: the press the approach gain had established is where the climb
 starts, and it is the *rate* that is chosen, not the duration.
 
+**A force-carrying approach is not run faster than its setpoint allows.**  The
+approach is a position frame, so until force mode is entered it is the drive that
+computes the torque, and the moment the jaws are blocked the frame is left
+commanding ``kp·(v_ref·dt) + kd·v_ref`` — set by the speed slider rather than the
+setpoint.  That collapse cannot be caught a tick early, so the frame is bounded
+for the whole approach instead: its speed is capped at the speed whose press *is*
+the setpoint, and the mechanical lurch the operator feels as "it grabs and draws
+itself in" — the frame pressing at whatever the slider asked for — never reaches
+the object.  See :meth:`MotionFSM._press_cap_mm_s`.
+
 What is left is open-loop, and that is the price: the jaws can be pushed off the
 object by hand, and an empty grasp drives on to the mechanical stop at the
 setpoint.  One consequence of it is easy to miss and is not optional — the grip
@@ -200,12 +210,19 @@ class MotionFSM:
         self._stall_reported = False
         self._note = ""
 
+        # A force-carrying approach is not run faster than the press its setpoint
+        # allows — see ``_press_cap_mm_s``.  A plain move carries no setpoint and
+        # keeps the slider's own speed.
+        speed_mm_s = self.params.speed_mm_s
+        if self._force_n > 0.0:
+            speed_mm_s = min(speed_mm_s, self._press_cap_mm_s(constants.CTRL_DT))
+
         if self.profile is None:
             self.profile = SpeedProfile(
-                self.limits, target, self.params.speed_mm_s, self.params.acc_mm_s2
+                self.limits, target, speed_mm_s, self.params.acc_mm_s2
             )
         else:
-            self.profile.set_target(target, self.params.speed_mm_s)
+            self.profile.set_target(target, speed_mm_s)
         self.state = MotionState.SERVO
 
     def open(self, source: str = "open") -> None:
@@ -410,16 +427,22 @@ class MotionFSM:
         # Three channels, because no one of them covers a close on its own: the
         # lost-motion gap, the measured torque, and stillness.
         #
-        # The lost-motion gap is the primary one, but it only integrates at
-        # cruise, and the profile leaves cruise `speed²/(2·acc) + TOL_MM` before
-        # its target — 1.2 mm at 25 mm/s, 3.5 at 50.  An object that stops the
-        # jaws inside that last stretch is met by a detector that has stopped
-        # looking, and that is where most grips are made.  Stillness covers it,
-        # and it needs no speed: the trajectory has been asking for motion for
-        # STALL_WINDOW ticks and the jaws have delivered none of it.
+        # The approach that reaches them is capped at the setpoint's press
+        # (``move_to_mm``), so whatever channel declares the contact, the frame
+        # that was pressing has already been held to what the operator asked for
+        # — the lurch is removed at the source, not detected and then caught.
         #
-        # The two position-based channels are claims about *now*, and a reading
-        # that arrived some frames ago cannot make them: a cached position
+        # The lost-motion gap is the primary one for a plain move, but it only
+        # integrates at cruise, and the profile leaves cruise
+        # `speed²/(2·acc) + TOL_MM` before its target — 1.2 mm at 25 mm/s, 3.5 at
+        # 50.  An object that stops the jaws inside that last stretch is met by a
+        # detector that has stopped looking, and that is where most grips are
+        # made.  Stillness covers it, and it needs no speed: the trajectory has
+        # been asking for motion for STALL_WINDOW ticks and the jaws have
+        # delivered none of it.
+        #
+        # The position-based channels are claims about *now*, and a reading that
+        # arrived some frames ago cannot make them: a cached position
         # accumulates the gap at the reference speed while the jaws travel
         # perfectly well, and the velocity in that same stale frame is zero, so
         # nothing downstream can veto it.  The torque channel needs no such
@@ -525,6 +548,29 @@ class MotionFSM:
         return FrameOut(None, 0.0, None, 0.0, 0.0, 0.0, False, self._note)
 
     # ── contact corroboration ───────────────────────────────────────────────
+    def _press_cap_mm_s(self, dt: float) -> float:
+        """The fastest a force-carrying approach may run.
+
+        A blocked position frame answers the speed it was sent with its whole
+        gain: ``kp·(v·dt) + kd·v``, the jaws supplying none of the velocity, so
+        the press the approach will apply when it meets something is set by the
+        *speed slider* and not by the setpoint.  The cap is the speed whose own
+        press *is* the setpoint, ``v = tau/(kp·dt + kd)``, so however far the
+        slider is wound the frame cannot drive past what the operator asked for.
+        See :data:`~litegrip_studio.constants.PRESS_CAP_SAFETY`.
+
+        It bites only above that speed, which is the point: at the bench's
+        25–30 mm/s and a 20 N setpoint it is ~40 mm/s, so a careful approach is
+        unchanged and only a fast one — the one that used to press 35 N — is
+        held to the setpoint.  ``PRESS_CAP_SAFETY`` keeps the measured force on
+        the safe side of the setpoint, since the servo lags the frame this is
+        computed from.  The ``kp·dt`` term keeps the denominator off zero even
+        with no damping.
+        """
+        kd = max(self.params.kd, 0.0)
+        target_torque = clamp_force_torque(self._force_n) * constants.PRESS_CAP_SAFETY
+        return target_torque / (constants.KP_GRASP_APPROACH * dt + kd) * self.limits.rad_to_mm
+
     def _jaws_have_stopped(self, telemetry, ref_mm_s: float) -> bool:
         """Whether the jaws are held still, rather than merely lagging.
 
@@ -566,7 +612,12 @@ class MotionFSM:
         120 mm move at 5 mm/s take the 24 s it is supposed to take.
         """
         p = self.params
-        speed = max(p.speed_mm_s, 1e-9)
+        # The speed the move is actually running at, which a force-carrying
+        # approach has had capped to the setpoint's press (``move_to_mm``): a
+        # deadline computed from the uncapped slider speed would declare a capped
+        # move lost before it could arrive.  ``self.profile`` is set for the
+        # whole of a SERVO move, which is the only caller.
+        speed = max(self.profile.speed_mm_s if self.profile else p.speed_mm_s, 1e-9)
         acc = max(p.acc_mm_s2, 1e-9)
         distance = max(distance_mm, 0.0)
 

@@ -1066,6 +1066,128 @@ class TestAGraspThatMeetsItsObjectInTheLastMillimetre:
         assert rig.force_n == pytest.approx(self.SETPOINT_N, abs=0.8)
 
 
+class TestAForceApproachIsNotRunFasterThanItsSetpoint:
+    """The lurch the operator reported, one tick before the contact.
+
+    While a force setpoint is pending the approach is a plain position frame, and
+    the drive computes its own ``kp·(q_cmd−q) + kd·(dq_cmd−dq)`` from it.  At
+    the moment the jaws are blocked the measured velocity collapses in a single
+    tick, and the frame still carrying the slider's speed answers with its whole
+    gain — the press is ``kp·(v·dt) + kd·v``, set by the *slider*, not by the
+    setpoint.  At 150 mm/s and a 20 N setpoint that is a 35.5 N spike before the
+    hand-over; the reactive contact channels cannot catch it, because the
+    telemetry the console reads is one tick stale (``de6c8c6`` shows a collapse
+    from 156.7 to 93.8 mm/s between two ticks).
+
+    So the approach is capped at the source, in :meth:`MotionFSM.move_to_mm`:
+    the speed whose own press *is* the setpoint.  Below the cap nothing changes —
+    the bench's 25–30 mm/s is a no-op — and above it the contact peaks at the
+    setpoint instead of past it.  A *plain* move carries no setpoint and keeps
+    the slider's speed, so this must not slow an ordinary close or open.
+    """
+
+    SETPOINT_N = 20.0
+
+    @staticmethod
+    def press_cap_mm_s(fsm, force_n: float) -> float:
+        """``v = tau/(kp·dt + kd)``, the speed the class under test is named for."""
+        return (
+            clamp_force_torque(force_n)
+            * constants.PRESS_CAP_SAFETY
+            / (constants.KP_GRASP_APPROACH * DT + fsm.params.kd)
+            * fsm.limits.rad_to_mm
+        )
+
+    def test_a_fast_force_approach_is_capped_to_its_setpoint(self) -> None:
+        fsm, _ = servo(start_mm=100.0)
+        fsm.set_speed(constants.SPEED_MAX_MM_S)
+        fsm.grasp(self.SETPOINT_N)
+
+        assert fsm.profile is not None
+        cap = self.press_cap_mm_s(fsm, self.SETPOINT_N)
+        assert cap < constants.SPEED_MAX_MM_S, "the fixture is too slow to exercise the cap"
+        assert fsm.profile.speed_mm_s == pytest.approx(cap)
+
+    def test_the_frame_never_asks_for_more_than_the_cap(self) -> None:
+        fsm, backend = servo(start_mm=100.0)
+        fsm.set_speed(constants.SPEED_MAX_MM_S)
+        fsm.grasp(self.SETPOINT_N)
+        outs = run_ticks(fsm, backend, int(0.4 / DT))  # past the acceleration ramp
+
+        cap = self.press_cap_mm_s(fsm, self.SETPOINT_N)
+        # Signed: at the bench's mounting the command is negative while closing.
+        reached = max(abs(o.vel_ref_mm_s) for o in outs)
+        assert reached == pytest.approx(cap)
+        assert reached < constants.SPEED_MAX_MM_S
+
+    def test_a_careful_approach_is_left_at_the_slider_speed(self) -> None:
+        """The cap is a ceiling, not a floor: a speed already under it stands."""
+        fsm, _ = servo(start_mm=100.0)
+        fsm.set_speed(25.0)
+        fsm.grasp(self.SETPOINT_N)
+
+        assert self.press_cap_mm_s(fsm, self.SETPOINT_N) > 25.0
+        assert fsm.profile is not None
+        assert fsm.profile.speed_mm_s == 25.0
+
+    def test_a_plain_move_keeps_the_slider_speed(self) -> None:
+        """No setpoint, no cap — an ordinary close must still run at speed.
+
+        ``open()`` and a plain ``close()`` inherit no force; inheriting one would
+        put every move into force mode, and inheriting the *cap* would silently
+        slow the one motion the operator uses to get somewhere in a hurry.
+        """
+        fsm, _ = servo(start_mm=100.0)
+        fsm.set_speed(constants.SPEED_MAX_MM_S)
+        fsm.close()
+
+        assert fsm.profile is not None
+        assert fsm.profile.speed_mm_s == constants.SPEED_MAX_MM_S
+
+    def test_a_fast_grasp_does_not_press_past_its_setpoint(self) -> None:
+        """The 35.5 N incident, on the stiffest contact the plant models.
+
+        Measured at ``de6c8c6``: a 20 N grasp at 150 mm/s reads 35.5 N before the
+        hand-over.  With the cap the press the approach can apply *is* the
+        setpoint, so the peak over the whole grasp — transit, contact, and the
+        climb after it — never overshoots what was asked for.
+        """
+        rig = Rig(config=PlantConfig(contact_k=500.0))
+        rig.fsm.set_speed(constants.SPEED_MAX_MM_S)
+        assert rig.open()
+        # ``peak_force`` is tracked from power-on, and the open is a plain move
+        # at the slider speed — the free-travel acceleration transient, not the
+        # contact.  The claim here is about the grasp, so the peak starts there.
+        rig.peak_force = 0.0
+        rig.sim.inject(obj_mm=40.0)
+        rig.fsm.grasp(self.SETPOINT_N)
+
+        assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=10.0), rig.fsm.note
+        rig.run(constants.FORCE_MAX_N / constants.FORCE_RAMP_N_S + 0.5)
+
+        assert rig.peak_force <= self.SETPOINT_N + 0.3, (
+            f"the contact pressed {rig.peak_force:.1f} N for a {self.SETPOINT_N:.0f} N grip"
+        )
+        assert rig.force_n == pytest.approx(self.SETPOINT_N, abs=0.8)
+
+    def test_a_capped_approach_still_reaches_contact(self) -> None:
+        """The deadline must be sized from the speed the move runs at.
+
+        A force-carrying close at the slider's maximum is capped to a fraction of
+        it, so a deadline computed from the uncapped speed would declare the move
+        lost before it could arrive.  Contact, not the deadline, must end it.
+        """
+        rig = Rig(config=PlantConfig(contact_k=500.0))
+        rig.fsm.set_speed(constants.SPEED_MAX_MM_S)
+        assert rig.open()
+        rig.sim.inject(obj_mm=40.0)
+        rig.fsm.grasp(self.SETPOINT_N)
+
+        assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=10.0), (
+            f"the grasp ended in {rig.fsm.state.value}, not on contact: {rig.fsm.note}"
+        )
+
+
 class TestWhatAHeldGripRemembersAboutWhereItWasMade:
     """The pose a grip *froze* at, which is not the pose the jaws are in.
 
