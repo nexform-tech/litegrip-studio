@@ -1188,6 +1188,149 @@ class TestAForceApproachIsNotRunFasterThanItsSetpoint:
         )
 
 
+class TestTheTwoRisesAGraspPutsOnThePlot:
+    """What the operator's force plot actually draws, and why it rises twice.
+
+    The plot is the *measured* force and nothing else.  The worker copies the
+    backend's torque straight into the frame the UI receives
+    (``worker._publish``, ``force_n=tele.force_n``), the simulated backend
+    reports ``force_from_torque(tau)`` of the motor's own estimate
+    (``plant.py``), and ``PlotsPage`` appends that ``frame.force_n`` — published
+    at ``TELEMETRY_HZ`` (50) and drawn at ``PLOT_HZ`` (25).  So "why two rises"
+    is "why does the measured torque rise twice", and the answer is the two
+    frames a grasp is run with.
+
+    First rise, the *position frame*.  Until an object is met the grasp is a
+    plain position frame at the slider's speed with ``tau_ff = 0``
+    (:meth:`MotionFSM._approach_frame`): the console commands no force at all,
+    and the drive computes its own ``kp·(q_cmd−q) + kd·(dq_cmd−dq)``.  That
+    torque is the first thing the plot shows, and it is set by the *speed*, not
+    by the setpoint — the same for a 5 N grasp as a 30 N one run at the same
+    speed.  It stops where the effort cap put it (``de6c8c6``; the cap is
+    ``MotionFSM._press_cap_mm_s``, applied in :meth:`MotionFSM.move_to_mm`).
+
+    Second rise, the *force ramp*.  At contact the frame drops to the setpoint
+    alone, ``kp=kd=0`` (:meth:`MotionFSM._force_frame`), and the feed-forward
+    climbs to it at ``FORCE_RAMP_N_S``.  ``e078d72`` made that climb start from
+    the press already in flight and stop on the setpoint, so it is monotone and
+    cannot overshoot.  Both rises are therefore expected, and neither is a
+    fault: only the first was ever unbounded, and the cap bounds it.
+    """
+
+    OBJECT_MM = 40.0
+
+    def test_the_operator_s_five_newton_grasp_is_a_single_rise(self) -> None:
+        """The 5 N case: no spike, then a fall back to the setpoint.
+
+        With the cap in force a 5 N approach is run slowly enough that its press
+        *is* the setpoint, so the curve the plot draws — transit, contact, and
+        the short climb after it — rises once and holds.  Reproduced before the
+        cap at 25 mm/s the same grasp peaked at 12.8 N and fell to 5.
+        """
+        rig = Rig(config=PlantConfig(contact_k=500.0))
+        rig.fsm.set_speed(constants.SPEED_MAX_MM_S)
+        assert rig.open()
+        rig.sim.inject(obj_mm=self.OBJECT_MM)
+        rig.fsm.grasp(5.0)
+
+        forces: list[float] = []
+        for _ in range(int(30.0 / DT)):
+            rig.tick()
+            forces.append(rig.force_n)
+            if rig.fsm.state is MotionState.HOLD_FORCE and rig.force_n >= 4.95:
+                break
+
+        # ``forces[:40]`` is the free-travel acceleration transient every move
+        # has, force-carrying or not; the claim is about the grasp's own shape.
+        body = forces[40:]
+        assert max(body) <= 5.3, f"a 5 N grasp rose to {max(body):.2f} N"
+        assert rig.force_n == pytest.approx(5.0, abs=0.3)
+        falls = [i for i in range(1, len(body)) if body[i] < body[i - 1] - 0.5]
+        assert not falls, f"the rise was not monotone at {falls[:3]}"
+
+    def test_the_operator_s_thirty_newton_grasp_stops_then_climbs(self) -> None:
+        """The 30 N case: the approach stops at its press, then the ramp runs.
+
+        At the bench's 25 mm/s the cap does not bite a 30 N setpoint (it would
+        allow ~59), so the first rise stops at the drive's position-loop press —
+        about 11.5 N here — and the second is the feed-forward climbing the rest
+        of the way at exactly ``FORCE_RAMP_N_S``.
+        """
+        rig = Rig(config=PlantConfig(contact_k=500.0))
+        rig.fsm.set_speed(25.0)
+        assert rig.open()
+        rig.sim.inject(obj_mm=self.OBJECT_MM)
+        rig.fsm.grasp(30.0)
+
+        rows: list[tuple[MotionState, float]] = []
+        for _ in range(int(30.0 / DT)):
+            rig.tick()
+            rows.append((rig.fsm.state, rig.force_n))
+            if rig.fsm.state is MotionState.HOLD_FORCE and rig.force_n >= 29.95:
+                break
+
+        hand = next(i for i, (state, _) in enumerate(rows)
+                    if state is MotionState.HOLD_FORCE)
+        press = rows[hand][1]
+        assert press < 0.6 * 30.0, f"the first rise reached {press:.2f} N"
+
+        climb_s = (len(rows) - 1 - hand) * DT
+        assert climb_s > 0.2, "the fixture's press is too close to the setpoint"
+        rate = (rows[-1][1] - press) / climb_s
+        assert rate == pytest.approx(constants.FORCE_RAMP_N_S, rel=0.1)
+        assert max(f for _, f in rows[40:]) <= 30.3
+
+    def test_the_first_rise_is_the_speed_not_the_setpoint(self) -> None:
+        """Under both caps, a 5 N and a 30 N grasp press by the same amount.
+
+        The frame the approach sends carries no force, so a harder setpoint
+        cannot press harder on the way in — proof that the first rise is the
+        drive's position loop, and that the only lever on it is the speed.
+        """
+        def press_at(setpoint_n: float) -> float:
+            rig = Rig(config=PlantConfig(contact_k=500.0))
+            assert rig.open()  # at the default speed; the grasp is what is timed
+            rig.fsm.set_speed(8.0)  # under both setpoints' caps (9.9 and 59.4)
+            rig.sim.inject(obj_mm=self.OBJECT_MM)
+            rig.fsm.grasp(setpoint_n)
+            assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=30.0), rig.fsm.note
+            return rig.force_n  # the tick of hand-over is the press
+
+        assert press_at(5.0) < 5.0
+        assert press_at(30.0) < 30.0
+        assert press_at(5.0) == pytest.approx(press_at(30.0), abs=0.05)
+
+    def test_a_setpoint_too_small_to_bound_is_run_at_the_slider_floor(self) -> None:
+        """The cap cannot be honoured below the speed floor, and must not be.
+
+        A 1 N setpoint's cap is 2.0 mm/s, under ``SPEED_MIN_MM_S`` (5), and the
+        profile clamps it back up.  That is deliberate: measured on the plant, an
+        empty close run at or below 2.5 mm/s hands over in 0.1 s with the jaws
+        still at the open stop, or stalls partway, because the drive's stiction
+        holds them still and the stillness channel reads that as contact — only
+        at 3.5 mm/s and above does it reach the object.  So the floor bounds the
+        cap, and a 1 N setpoint is pressed at the floor's own ~2.5 N.  The
+        guarantee a *capped* approach gives is "no harder than the setpoint",
+        and it holds only from about 2.6 N up; below that the press is the
+        floor's, which is the reason not to lower ``SPEED_MIN_MM_S``.
+        """
+        rig = Rig(config=PlantConfig(contact_k=500.0))
+        rig.fsm.set_speed(constants.SPEED_MAX_MM_S)
+        assert rig.open()
+        rig.sim.inject(obj_mm=self.OBJECT_MM)
+        rig.fsm.grasp(1.0)
+
+        cap = (
+            clamp_force_torque(1.0)
+            * constants.PRESS_CAP_SAFETY
+            / (constants.KP_GRASP_APPROACH * DT + rig.fsm.params.kd)
+            * rig.limits.rad_to_mm
+        )
+        assert cap < constants.SPEED_MIN_MM_S, "the fixture no longer exercises the floor"
+        assert rig.fsm.profile is not None
+        assert rig.fsm.profile.speed_mm_s == constants.SPEED_MIN_MM_S
+
+
 class TestWhatAHeldGripRemembersAboutWhereItWasMade:
     """The pose a grip *froze* at, which is not the pose the jaws are in.
 
