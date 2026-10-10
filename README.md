@@ -195,7 +195,48 @@ The frame a held grip sends carries **no gains at all** — `kp=0` and `kd=0` �
 the setpoint and nothing else. Any gain adds a term that depends on something other than the
 setpoint, and the grip stops being the number on the slider: a position term makes it depend on how
 far the jaws sank into the object, a velocity term on how fast they were still moving when they
-arrived.
+arrived. One consequence is worth knowing before **Let go**: with nothing holding the pose the grip
+was made at, the setpoint is reached by driving the jaws a little further *into* the object, so they
+hold it from a position that is not quite where they met it.
+
+Nor is the setpoint switched on. The torque climbs to it at `FORCE_RAMP_N_S`, 20 newtons per second,
+starting from the torque already in flight: a grasp that met its object and handed over at the ~10 N
+the approach had pressed with reaches 20 N half a second later, as a rise the operator can watch
+rather than a jump. The rate is the constant on purpose — a ramp specified as a *time* is at its
+steepest in its first tick, which is a step with a slow tail, and the mechanism answers a step with
+a lurch.
+
+A grasp is two frames, not one, and the force plot draws both. Until the jaws meet something the
+approach is a **position** frame carrying the slider's speed and `tau_ff = 0`: the console commands
+no force at all, and the drive computes `kp·(q_cmd−q) + kd·(dq_cmd−dq)` itself. That torque is the
+first rise on the plot, and it is bounded by the setpoint's own torque. The press a frame applies
+when it meets something is `kp·(v·dt + lead) + kd·v`, and the two terms the console supplies — the
+damping the approach travels with (`MotionFSM._approach_kd`) and the lead it is given
+(`MotionFSM._approach_lead_rad`) — are sized so that whole expression fits inside the budget the
+setpoint names, at any speed. The slider keeps deciding how fast the approach travels; above the
+speed whose damping alone would spend the budget it is the damping that yields, not the speed. A
+*plain* move carries no setpoint and keeps the slider's speed and the operator's damping both. The
+second rise is the ramp above, from that press to the setpoint. Two rises on the plot are expected,
+then; only the first was ever unbounded, and it no longer is.
+
+The hand-over is logged: the pose the grip was made at, how far the jaws had travelled to reach it,
+and which of the three contact channels declared it. The pose alone does not say what happened — a
+grip made at the object is a grasp, and the same reading taken a millimetre into a close is a
+mechanism that had not broken away from rest yet being read as an obstruction, after which force
+mode drives the jaws the rest of the way at the ramp rather than the slider. The channel is what
+tells those apart after the run, and the log is the only place that survives it.
+
+Do not lower `SPEED_MIN_MM_S` to chase a very small setpoint. The one speed a setpoint still
+decides is the speed whose tick's own step `kp·v·dt` would spend the whole budget: a setpoint that
+cannot cover it at the speed asked for has the approach slowed until it can
+(`MotionFSM._tick_press_cap_mm_s`), which on this bench is 36.8 mm/s for a 1 N grasp and 736 mm/s
+at 20 N. Those are the same order as the speeds the slider offers, so at the setpoints the bench
+uses the floor never binds; it binds only under 0.14 N, where the setpoint's own speed drops below
+it — a 0.1 N grasp asks for 3.7 mm/s and runs at 5. Measured on the plant, that 0.1 N grasp at the
+maximum slider speed never leaves the open stop at all — the jaws sit there, and the stillness
+channel reads that rest as contact, handing over to force mode without having travelled. The floor's
+job is to keep the approach a speed that moves, and a setpoint below it cannot fix that by being
+smaller.
 
 Each end of the slider has a **one-press** button, placed next to the end it drives:
 
@@ -212,13 +253,20 @@ tooltip quotes the **range** (`max_stroke_mm`), not the span the calibration fil
 mm/rad has been derived from the measured travel the two differ, and quoting the span sends people
 looking for travel that cannot be reached.
 
-Directly under **Grasp** in the force box is a **Let go** button: it opens 10 mm further than where
-the jaws **are** (`RELEASE_OPEN_MM`), to release whatever they are holding. It measures from the
-**measurement**, not from the last command's target — a grasp drives to 0 mm under a force cap, so
-its target is always the closed end and "target + 10 mm" is a command straight back into the
-object. At the top of the range it is a move of zero length (`move_to_mm` clamps) rather than an
-error. It is a millimetre command, so the gate refuses it like any other move; with an unusable
-calibration the two ways to let go are **zero gravity (back-drivable)** and **stop**.
+Directly under **Grasp** in the force box is a **Let go** button: it opens 10 mm clear of the object
+being held (`RELEASE_OPEN_MM`), to release it. It measures from the **measurement**, not from the
+last command's target — a grasp drives to 0 mm under a force cap, so its target is always the closed
+end and "target + 10 mm" is a command straight back into the object. There is one exception, and it
+is the case the button exists for: while a grip is held the reference is the pose the grip was
+**made** at. A held force carries no position term, so the setpoint is reached by driving the jaws
+*into* the object until its own stiffness balances the torque — millimetres of travel against a
+compliant object, a fraction of one against a stiff object. Measuring from where the jaws are now
+would spend part of the 10 mm on that draw-in and leave them resting on the object, and the button
+would open less than it says; measured from where the grip was made, the 10 mm is the clearance the
+object gets. The draw-in is logged, so the number is visible. At the top of the range it is a move
+of zero length (`move_to_mm` clamps) rather than an error. It is a millimetre command, so the gate
+refuses it like any other move; with an unusable calibration the two ways to let go are **zero
+gravity (back-drivable)** and **stop**.
 
 ### The force plot autoscales
 
@@ -548,19 +596,55 @@ asked for — accumulates the same 1 mm while **moving perfectly normally**, and
 fault rather than a safety measure: what the operator sees is "it moves twice and stops", not the
 position they dragged to.
 
-So for a plain position move (no force setpoint) the 1 mm also needs **corroboration** before it
-counts as contact: the measured speed below 25 % of the reference speed (`CONTACT_STILL_RATIO`).
-Because the test is a **ratio** and not an absolute speed it holds at 5 mm/s and at 150 mm/s alike;
-a real obstruction collapses the speed and is still caught, and a mechanism that genuinely does not
-move is caught by the stall counter and the **arrival timeout**, neither of which changed.
+So the 1 mm also needs **corroboration** before it counts as contact, on any move: the measured
+speed below 25 % of the reference speed (`CONTACT_STILL_RATIO`). Because the test is a **ratio**
+and not an absolute speed it holds at 5 mm/s and at 150 mm/s alike; a real obstruction collapses
+the speed and is still caught, and a mechanism that genuinely does not move is caught by the stall
+counter and the **arrival timeout**, neither of which changed. A move that carries a force setpoint
+leans on that corroboration hardest: it is given no `lead`, so the push behind its approach is the
+tick's own `kp·v·dt` and whatever friction eats into that shows up as tracking lag, for the gap to
+integrate.
 
 The number has a measured origin: in the simulation, a mechanism with 0.3 Nm of Coulomb friction
 moving at 20 mm/s was declared "position not changing over time" after 2.7 mm while travelling at
-**87 % of the commanded speed**. With the corroboration, the same move completes.
-`tests/test_motion_fsm.py::TestWhetherAGapIsAnObstruction` pins both cases.
+**87 % of the commanded speed**. With the corroboration, the same move completes. The same defect
+reaches the operator as "at low speed the jaws race to the grasp position, and 放开 does not open
+1 cm": 0.05 Nm of Coulomb friction — five times what the simulated unit's own free travel draws —
+at 10 mm/s hands the grip over **35.4 mm short of the object**, force mode then drives the jaws at
+up to **115 mm/s** against that 10 mm/s slider, and 放开, which opens from the pose the grip was
+made at, runs to the open stop, **45 mm clear** of the object. With the corroboration the grip is
+made at the object and 放开 opens `RELEASE_OPEN_MM`.
+`tests/test_motion_fsm.py::TestWhetherAGapIsAnObstruction` and `TestAGraspAtTheSlidersSlowEnd` pin
+both cases.
 
-A move that **carries** a force setpoint is the one exception to what the arrival timeout does. It
-exists to stop a position that is not converging, and a grip that is not converging has already
+### A grip is made where the gap detector is blind
+
+The gap is only integrated while the trajectory is at **cruise**, because during the acceleration
+ramp the plant legitimately lags its moving reference by a few millimetres — an artefact of
+accelerating, not of obstruction. A close leaves cruise `speed²/(2·acc) + TOL_MM` before its
+target: 1.2 mm at 25 mm/s, 3.5 mm at 50, because that is where it starts braking. Meet the object
+inside that last stretch and the primary detector has already stopped looking, which is where a
+grip on a stiff or a thin object is made.
+
+So a move that **carries** a force setpoint has **three** contact channels, and they cover each
+other: the gap, the measured torque (`CONTACT_TAU_NM`, and the only channel that works off an old
+reading — a torque is what the drive applied, whenever it was read), and **stillness** —
+`ProfileOutput.stalled`, the trajectory asking for motion for 0.1 s while the jaws deliver less
+than `STALL_RAD` of it. Stillness takes no account of speed, so it reaches the slow end where the
+torque channel cannot, and it costs one thing: the approach gain's press for those 0.1 s.
+
+The numbers come from the simulated plant. A 20 N grasp at 25 mm/s against an object 1 mm short of
+the closed stop pressed **9.2 N for 5.3 s** on the gap and torque channels alone — the gap blind
+for the reason above, and 9.2 N well under the 15 N the torque channel needs — and then jumped to
+the setpoint on the move deadline. With stillness it hands over in **0.25 s**. That press is
+`kd·v_ref`-dominated, so it is the speed slider that sets it, not the setpoint: 9.2 N at 20 mm/s,
+11.4 at 25, 18.8 at the 50 mm/s default.
+`tests/test_motion_fsm.py::TestAGraspThatMeetsItsObjectInTheLastMillimetre` pins the hand-over, the
+requirement that the reading be current (stillness in a cached position is not evidence), and that
+a free approach is not mistaken for contact.
+
+A move that **carries** a force setpoint is also the one exception to what the arrival timeout does.
+It exists to stop a position that is not converging, and a grip that is not converging has already
 reached the state it was aiming for: the feed-forward alone. Taking the position hold instead
 leaves the jaws with nothing but whatever the object's own stiffness offers at the pose they froze
 at, which on the bench is a grip that sags away from its setpoint a few seconds after it took hold.

@@ -36,6 +36,17 @@ PLOT_HZ = 25
 
 # ── Motion ──────────────────────────────────────────────────────────────────
 # Speed range/default follow litearm-studio's gripper panel (5–150, default 50).
+#
+# The floor is not only a UI nicety: it also bounds the one speed a setpoint
+# still decides, the speed whose tick's own step spends the whole budget
+# (``MotionFSM._tick_press_cap_mm_s``).  Do not lower it to chase a very small
+# setpoint: measured on the simulated plant, an empty close run at or below
+# 2.5 mm/s hands over in 0.1 s with the jaws still at the open stop, or stalls
+# partway, because the drive's stiction holds them still and the stillness
+# channel reads that as contact; only from 3.5 mm/s does it reach the object.
+# On this bench it binds only under 0.14 N — 1 N works out at 36.8 mm/s and
+# 20 N at 736, so at the setpoints the bench uses the floor never binds, and
+# lowering it buys nothing.
 SPEED_MIN_MM_S = 5.0
 SPEED_MAX_MM_S = 150.0
 SPEED_DEFAULT_MM_S = 50.0
@@ -91,30 +102,57 @@ FORCE_THEORETICAL_MAX_N = 100.0
 
 GRASP_STALL_CYCLES = 20
 
-# How far 放开 opens past where the jaws are, to let go of what they are holding.
+# How far 放开 opens, to let go of what the jaws are holding.  The distance is
+# the *clearance* the object gets, which is what fixes what it is measured from.
 #
-# Measured from the *measured* position and not from the grasp's target: a grasp
-# drives to 0 mm under a force cap (``MotionFSM.grasp``), so its target is the
-# closed end, and ten millimetres past that would be a command back into the
-# object.  It is the operator's number, and it is at the bottom of the accepted
-# travel range (``STROKE_MIN_MM``): a gripper configured with the shortest travel
-# the console accepts can still open this far from a fully closed pinch.  A
-# longer travel clamps at its own top, so the move is short rather than refused.
+# Not from the grasp's target: a grasp drives to 0 mm under a force cap
+# (``MotionFSM.grasp``), so its target is the closed end, and ten millimetres
+# past that would be a command back into the object.  From the measured position
+# — except while a grip is held, when it is measured from the pose the grip was
+# made at (``MotionFSM.grip_mm``): a held force drives the jaws into the object
+# as its torque climbs to the setpoint, ~9 mm at 20 N against a compliant one,
+# and ten millimetres from where they got to would be that much less clearance.
+# It is the operator's number, and it is at the bottom of the accepted travel
+# range (``STROKE_MIN_MM``): a gripper configured with the shortest travel the
+# console accepts can still open this far from a fully closed pinch.  A longer
+# travel clamps at its own top, so the move is short rather than refused.
 RELEASE_OPEN_MM = 10.0
 
-# Contact detection for a force-carrying move, in two independent channels.
+# Contact detection for a force-carrying move, in three independent channels.
 #
 # ``CONTACT_LOST_MM`` is the primary detector and needs no hardware knowledge:
 # the trajectory integrates the path it *would* have taken and compares it with
 # where the jaws actually are, so a growing gap means something is in the way.
 # The threshold is above the worst tracking lag of a free move (about 0.4 mm at
 # full acceleration) and small enough to catch contact within 20 ms at speed.
+#
+# "At speed" is the catch, and the reason a force-carrying move does not rest on
+# this channel alone: the gap only integrates while the trajectory is at cruise,
+# and a close leaves cruise ``speed²/(2·acc) + TOL_MM`` before its target — 1.2
+# mm at 25 mm/s, 3.5 at 50 — because that is where it starts braking.  Meet the
+# object inside that last stretch and the primary detector is blind, which is
+# where a grip on a stiff or a thin object is actually made.  Measured on the
+# simulated plant: a 20 N grasp at 25 mm/s, object 0.9 mm short of the closed
+# stop, pressed at the approach gain's 9.2 N (below ``CONTACT_TAU_NM``, so that
+# channel could not see it either) for 5.3 s, and only the move deadline handed
+# the setpoint over.  That is an operator's "it goes to 11 N, sits there, then
+# jumps to 20 N" — and the 5.3 s is the whole of what was wrong with it.
+#
+# So stillness is the third channel, and it is the one that takes no account of
+# speed at all: ``ProfileOutput.stalled`` — the trajectory has asked for motion
+# for ``STALL_WINDOW`` ticks and the jaws have delivered less than ``STALL_RAD``
+# of it each tick.  It costs ``STALL_WINDOW`` ticks of the approach gain's press
+# before the hand-over (0.1 s at the control rate, against 5.3 above), and like
+# the lost-motion channel it is a claim about *now*, so it needs a fresh reading
+# — see ``CONTACT_FRESH_MS``.
 CONTACT_LOST_MM = 1.0
 
 # ``CONTACT_TAU_NM`` is the fast path for a hard object met at low speed, where
-# the lost-motion gap accumulates slowly.  It sits above the ~0.6 Nm the
-# mechanism draws merely to accelerate itself, which is what stops it firing at
-# the start of every move — the reason it is not the primary detector.
+# the lost-motion gap accumulates slowly — and, being a torque, the only channel
+# that works off a stale reading.  It sits above the ~0.6 Nm the mechanism draws
+# merely to accelerate itself, which is what stops it firing at the start of
+# every move — the reason it is not the primary detector, and also why it cannot
+# see a press lighter than 15 N.
 CONTACT_TAU_NM = 1.5
 
 # On a *plain* move the lost-motion gap above is a model, and on its own it is
@@ -192,8 +230,12 @@ CONTACT_STILL_RATIO = 0.25
 # what decides it, ``kp·lead`` being the push and ``kd`` what makes the approach
 # speed right, so this is a gain question wearing a millimetre's clothing.
 #
-# It does nothing for a force-carrying move, where the position gain is the
-# approach gain and this much lead would read as contact on its own.
+# It is not what a force-carrying move uses: that one's lead is sized from its
+# setpoint's torque budget rather than from this constant, because the press it
+# is allowed is a property of the force the operator asked for and not of the
+# console's own stiction margin — see
+# :meth:`~litegrip_studio.core.motion.MotionFSM._approach_lead_rad`.  This is the
+# plain move's lead, and the value below is sized for that.
 CONTACT_LEAD_RAD = 0.004
 
 # How old the reading may be and still count as evidence.
@@ -213,18 +255,88 @@ CONTACT_FRESH_MS = 30.0
 
 # Position gain while closing under a force setpoint.  Deliberately far below
 # KP_MOVE: whatever gain is in force during the approach becomes the squeeze
-# applied before contact is noticed (``kp`` × the lost-motion threshold), so a
-# stiff gain would put a spike through the setpoint on every grasp.  At the
-# values above that pre-contact squeeze is ~4 N, regardless of the setpoint.
+# applied before contact is noticed, so a stiff gain would put a spike through
+# the setpoint on every grasp.
+#
+# That squeeze is the whole of the frame's position and velocity terms, and the
+# velocity term is the larger one: with the jaws held, ``dq≈0`` and the damping
+# term becomes ``kd·v_ref``, so the press is set by the *speed slider*, not by
+# the setpoint.  At 20 mm/s the damping is 7.8 N on this bench against the
+# position term's 0.5, so the damping is the one to govern, and a setpoint
+# governs it by being the budget the approach's damping is derived from
+# (``MotionFSM._approach_kd``) rather than by the operator lowering ``kd``: the
+# same term is what makes the approach track the slider at all.  Measured on the
+# plant with 0.3 Nm of Coulomb friction at 10 mm/s, ``kd`` 0.5 hands the grip to
+# the friction at the open stop, 45 mm short of the object, while 1.0 and the
+# default 2.0 both reach it.
 KP_GRASP_APPROACH = 25.0
 
-# Torque feed-forward is ramped in over this long rather than stepped.  A step
-# into a contact is an impulse through the mechanism, and the fingers bounce off
-# what they just touched — with a velocity gain in the frame that bounce was
-# fought by a damping torque too, which spiked a 40 N grip to 56 N.  The gains
-# are gone (`MotionFSM._force_frame` sends the feed-forward alone), and the
-# ramp stays: the bounce is the mechanism's own, not the gain's.
-FORCE_RAMP_S = 0.05
+# The press above is a lurch because the approach is a position frame and the
+# drive computes its torque: the moment the jaws are blocked ``dq`` collapses and
+# the frame is left commanding ``kp·(v_ref·dt) + kd·v_ref`` — set by the speed
+# slider, not by the setpoint, and unbounded by anything the console sends.  It
+# cannot be caught after the fact: on the simulated plant a 150 mm/s approach
+# still reads 155 mm/s of jaw speed the tick before the block and 82 the tick
+# after, so by the time any detector sees the collapse the frame pressing with
+# the whole slider speed is already on its way out.  Measured with the budget
+# taken out of the frame, a 20 N grasp against the plant's stiff object peaks at
+# 14.5 N at 30 mm/s, 17.4 at the slider's default 50 and 35.5 at 150: the press
+# grows with the speed, and at the fast end it is nearly twice what was asked
+# for.
+#
+# So a force-carrying approach is not *capable* of pressing harder than the
+# setpoint: the budget is spent across the two terms the console supplies, the
+# damping it travels with (``MotionFSM._approach_kd``) and the lead it is given
+# (``MotionFSM._approach_lead_rad``), so a frame meeting something presses at
+# most ``kp·(v·dt + lead) + kd·v = tau``.  The bound is proactive rather than a
+# reaction to the collapse, precisely because the collapse cannot be caught: it
+# holds for the whole approach.  Measured on the same plant and object, a 20 N
+# grasp now peaks at 4.8–18.1 N across the slider's 5–150 mm/s, a 5 N grasp at
+# 5.4 and a 30 N one at 17.5.
+#
+# The budget is spent in the damping and the lead and *not* in the speed, and
+# that is the part that matters to the operator.  Bounding it in the speed also
+# bounds the press, but it makes the frame's press and its speed one quantity:
+# above the bound the slider stops doing anything, and the operator's own
+# complaint — the jaws slamming shut on grasp, opening far too wide on open —
+# came from exactly that.  Written into the damping and the lead, the approach
+# travels at the speed it was asked for and only what it would press is the
+# setpoint.  A *plain* move carries no setpoint and is untouched.
+#
+# ``PRESS_CAP_SAFETY`` keeps the *measured* force on the safe side of the
+# setpoint: the budget is computed from the frame the console sends, and the
+# servo lags that frame while the plant has inertia, so what is measured at the
+# hand-over is not what the frame asked for.  At 1.0 a 20 N grasp at 150 mm/s
+# measures 15.2 N.  The margin is not enough at the setpoints barely above the
+# mechanism's own friction, where the tick's own step is the whole of the budget
+# and the plant's acceleration transient is not small next to it: a 5 N grasp at
+# 25 mm/s reads 5.7 N at 1.0 and 5.4 at 0.9, which is the one case that goes
+# over.
+PRESS_CAP_SAFETY = 0.9
+
+# A held force is ramped to its setpoint at this many newtons per second rather
+# than stepped to it, or ramped exponentially.  A step into a contact is an
+# impulse through the mechanism, and the fingers bounce off what they just
+# touched — with a velocity gain in the frame that bounce was fought by a
+# damping torque too, which spiked a 40 N grip to 56 N.  The gains are gone
+# (`MotionFSM._force_frame` sends the feed-forward alone) and the ramp stays:
+# the bounce is the mechanism's own, not the gain's.
+#
+# An exponential with a 0.05 s time constant is a step as far as the mechanism
+# is concerned.  It covers 63% of the distance in 50 ms and 95% in 150, at a
+# rate that is highest at the first tick and decays from there — so the frame
+# still leads with an impulse, and gets there by slowing down rather than by
+# arriving evenly.  Measured on the bench, a 20 N grasp went from the ~10 N the
+# approach had pressed with to the setpoint in one jump the operator could see,
+# and the console's own log recorded the jaws 5.6 mm further in than the pose
+# the grip was made at by the time they let go two seconds later.
+#
+# At this rate the hand-over from a grasp — about ten newtons of press — reaches
+# a 20 N setpoint in half a second, and a setpoint moved to at most the rated
+# 40 N takes two.  A rate is what makes the force climb evenly and stop at the
+# setpoint rather than arriving at it; it is one number, and it is the whole of
+# the choice.
+FORCE_RAMP_N_S = 20.0
 
 # ── Stroke ──────────────────────────────────────────────────────────────────
 #: The travel of the gripper this console drives, in millimetres.

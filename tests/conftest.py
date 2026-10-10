@@ -127,8 +127,21 @@ class Rig:
         self.peak_force = 0.0
 
     # ── driving ─────────────────────────────────────────────────────────────
-    def tick(self, allow_motion: bool = True):
-        out = self.fsm.tick(self.sim, self.sim.read(), CTRL_DT, allow_motion=allow_motion)
+    def tick(self, allow_motion: bool = True, telemetry_current: bool = True):
+        """One tick against the simulated plant.
+
+        ``telemetry_current`` is the worker's judgement about the reading
+        (:data:`~litegrip_studio.constants.CONTACT_FRESH_MS`); it is settable
+        here so a test can drive the same physics with a link that has gone
+        quiet, which is a different question from what the physics does.
+        """
+        out = self.fsm.tick(
+            self.sim,
+            self.sim.read(),
+            CTRL_DT,
+            allow_motion=allow_motion,
+            telemetry_current=telemetry_current,
+        )
         self.clock.advance(CTRL_DT)
         self.sim.poll()
         self.t += CTRL_DT

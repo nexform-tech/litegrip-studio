@@ -131,14 +131,16 @@ class Grasp(Command):
 
 @dataclass(frozen=True)
 class BackOff(Command):
-    """Open ``delta_mm`` further than where the jaws are — the release after a grasp.
+    """Open ``delta_mm`` clear of the object — the release after a grasp.
 
-    Relative to the *measured* position rather than to the target, and that is
-    the whole of why this is a command of its own instead of a :class:`MoveToMm`
-    the GUI computes: a grasp drives to 0 mm under a force cap, so its target is
-    the closed end and "the target plus ten millimetres" is a command back into
-    the object being held.  Where the jaws actually are is knowledge the worker
-    has and the page only has a twenty-millisecond-old copy of.
+    Which pose that distance is measured from is the worker's to decide and the
+    page's to leave alone: a grasp drives to 0 mm under a force cap, so its
+    target is the closed end and "the target plus ten millimetres" is a command
+    back into the object being held.  The measurement is the usual reference,
+    and while a grip is held it is the pose the grip was *made* at, since the
+    jaws are driven into the object as the force climbs to its setpoint.  Both
+    are knowledge the worker has and the page only has a twenty-millisecond-old
+    copy of.
     """
 
     delta_mm: float = constants.RELEASE_OPEN_MM

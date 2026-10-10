@@ -9,7 +9,7 @@ block inside ``control_mit_stream`` with no abort hook.
 Force semantics
 ---------------
 A force setpoint is a torque feed-forward, and two things make it mean what it
-says.
+says.  A third decides what the mechanism does on the way there.
 
 **The frame carries no gains at all.**  ``kp=0`` and ``kd=0``, so the only
 torque in it is the feed-forward.  A MIT gain is a torque that depends on
@@ -31,9 +31,45 @@ travel, so an advancing reference cannot grow a position term without bound as
 it did when the SDK's reference kept moving past a blocked object (a 40 N
 setpoint delivered 59 N there).
 
+**It arrives at the setpoint at a fixed rate.**  The feed-forward climbs to the
+setpoint in newtons per second rather than being stepped to it, so the operator
+watches the force rise and stop rather than seeing it jump — see
+:data:`~litegrip_studio.constants.FORCE_RAMP_N_S`.  Entering force mode the ramp
+continues from the torque already in flight, so the hand-over from an approach is
+continuous: the press the approach gain had established is where the climb
+starts, and it is the *rate* that is chosen, not the duration.
+
+**A force-carrying approach presses no harder than its setpoint.**  The approach
+is a position frame, so until force mode is entered it is the drive that computes
+the torque: on meeting something the frame is left commanding
+``kp·(v_ref·dt + lead) + kd·v_ref``, and the press is whatever those three terms
+come to rather than anything the setpoint said.  The console supplies two of the
+three — the damping it travels with and the lead it is given — and a setpoint
+spends its torque budget across exactly those, so the press the approach is
+capable of *is* the setpoint, however far the slider is wound.  See
+:meth:`MotionFSM._approach_kd` and :meth:`MotionFSM._approach_lead_rad`.
+
+Spending the budget that way rather than in the speed is what keeps the slider
+meaning something.  Bounding the press by bounding the speed works, and it was
+what this console did, but it makes the frame's press and its speed the same
+quantity: above the bound the operator moves the slider and nothing changes.  The
+damping and the lead are the frame's own, so the approach travels at the speed it
+was asked for and only what it would *press* is the setpoint — and the lead is
+what moves the jaws at the slow end, where ``kd·v`` alone is a couple of newtons.
+
 What is left is open-loop, and that is the price: the jaws can be pushed off the
 object by hand, and an empty grasp drives on to the mechanical stop at the
-setpoint.  The two guards below still bound it:
+setpoint.  One consequence of it is easy to miss and is not optional — the grip
+is *not held at the pose it froze at*.  With no position term in the frame, the
+setpoint is reached by driving the jaws into the object until its own stiffness
+balances the torque: millimetres of travel against a compliant one, a fraction
+of a millimetre against a stiff one.  So anything that has to measure from the
+object has to measure from the pose the grip was *made* at, which is what
+:attr:`MotionFSM.grip_mm` is for, and not from the pose the jaws have reached
+since.  ``放开`` is where that shows: measured from the draw-in, ten millimetres
+of release is ten millimetres minus the draw-in of clearance around the object.
+
+The two guards below still bound it:
 
 * the reference is clamped to the calibrated travel, so even with no object the
   fingers halt at the closed stop;
@@ -94,6 +130,41 @@ class MotionParams:
     kd: float = constants.KD_DEFAULT
 
 
+def _toward(value: float, target: float, step: float) -> float:
+    """Move ``value`` towards ``target`` by at most ``step``, and land on it.
+
+    Landing on the target rather than near it is the point: a ramp that keeps
+    adding a fraction of the remaining distance never arrives, and a held force
+    is read by the operator as the number it settles at.
+    """
+    if value < target:
+        return min(value + step, target)
+    return max(value - step, target)
+
+
+def _contact_reason(gap: bool, torque: bool, still: bool) -> str:
+    """Name the channel that declared a contact, for the operator's log.
+
+    The channels are not interchangeable and the pose alone does not say which
+    one fired: a grip declared a millimetre into a close is a mechanism that had
+    not broken away from rest yet being read as an obstruction, and a grip
+    declared at the object is a grasp.  Only the channel tells them apart
+    afterwards, and the log is the only place that survives the run.
+    """
+    if gap:
+        return "接触：丢失位移"
+    if torque:
+        return "接触：力矩"
+    return "接触：静止"
+
+
+#: The grip channels that are not a contact at all: the jaws ran out of travel
+#: rather than meeting anything.  Kept apart from the three above so a log line
+#: never reads a closed stop as an object.
+GRIP_ARRIVED = "到位：夹到目标位"
+GRIP_DEADLINE = "超时：未到位"
+
+
 class MotionFSM:
     """Owns the commanded trajectory.  Call :meth:`tick` once per control tick."""
 
@@ -107,6 +178,9 @@ class MotionFSM:
 
         self._force_n: float = 0.0  # setpoint carried by the active move
         self._frozen_mm: float | None = None
+        # Which channel declared the grip being held, for the operator's log.
+        # Meaningful only in HOLD_FORCE, like ``_frozen_mm``.
+        self._grip_channel = ""
         # The pose held by HOLD_RAD, in radians and never clamped.  Meaningful
         # only in that state; every other state that holds a pose holds it in
         # millimetres, and there is deliberately no path from one to the other.
@@ -122,6 +196,11 @@ class MotionFSM:
         self._deadline_s: float | None = None
         self._stall_reported = False
         self._note = ""
+        # The damping a SERVO frame carries.  The operator's ``kd`` for a plain
+        # move; a force-carrying approach derives its own from the setpoint, so
+        # that the press it would apply on meeting something is the setpoint
+        # rather than whatever the slider asks for — see ``_approach_kd``.
+        self._kd_servo: float = 0.0
         # The most recent ProfileOutput, for telemetry and diagnosis.
         self.last_profile_out = None
 
@@ -169,13 +248,27 @@ class MotionFSM:
         self._deadline_s = None
         self._stall_reported = False
         self._note = ""
+        # The previous move's last output is not evidence about this one: the
+        # lead is sized from the speed the approach is running at, and a stale
+        # velocity would size it for a move that has already ended.
+        self.last_profile_out = None
+
+        # The slider decides how fast the approach travels whatever it carries;
+        # what a force setpoint bounds is the *press*, and that is carried by the
+        # frame's damping and by the lead it is allowed — see
+        # ``_approach_lead_rad`` and ``_approach_kd``.
+        speed_mm_s = self.params.speed_mm_s
+        self._kd_servo = self.params.kd
+        if self._force_n > 0.0:
+            speed_mm_s = min(speed_mm_s, self._tick_press_cap_mm_s())
+            self._kd_servo = self._approach_kd(speed_mm_s)
 
         if self.profile is None:
             self.profile = SpeedProfile(
-                self.limits, target, self.params.speed_mm_s, self.params.acc_mm_s2
+                self.limits, target, speed_mm_s, self.params.acc_mm_s2
             )
         else:
-            self.profile.set_target(target, self.params.speed_mm_s)
+            self.profile.set_target(target, speed_mm_s)
         self.state = MotionState.SERVO
 
     def open(self, source: str = "open") -> None:
@@ -225,13 +318,20 @@ class MotionFSM:
         self.source = "stop"
         self._note = ""
 
-    def hold_force(self, force_n: float, measured_mm: float, source: str = "hold_force") -> None:
+    def hold_force(
+        self,
+        force_n: float,
+        measured_mm: float,
+        source: str = "hold_force",
+        channel: str = "",
+    ) -> None:
         """Freeze at the current position and apply a grip force there."""
         self.state = MotionState.HOLD_FORCE
         self.profile = None
         self._force_n = clamp_force(force_n)
         self._tau_cmd = None
         self._frozen_mm = self.limits.clamp_mm(measured_mm)
+        self._grip_channel = channel
         self._frozen_rad = None
         self.last_command_mm = self._frozen_mm
         self.source = source
@@ -362,13 +462,11 @@ class MotionFSM:
         # ── SERVO ───────────────────────────────────────────────────────────
         assert self.profile is not None
         self._elapsed += dt
-        # A plain move gets the bounded lead that keeps its push independent of
-        # the speed it was sent at; a force-carrying one does not, because there
-        # the position gain is the approach gain and the same lead on its own
-        # would read as the contact it is trying to detect.
-        out = self.profile.step(
-            pos_mm, dt, 0.0 if self._force_n > 0.0 else constants.CONTACT_LEAD_RAD
-        )
+        # The lead is the approach's push: bounded for a plain move by
+        # ``CONTACT_LEAD_RAD``, and for a force-carrying one by whatever is left
+        # of the setpoint's torque budget once its damping has taken its share —
+        # see ``_approach_lead_rad``.
+        out = self.profile.step(pos_mm, dt, self._approach_lead_rad())
         self.last_profile_out = out
         if self._deadline_s is None:
             self._deadline_s = self._move_deadline(abs(out.err_mm))
@@ -377,20 +475,68 @@ class MotionFSM:
         # switch to pure torque instead of pushing — see the module docstring
         # for why the freeze and the zero position gain are both required.
         #
-        # The lost-motion half of the test is a claim about *now*, and a reading
-        # that arrived some frames ago cannot make it: a cached position
+        # Three channels, because no one of them covers a close on its own: the
+        # lost-motion gap, the measured torque, and stillness.
+        #
+        # The approach that reaches them presses no harder than the setpoint
+        # (``_approach_kd`` and ``_approach_lead_rad``), so whatever channel
+        # declares the contact, the frame that was pressing has already been held
+        # to what the operator asked for — the lurch is removed at the source,
+        # not detected and then caught.
+        #
+        # The lost-motion gap is the primary one for a plain move, but it only
+        # integrates at cruise, and the profile leaves cruise
+        # `speed²/(2·acc) + TOL_MM` before its target — 1.2 mm at 25 mm/s, 3.5 at
+        # 50.  An object that stops the jaws inside that last stretch is met by a
+        # detector that has stopped looking, and that is where most grips are
+        # made.  Stillness covers it, and it needs no speed: the trajectory has
+        # been asking for motion for STALL_WINDOW ticks and the jaws have
+        # delivered none of it.
+        #
+        # The position-based channels are claims about *now*, and a reading that
+        # arrived some frames ago cannot make them: a cached position
         # accumulates the gap at the reference speed while the jaws travel
         # perfectly well, and the velocity in that same stale frame is zero, so
         # nothing downstream can veto it.  The torque channel needs no such
         # guard — a torque is what the drive is applying, whenever it was read.
-        contact = (out.contact and telemetry_current) or (
-            self._force_n > 0.0 and abs(telemetry.torque_nm) >= constants.CONTACT_TAU_NM
+        #
+        # A force-carrying move takes the lost-motion gap only when the jaws
+        # have actually stopped, for the reason the plain move below is
+        # corroborated the same way: the gap is a model, and a mechanism with
+        # friction to spare lags it while travelling perfectly well.  The lead
+        # (``_approach_lead_rad``) is what answers that lag, but it cannot be
+        # relied on to remove it — at the slider's slow end the damping has
+        # already spent the budget and the lead is zero, and the gap is what
+        # sizes the lead wherever there is one, so a jaw that is merely stiff
+        # still opens a gap while travelling.  Uncorroborated, the gap reaches
+        # ``CONTACT_LOST_MM`` while the jaws are still in free travel, the grip
+        # is declared at a pose the object is nowhere near, force mode then
+        # drives them the rest of the way at the ramp's rate rather than the
+        # slider's, and ``放开`` — which measures from the pose the grip was made
+        # at — opens all of that again.  Measured on the simulated unit at the
+        # slider's slow end, 0.05 Nm of Coulomb friction at 10 mm/s: the grip was
+        # made 35.4 mm short of the object, the force phase peaked at 115 mm/s
+        # against a 10 mm/s slider, and the release ran to the open stop, 45 mm
+        # clear.  A real obstruction is unaffected — the jaws are held against
+        # something, so their speed collapses against whatever was asked of them
+        # — and one that creeps instead of stopping is left to the stall counter
+        # and the move deadline, both unchanged.
+        stopped = self._jaws_have_stopped(telemetry, out.vel_mm_s)
+        gap = out.contact and telemetry_current and (self._force_n <= 0.0 or stopped)
+        torque = (
+            self._force_n > 0.0
+            and abs(telemetry.torque_nm) >= constants.CONTACT_TAU_NM
         )
+        still = self._force_n > 0.0 and out.stalled and telemetry_current
+        contact = gap or torque or still
         if contact:
             if self._force_n > 0.0:
-                self.hold_force(self._force_n, pos_mm, source=self.source)
-                return self._force_frame(backend, pos_mm, telemetry, dt, "contact")
-            if self._jaws_have_stopped(telemetry, out.vel_mm_s):
+                reason = _contact_reason(gap, torque, still)
+                self.hold_force(
+                    self._force_n, pos_mm, source=self.source, channel=reason
+                )
+                return self._force_frame(backend, pos_mm, telemetry, dt, reason)
+            if stopped:
                 self._stall_reported = True
                 self.hold(pos_mm)
                 self._note = "堵转：位置未随时间变化"
@@ -407,7 +553,9 @@ class MotionFSM:
             if self._force_n > 0.0:
                 # Reached the target (or the closed stop) under force: hold the
                 # force at the resting position.
-                self.hold_force(self._force_n, pos_mm, source=self.source)
+                self.hold_force(
+                    self._force_n, pos_mm, source=self.source, channel=GRIP_ARRIVED
+                )
                 return self._force_frame(backend, pos_mm, telemetry, dt, "grip")
             if self._settle_ticks * dt >= constants.SETTLE_S:
                 target = self.limits.clamp_mm(self.last_command_mm or pos_mm)
@@ -430,7 +578,9 @@ class MotionFSM:
                 # its setpoint a few seconds in, and keeps only whatever the
                 # mechanism's own stiffness offers at the pose it froze at.
                 force_n = self._force_n
-                self.hold_force(force_n, pos_mm, source=self.source)
+                self.hold_force(
+                    force_n, pos_mm, source=self.source, channel=GRIP_DEADLINE
+                )
                 self._note = f"{self._deadline_s:.0f}s 内未到位，保持 {force_n:.0f} N"
                 return self._force_frame(backend, pos_mm, telemetry, dt, "grip")
             self.hold(pos_mm)
@@ -445,7 +595,7 @@ class MotionFSM:
             # force during the approach is the squeeze applied before contact is
             # detected, so it is a force-control parameter, not a servo one.
             constants.KP_GRASP_APPROACH if self._force_n > 0.0 else p.kp,
-            p.kd,
+            self._kd_servo,
             0.0,
             out.err_mm,
             "servo",
@@ -477,6 +627,97 @@ class MotionFSM:
         return FrameOut(None, 0.0, None, 0.0, 0.0, 0.0, False, self._note)
 
     # ── contact corroboration ───────────────────────────────────────────────
+    def _press_budget_nm(self) -> float:
+        """The torque a force-carrying approach may press with, N·m."""
+        return clamp_force_torque(self._force_n) * constants.PRESS_CAP_SAFETY
+
+    def _tick_press_cap_mm_s(self) -> float:
+        """The fastest a force-carrying approach may travel at all.
+
+        One term of the press is not the console's to withhold: the command
+        leads the measured position by the tick's own travel whatever else is
+        done, so a frame moving at ``v`` presses ``kp·v·dt`` on meeting
+        something no matter what damping or lead it carries.  For every setpoint
+        the slider offers that is a fraction of the budget — anything above 4 N
+        covers it at the top of the range — but a setpoint below it cannot be
+        honoured at any speed, and the only honest answer is the speed whose own
+        press *is* the setpoint.  This is the one place the setpoint still
+        decides how fast the approach travels, and it is the tick's arithmetic
+        rather than a policy.
+        """
+        return (
+            self._press_budget_nm()
+            / (constants.KP_GRASP_APPROACH * constants.CTRL_DT)
+            * self.limits.rad_to_mm
+        )
+
+    def _approach_kd(self, speed_mm_s: float) -> float:
+        """The damping a force-carrying approach runs with.
+
+        A blocked position frame answers the speed it was sent with its whole
+        gain: ``kp·(v·dt) + kd·v``, the jaws supplying none of the velocity, so
+        the press the approach applies when it meets something is set by the
+        *speed slider* rather than by the setpoint.  Two of the three factors are
+        the console's, and either can carry the bound: the speed the approach
+        travels at, or the damping it travels with.  Written into the speed, the
+        bound stops the slider doing anything above it — the operator moves it
+        and nothing changes.  Written into the damping, it does not: the approach
+        still travels at the speed it was asked for, and only the torque it would
+        apply on meeting something is the setpoint.
+
+        This is the damping whose own press at the slider's speed *is* the
+        budget, ``kd = tau/v − kp·dt``, never above the operator's own ``kd`` and
+        never below zero — a setpoint too small to bound at this speed leaves the
+        last term to the lead, which sheds it rather than the approach driving
+        past.  The ``kp·dt`` term is the tick's share of the position error, which
+        is ``v·dt`` whenever the jaws keep up.
+        """
+        v_rad_s = abs(
+            mm_to_rad_per_s(
+                speed_mm_s, self.limits.rad_to_mm, direction=self.limits.direction
+            )
+        )
+        if v_rad_s <= 0.0:
+            return self.params.kd
+        residual = self._press_budget_nm() - constants.KP_GRASP_APPROACH * v_rad_s * (
+            constants.CTRL_DT
+        )
+        return max(0.0, min(self.params.kd, residual / v_rad_s))
+
+    def _approach_lead_rad(self) -> float:
+        """How far a force-carrying approach's command may lead the jaws.
+
+        What the damping above does not spend of the budget, the lead does.  Its
+        press is ``kp`` times the frame's position error, and the error the
+        profile is given is one tick of travel plus this lead, so the lead is
+        whatever keeps ``kp·(v·dt + lead) + kd·v`` — the press a frame meeting
+        something would apply — inside the setpoint.  At the speed the damping
+        was sized for the budget is already spent and this is zero; slower, or
+        decelerating into the target, it opens up, and it is what moves the jaws
+        at the slider's slow end, where ``kd·v`` alone is a couple of newtons.
+
+        The lead is applied by :class:`~litegrip_studio.core.profile.SpeedProfile`
+        only where a gap has already opened, so a free approach never sees it and
+        one held up is given exactly as much push as it needs, up to the setpoint.
+        See :data:`~litegrip_studio.constants.PRESS_CAP_SAFETY` for the margin
+        that keeps the measured force on the safe side of the setpoint.
+        """
+        if self._force_n <= 0.0:
+            return constants.CONTACT_LEAD_RAD
+        last = self.last_profile_out
+        v_mm_s = abs(last.vel_mm_s) if last is not None else self.profile.speed_mm_s
+        v_rad_s = abs(
+            mm_to_rad_per_s(
+                v_mm_s, self.limits.rad_to_mm, direction=self.limits.direction
+            )
+        )
+        residual = (
+            self._press_budget_nm()
+            - constants.KP_GRASP_APPROACH * v_rad_s * constants.CTRL_DT
+            - self._kd_servo * v_rad_s
+        )
+        return max(0.0, residual / constants.KP_GRASP_APPROACH)
+
     def _jaws_have_stopped(self, telemetry, ref_mm_s: float) -> bool:
         """Whether the jaws are held still, rather than merely lagging.
 
@@ -518,7 +759,13 @@ class MotionFSM:
         120 mm move at 5 mm/s take the 24 s it is supposed to take.
         """
         p = self.params
-        speed = max(p.speed_mm_s, 1e-9)
+        # The speed the move is actually running at, which is the profile's own
+        # and not the slider's: a setpoint too small for the tick's own press has
+        # had the approach slowed for it (``_tick_press_cap_mm_s``), and a
+        # deadline computed from the slider speed would declare that move lost
+        # before it could arrive.  ``self.profile`` is set for the whole of a
+        # SERVO move, which is the only caller.
+        speed = max(self.profile.speed_mm_s if self.profile else p.speed_mm_s, 1e-9)
         acc = max(p.acc_mm_s2, 1e-9)
         distance = max(distance_mm, 0.0)
 
@@ -578,18 +825,20 @@ class MotionFSM:
         docstring for why every gain costs that equality, and for the SDK's #29
         reaching the same answer from ``hold_kp=150``/``hold_kd=2``.
 
-        The torque is ramped rather than stepped, which is what keeps the
-        fingers from bouncing off what they just touched: a *step* into a
-        contact is an impulse through the mechanism, and at 40 N it spiked the
-        grip to 56 N.  Entering force mode, the ramp continues from the torque in
-        flight, so the transition is continuous.
+        The torque is ramped to the setpoint at a fixed rate in newtons per
+        second, which is what keeps the fingers from bouncing off what they just
+        touched and what makes the force climb evenly instead of arriving in a
+        jump: a *step* into a contact is an impulse through the mechanism, and at
+        40 N it spiked the grip to 56 N.  Entering force mode the ramp continues
+        from the torque in flight, so the transition is continuous, and it lands
+        exactly on the setpoint rather than near it.  See
+        ``constants.FORCE_RAMP_N_S``.
 
         This is also why the force displayed during a *free* move is not zero:
         a braking torque is a real motor torque.  Only the settled value after
         the ramp is the grip force.
         """
         target = clamp_force_torque(self._force_n)
-        alpha = min(dt / constants.FORCE_RAMP_S, 1.0)
         if self._tau_cmd is None:
             # Entering force mode: continue from the torque in flight so the
             # transition is continuous.
@@ -597,7 +846,13 @@ class MotionFSM:
                 telemetry.torque_nm if abs(telemetry.torque_nm) < abs(target) else target
             )
 
-        self._tau_cmd += (target - self._tau_cmd) * alpha
+        # A fixed rate in newtons per second, so the force climbs evenly and
+        # stops at the setpoint.  Everything about the approach to the setpoint
+        # is here — see ``constants.FORCE_RAMP_N_S`` for what a step does to the
+        # mechanism, and for why an exponential with a short time constant is
+        # one.
+        step_nm = constants.FORCE_RAMP_N_S * dt / constants.NM_TO_N
+        self._tau_cmd = _toward(self._tau_cmd, target, step_nm)
 
         return self._send(backend, hold_mm, 0.0, 0.0, 0.0, self._tau_cmd, 0.0, note)
 
@@ -638,6 +893,35 @@ class MotionFSM:
     @property
     def is_moving(self) -> bool:
         return self.state is MotionState.SERVO
+
+    @property
+    def grip_mm(self) -> float | None:
+        """The pose the grip being held was made at, or ``None``.
+
+        Force mode freezes where the jaws met the object, and then the torque
+        climbs to its setpoint by driving them *into* it — with no position term
+        in the frame, nothing holds the frozen pose, and they stop wherever the
+        object's own stiffness balances the setpoint.  Against a compliant
+        object that draw-in is millimetres of real travel (see
+        :data:`~litegrip_studio.constants.RELEASE_OPEN_MM`), which is why this
+        is not the pose the jaws are in now: it is the millimetre a release has
+        to be measured from if the distance it opens is to be the *clearance*
+        around the object rather than a distance eaten into by the draw-in.
+        ``None`` unless a grip is being held.
+        """
+        return self._frozen_mm if self.state is MotionState.HOLD_FORCE else None
+
+    @property
+    def grip_channel(self) -> str:
+        """Which channel declared the held grip, or ``""``.
+
+        The pose a grip was made at does not say what made it, and the two
+        readings are opposite conclusions: a grip declared at the object is a
+        grasp, and the same grip declared a millimetre into a close is a
+        mechanism that had not broken away from rest yet read as an
+        obstruction.  ``""`` unless a grip is being held.
+        """
+        return self._grip_channel if self.state is MotionState.HOLD_FORCE else ""
 
     def force_setpoint(self) -> float:
         return self._force_n if self.state is MotionState.HOLD_FORCE else 0.0

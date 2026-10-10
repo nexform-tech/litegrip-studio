@@ -99,7 +99,8 @@ class ControlPage(QWidget):
         self._grasp.setProperty("accent", True)
         self._back_off.setProperty("accent", True)
         self._back_off.setToolTip(
-            f"从夹爪现在的位置再张开 {constants.RELEASE_OPEN_MM:.1f} mm，用来松开夹住的物体。"
+            f"从夹住物体的位置再张开 {constants.RELEASE_OPEN_MM:.1f} mm，用来松开夹住的物体。"
+            "夹取后夹爪会因受力向内收一些，这里按夹取点算，保证真的让开这么多；"
             "不是回到夹取前的目标位置，也不是量程顶端"
         )
         # The two end-to-end moves sit either side of the bar, on the ends they

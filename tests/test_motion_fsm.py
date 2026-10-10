@@ -21,9 +21,18 @@ import pytest
 
 from litegrip_studio import constants
 from litegrip_studio.backend.plant import Plant, PlantConfig
-from litegrip_studio.core.motion import MotionFSM, MotionParams, MotionState
+from litegrip_studio.core.motion import (
+    GRIP_ARRIVED,
+    GRIP_DEADLINE,
+    MotionFSM,
+    MotionParams,
+    MotionState,
+    _contact_reason,
+)
 from litegrip_studio.telemetry import Telemetry
 from litegrip_studio.units import Limits, clamp_force_torque, torque_from_force
+
+from conftest import Rig
 
 DT = constants.CTRL_DT
 #: The SDK's example 120 mm unit.  Pinned here rather than taken from the
@@ -854,7 +863,10 @@ class TestForceControl:
         rig.sim.inject(obj_mm=60.0)
         rig.fsm.grasp(force_n)
         assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=15.0), rig.fsm.note
-        rig.run(0.5)
+        # The grip climbs to its setpoint at FORCE_RAMP_N_S from wherever the
+        # approach left it, so the settle is the whole climb plus the plant's own
+        # settling — from zero, and never longer than this.
+        rig.run(constants.FORCE_MAX_N / constants.FORCE_RAMP_N_S + 0.5)
 
         assert rig.force_n == pytest.approx(force_n, abs=0.8)
         assert rig.position_mm > 55.0
@@ -879,13 +891,60 @@ class TestForceControl:
         term fight the rebound — it spiked a 40 N grip to 56 N."""
         fsm, backend = servo(start_mm=60.0)
         fsm.hold_force(40.0, 60.0)
-        outs = run_ticks(fsm, backend, 80)
+        outs = run_ticks(fsm, backend, 500)
         target = clamp_force_torque(40.0)
 
         assert outs[0].tau_nm < target * 0.2, "the first frame must not be a step"
         assert outs[-1].tau_nm == pytest.approx(target, rel=0.02)
         for prev, cur in zip(outs, outs[1:]):
             assert cur.tau_nm >= prev.tau_nm - 1e-12, "the ramp must be monotone"
+
+    def test_the_torque_climbs_at_one_rate_wherever_it_starts(self) -> None:
+        """The bench report: a step, not a climb.
+
+        A 20 N grasp that met its object jumped to the setpoint the moment force
+        mode took over.  The ramp it jumped on was exponential with a 0.05 s time
+        constant, so it covered 63% of the distance in 50 ms and 95% in 150, and
+        its *first* tick was its largest move — a step with a slow tail.  A fixed
+        rate in newtons per second is what makes the climb even, and it has to
+        start from the torque already in flight: a hand-over that restarted the
+        ramp from zero would step *down* to the press it was meant to continue.
+        """
+        step_nm = constants.FORCE_RAMP_N_S * DT / constants.NM_TO_N
+        target = clamp_force_torque(20.0)
+        for pressed_nm in (0.0, 1.0, 1.9):
+            fsm, backend = servo(start_mm=60.0)
+            backend.torque_nm = pressed_nm
+            fsm.hold_force(20.0, 60.0)
+            outs = run_ticks(fsm, backend, 400)
+            reached = next(i for i, o in enumerate(outs) if o.tau_nm == target)
+
+            assert outs[0].tau_nm == pytest.approx(pressed_nm + step_nm)
+            steps = [b.tau_nm - a.tau_nm for a, b in zip(outs[:reached], outs[1 : reached + 1])]
+            assert steps, "the ramp must climb"
+            assert all(s == pytest.approx(step_nm) for s in steps), (
+                "every climbing tick adds the same torque"
+            )
+            assert outs[-1].tau_nm == target, "it lands on the setpoint and stays"
+
+    def test_a_press_of_ten_newtons_climbs_to_twenty_in_half_a_second(self) -> None:
+        """The same climb in the units the operator works in.
+
+        Ten newtons is what the approach gain has pressed with when a grasp hands
+        over, so this is the crossing the bench watches: half a second of force
+        rising evenly, not a jump.
+        """
+        fsm, backend = servo(start_mm=60.0)
+        backend.torque_nm = torque_from_force(10.0)
+        fsm.hold_force(20.0, 60.0)
+        outs = run_ticks(fsm, backend, 400)
+
+        reached = next(i for i, o in enumerate(outs) if o.tau_nm == clamp_force_torque(20.0))
+        assert reached * DT == pytest.approx(0.5, abs=2 * DT)
+        # Linear in *time*: halfway through the climb is halfway up it.  The
+        # exponential this replaced would be at 19.9 N here.
+        midway = outs[reached // 2].tau_nm * constants.NM_TO_N
+        assert midway == pytest.approx(15.0, abs=0.2)
 
     def test_a_held_force_does_not_read_the_measured_velocity(self) -> None:
         """The frame a force hold sends must not depend on how fast the jaws
@@ -922,14 +981,786 @@ class TestForceControl:
         assert fsm.params.force_n == 0.0
 
 
+class TestAGraspThatMeetsItsObjectInTheLastMillimetre:
+    """The stretch where the primary detector has already stopped looking.
+
+    The lost-motion gap only integrates while the trajectory is at cruise, and a
+    close starts braking ``speed²/(2·acc) + TOL_MM`` before its target — 1.2 mm
+    at 25 mm/s, 3.5 at 50.  An object inside that stretch stops the jaws with
+    the gap detector blind and the torque channel needing 15 N, more than the
+    approach gain presses with, so the set force used to arrive on the move
+    deadline and nowhere sooner.  Measured at ``de6c8c6``: a 20 N grasp at
+    25 mm/s against an object 1 mm short of the closed stop pressed 9.2 N for
+    5.3 s and then jumped to the setpoint.  That 5.3 s is what these tests are
+    about, and it is why stillness is a contact channel of its own.
+    """
+
+    SPEED_MM_S = 25.0
+    SETPOINT_N = 20.0
+    OBJECT_MM = 1.0
+
+    def grasp_the_object(self, rig) -> tuple[float, float]:
+        """Close on the object; return the travel time and the move deadline."""
+        rig.fsm.set_speed(self.SPEED_MM_S)
+        assert rig.open()
+        start_mm = rig.position_mm
+        rig.sim.inject(obj_mm=self.OBJECT_MM)
+        rig.fsm.grasp(self.SETPOINT_N)
+        return (
+            (start_mm - self.OBJECT_MM) / self.SPEED_MM_S,
+            rig.fsm._move_deadline(start_mm),
+        )
+
+    def test_the_grip_arrives_with_the_jaws_not_with_the_deadline(self, rig) -> None:
+        travel_s, deadline_s = self.grasp_the_object(rig)
+
+        ticks = 0
+        while rig.fsm.state is not MotionState.HOLD_FORCE:
+            rig.tick()
+            ticks += 1
+            assert ticks * DT < deadline_s, "the deadline ended the grasp, not contact"
+
+        assert ticks * DT < travel_s + 0.5, (
+            f"the jaws meet the object at {travel_s:.2f}s and the grip must follow "
+            f"within a fraction of a second, not at {ticks * DT:.2f}s"
+        )
+        rig.run(0.5)
+        assert rig.force_n == pytest.approx(self.SETPOINT_N, abs=0.8)
+
+    def test_a_stale_reading_may_not_make_the_claim_and_a_fresh_one_may(self, rig) -> None:
+        """Stillness is a claim about now, like the lost-motion gap.
+
+        The reading in hand is a cache, and a console that has heard nothing
+        from the link for a while is looking at jaws it last saw some frames
+        ago.  What it must not do is read the stillness of that cache as an
+        object; what it must do the moment the link answers again is grip.
+        """
+        travel_s, _ = self.grasp_the_object(rig)
+
+        for _ in range(int(round((travel_s + 1.0) / DT))):
+            rig.tick(telemetry_current=False)
+        assert rig.fsm.state is MotionState.SERVO, (
+            "a stale reading decided the jaws were held"
+        )
+
+        ticks = 0
+        while rig.fsm.state is not MotionState.HOLD_FORCE:
+            rig.tick()
+            ticks += 1
+            assert ticks * DT < 0.5, "a reading that describes now must be enough"
+        rig.run(0.5)  # let the feed-forward ramp reach the setpoint
+        assert rig.force_n == pytest.approx(self.SETPOINT_N, abs=0.8)
+
+    def test_a_free_approach_is_not_read_as_a_contact(self, rig) -> None:
+        """The other half of the same channel: jaws that are travelling.
+
+        Nothing is in the way, so the trajectory is being followed and the stall
+        counter must stay quiet, however long the travel — a grip that engaged
+        early would close at the feed-forward alone instead of at the slider's
+        speed.
+        """
+        rig.fsm.set_speed(self.SPEED_MM_S)
+        assert rig.open()
+        rig.sim.inject(obj_mm=60.0)
+        rig.fsm.grasp(self.SETPOINT_N)
+
+        rig.run(0.5)  # twelve millimetres in, the object is still twelve away
+        assert rig.fsm.state is MotionState.SERVO
+        assert rig.position_mm > 60.0
+
+        assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=2.0), rig.fsm.note
+        rig.run(0.5)
+        assert rig.force_n == pytest.approx(self.SETPOINT_N, abs=0.8)
+
+
+class TestNamingTheChannelThatDeclaredTheGrip:
+    """Where a grip was made does not say what made it, and the two readings are
+    opposite conclusions.
+
+    ``39.9 mm`` against an object at 40 mm is a grasp; ``0.9 mm`` into a close
+    from the open stop is the mechanism being read as an obstruction before it
+    has broken away from rest, and force mode then drives it the rest of the way
+    at the ramp rather than the slider.  The pose alone cannot tell them apart —
+    both are "somewhere in the middle of a close" — so the channel is recorded
+    beside it, and this is what the operator's log line reads.
+    """
+
+    def test_the_channels_are_ranked_so_the_note_is_single_valued(self) -> None:
+        """A tick can trip more than one channel, and the note has to name one.
+
+        The gap is the primary detector for a move that is travelling, so it
+        outranks the other two when they coincide; a tick that trips all three is
+        a move that was already being read as an obstruction.
+        """
+        assert _contact_reason(True, True, True) == "接触：丢失位移"
+        assert _contact_reason(False, True, True) == "接触：力矩"
+        assert _contact_reason(False, False, True) == "接触：静止"
+
+    @pytest.mark.parametrize(
+        "speed_mm_s, setpoint_n, object_mm, channel",
+        [
+            # Inside the braking stretch, where the profile's gap detector has
+            # stopped looking and the bounded approach never presses at the 15 N
+            # the torque channel wants.  Stillness is the only one left.
+            (25.0, 20.0, 1.0, "接触：静止"),
+            # Met at cruise: the ideal path runs away from jaws that have been
+            # stopped, and the gap reaches CONTACT_LOST_MM first.
+            (25.0, 20.0, 40.0, "接触：丢失位移"),
+            # The same object at the slider's middle, where the approach's
+            # damping is still large and the press it applies crosses the torque
+            # threshold before the gap has had time to integrate.  Measured at
+            # 20 N, this window runs from about 30 to about 95 mm/s: below it the
+            # press never reaches 15 N, and above it the approach's budget is
+            # spent on a lead large enough that the gap detector wins the race.
+            (50.0, 20.0, 40.0, "接触：力矩"),
+        ],
+    )
+    def test_a_grip_records_the_channel_that_declared_it(
+        self, rig, speed_mm_s: float, setpoint_n: float, object_mm: float, channel: str
+    ) -> None:
+        rig.fsm.set_speed(speed_mm_s)
+        assert rig.open()
+        rig.sim.inject(obj_mm=object_mm)
+        rig.fsm.grasp(setpoint_n)
+
+        assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=5.0), rig.fsm.note
+        assert rig.fsm.grip_channel == channel
+
+    def test_a_close_that_meets_nothing_says_it_arrived(self, rig) -> None:
+        """The other outcome, and the one that must never read as an object.
+
+        Nothing is between the jaws, so the grip is made where the travel ran
+        out.  A log that called this a contact would send the operator looking
+        for an obstruction that is not there.
+        """
+        rig.fsm.set_speed(50.0)
+        assert rig.open()
+        rig.fsm.grasp(5.0)
+
+        assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=20.0), rig.fsm.note
+        assert rig.fsm.grip_channel == GRIP_ARRIVED
+        assert rig.position_mm == pytest.approx(0.0, abs=1.0), "it must have reached the stop"
+
+    def test_a_move_that_never_arrives_says_that_too(self) -> None:
+        """A mechanism that buzzes in place: moving, never arriving.
+
+        The stall counter only counts ticks with *no* motion, and a creep
+        delivers some every other tick, so nothing here reads as a contact —
+        the move simply never ends.  The deadline ends the grip, and the channel
+        has to be distinct from the three contacts for the same reason the
+        arrived one is: nothing was met.
+        """
+        fsm, backend = servo(start_mm=0.0)
+        fsm.move_to_mm(2.0, "slider", force_n=20.0)  # far too short to reach cruise
+        state = {"n": 0}
+
+        def buzz(b: IdealPlant) -> None:
+            state["n"] += 1
+            b.mm = 0.05 if state["n"] % 2 else 0.0
+
+        ticks = int(round((fsm._move_deadline(2.0) + 0.5) / DT))
+        run_ticks(fsm, backend, ticks, on_tick=buzz)
+
+        assert fsm.state is MotionState.HOLD_FORCE, fsm.note
+        assert "未到位" in fsm.note, "the deadline is what ended it, not a contact"
+        assert fsm.grip_channel == GRIP_DEADLINE
+
+    def test_no_channel_is_carried_out_of_force_mode(self, rig) -> None:
+        """The record belongs to the grip being held, not to the axis.
+
+        ``grip_mm`` is cleared the moment the grip ends for the same reason, and
+        a stale channel would outlive it in the operator's log.
+        """
+        rig.fsm.set_speed(25.0)
+        assert rig.open()
+        rig.sim.inject(obj_mm=40.0)
+        rig.fsm.grasp(20.0)
+        assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=5.0), rig.fsm.note
+        assert rig.fsm.grip_channel != ""
+
+        rig.fsm.open()
+        assert rig.fsm.grip_channel == ""
+
+
+class TestAForceApproachDoesNotPressPastItsSetpoint:
+    """The lurch the operator reported, one tick before the contact.
+
+    While a force setpoint is pending the approach is a plain position frame, and
+    the drive computes its own ``kp·(q_cmd−q) + kd·(dq_cmd−dq)`` from it.  At
+    the moment the jaws are blocked the measured velocity collapses in a single
+    tick, and the frame still carrying the slider's speed answers with its whole
+    gain — the press is ``kp·(v·dt) + kd·v``, set by the *slider*, not by the
+    setpoint.  At 150 mm/s and a 20 N setpoint that is a 35.5 N spike before the
+    hand-over; the reactive contact channels cannot catch it, because the
+    telemetry the console reads is one tick stale (``de6c8c6`` shows a collapse
+    from 156.7 to 93.8 mm/s between two ticks).
+
+    So the approach is bounded at the source, over the two terms of the press the
+    console supplies: the damping it travels with (:meth:`MotionFSM._approach_kd`)
+    and the lead it is given (:meth:`MotionFSM._approach_lead_rad`).  Between
+    them they spend the setpoint's torque budget, so the press the frame is
+    *capable* of is the setpoint — while the speed stays the slider's, which the
+    previous version of this bound spent instead, and which is why moving the
+    slider above the bound used to change nothing at all.
+    """
+
+    SETPOINT_N = 20.0
+
+    @staticmethod
+    def budget_nm(force_n: float) -> float:
+        """``tau``, the torque the approach may press with, N·m."""
+        return clamp_force_torque(force_n) * constants.PRESS_CAP_SAFETY
+
+    @staticmethod
+    def tick_cap_mm_s(fsm, force_n: float) -> float:
+        """``v = tau/(kp·dt)`` — the tick's own step spending the whole budget.
+
+        Not a policy but the one term of the press that is not the console's to
+        withhold: the command leads the measurement by a tick of travel whatever
+        else is done, so below this speed there is nothing left for the damping
+        or the lead and the approach has to slow down.
+        """
+        return (
+            TestAForceApproachDoesNotPressPastItsSetpoint.budget_nm(force_n)
+            / (constants.KP_GRASP_APPROACH * DT)
+            * fsm.limits.rad_to_mm
+        )
+
+    def test_the_slider_still_decides_how_fast_it_travels(self) -> None:
+        """The regression the bound in the *speed* caused.
+
+        Capping the speed bounds the press too, but it makes the two one
+        quantity: above the cap the operator moves the slider and nothing
+        changes.  A 20 N setpoint's tick cap is 939 mm/s, so at the slider's
+        maximum the approach travels there.
+        """
+        fsm, _ = servo(start_mm=100.0)
+        fsm.set_speed(constants.SPEED_MAX_MM_S)
+        fsm.grasp(self.SETPOINT_N)
+
+        assert self.tick_cap_mm_s(fsm, self.SETPOINT_N) > constants.SPEED_MAX_MM_S
+        assert fsm.profile is not None
+        assert fsm.profile.speed_mm_s == constants.SPEED_MAX_MM_S
+
+    def test_a_slow_approach_is_left_at_the_slider_speed(self) -> None:
+        fsm, _ = servo(start_mm=100.0)
+        fsm.set_speed(25.0)
+        fsm.grasp(self.SETPOINT_N)
+
+        assert fsm.profile is not None
+        assert fsm.profile.speed_mm_s == 25.0
+
+    def test_the_frame_never_asks_for_more_than_the_setpoint(self) -> None:
+        """The invariant, over every tick of the approach.
+
+        ``kp·(v·dt + lead) + kd·v`` is the press a frame meeting something would
+        apply, and it is the claim the whole class is named for.  Run at the
+        slider's maximum, where the budget is tightest: at 25 mm/s the damping
+        alone already fits inside a 20 N setpoint and nothing is being tested.
+        """
+        fsm, backend = servo(start_mm=100.0)
+        fsm.set_speed(constants.SPEED_MAX_MM_S)
+        fsm.grasp(self.SETPOINT_N)
+
+        profiles: list = []
+        run_ticks(
+            fsm,
+            backend,
+            int(0.4 / DT),  # past the acceleration ramp
+            on_tick=lambda _backend: profiles.append(fsm.last_profile_out),
+        )
+        assert len(profiles) == int(0.4 / DT)
+
+        budget = self.budget_nm(self.SETPOINT_N)
+        v_rad_s = constants.SPEED_MAX_MM_S / fsm.limits.rad_to_mm
+        assert (
+            constants.KP_GRASP_APPROACH * v_rad_s * DT + fsm._kd_servo * v_rad_s
+        ) == pytest.approx(budget), "the fixture no longer exercises the bound"
+
+        for out in profiles:
+            v_rad_s = abs(out.vel_mm_s) / fsm.limits.rad_to_mm
+            lead_rad = out.lead_mm / fsm.limits.rad_to_mm
+            press = (
+                constants.KP_GRASP_APPROACH * (v_rad_s * DT + lead_rad)
+                + fsm._kd_servo * v_rad_s
+            )
+            assert press <= budget + 1e-9, (
+                f"a frame asked for {press * constants.NM_TO_N:.2f} N "
+                f"against a {self.SETPOINT_N:.0f} N setpoint"
+            )
+
+    def test_a_careful_approach_keeps_the_damping_it_was_asked_for(self) -> None:
+        """At the bench's speeds the budget is not the binding constraint."""
+        fsm, _ = servo(start_mm=100.0)
+        fsm.set_speed(25.0)
+        fsm.grasp(self.SETPOINT_N)
+
+        assert fsm._kd_servo == pytest.approx(fsm.params.kd)
+
+    def test_a_fast_approach_lets_its_damping_go(self) -> None:
+        """Above it, the damping is the term that yields — not the speed.
+
+        At the slider's maximum and a 20 N setpoint ``kd·v`` alone would press
+        46 N, so the damping comes down to the ``kd`` whose own press at that
+        speed is the budget: ``kd = tau/v − kp·dt``, 0.66 here against the
+        operator's 2.0.
+        """
+        fsm, _ = servo(start_mm=100.0)
+        fsm.set_speed(constants.SPEED_MAX_MM_S)
+        fsm.grasp(self.SETPOINT_N)
+
+        v_rad_s = constants.SPEED_MAX_MM_S / fsm.limits.rad_to_mm
+        expected = (
+            self.budget_nm(self.SETPOINT_N)
+            - constants.KP_GRASP_APPROACH * v_rad_s * DT
+        ) / v_rad_s
+        assert 0.0 < expected < fsm.params.kd
+        assert fsm._kd_servo == pytest.approx(expected)
+
+    def test_a_slow_approach_is_given_the_push_the_damping_cannot(self) -> None:
+        """The bench's own complaint: ``kd·v`` at 5 mm/s is 1.5 N.
+
+        At the slow end the whole budget is left for the lead, which is what
+        moves the jaws there; at the fast end the damping has already spent it
+        and there is none.
+        """
+        slow, _ = servo(start_mm=100.0)
+        slow.set_speed(5.0)
+        slow.grasp(self.SETPOINT_N)
+        slow_lead_rad = slow._approach_lead_rad()
+
+        fast, _ = servo(start_mm=100.0)
+        fast.set_speed(constants.SPEED_MAX_MM_S)
+        fast.grasp(self.SETPOINT_N)
+        fast_lead_rad = fast._approach_lead_rad()
+
+        assert slow_lead_rad * slow.limits.rad_to_mm > 3.5, (
+            "the slow approach cannot break away from rest"
+        )
+        assert fast_lead_rad == 0.0
+
+    def test_a_plain_move_keeps_the_slider_speed(self) -> None:
+        """No setpoint, no bound — an ordinary close must still run at speed.
+
+        ``open()`` and a plain ``close()`` inherit no force; inheriting one would
+        put every move into force mode, and inheriting the *bound* would silently
+        slow the one motion the operator uses to get somewhere in a hurry.
+        """
+        fsm, _ = servo(start_mm=100.0)
+        fsm.set_speed(constants.SPEED_MAX_MM_S)
+        fsm.close()
+
+        assert fsm.profile is not None
+        assert fsm.profile.speed_mm_s == constants.SPEED_MAX_MM_S
+        assert fsm._kd_servo == fsm.params.kd
+
+    def test_a_setpoint_below_the_ticks_own_press_slows_the_approach(self) -> None:
+        """The one place the setpoint still decides the speed.
+
+        ``kp·v·dt`` is not the console's to withhold, so a setpoint whose budget
+        cannot cover the tick's own step at the speed asked for is honoured by
+        slowing down.  For a 20 N setpoint that speed is 939 mm/s and the lever
+        never moves; at 1 N it is 47 mm/s and it does.
+        """
+        rig = Rig(config=PlantConfig(contact_k=500.0))
+        rig.fsm.set_speed(constants.SPEED_MAX_MM_S)
+        assert rig.open()
+        rig.fsm.grasp(1.0)
+
+        cap = self.tick_cap_mm_s(rig.fsm, 1.0)
+        assert constants.SPEED_MIN_MM_S < cap < constants.SPEED_MAX_MM_S
+        assert rig.fsm.profile is not None
+        assert rig.fsm.profile.speed_mm_s == pytest.approx(cap)
+
+    def test_a_fast_grasp_does_not_press_past_its_setpoint(self) -> None:
+        """The 35.5 N incident, on the stiffest contact the plant models.
+
+        Measured at ``de6c8c6``: a 20 N grasp at 150 mm/s reads 35.5 N before the
+        hand-over.  With the budget spent across the damping and the lead, the
+        press the approach can apply *is* the setpoint, so the peak over the
+        whole grasp — transit, contact, and the climb after it — never overshoots
+        what was asked for.
+        """
+        rig = Rig(config=PlantConfig(contact_k=500.0))
+        rig.fsm.set_speed(constants.SPEED_MAX_MM_S)
+        assert rig.open()
+        # ``peak_force`` is tracked from power-on, and the open is a plain move
+        # at the slider speed — the free-travel acceleration transient, not the
+        # contact.  The claim here is about the grasp, so the peak starts there.
+        rig.peak_force = 0.0
+        rig.sim.inject(obj_mm=40.0)
+        rig.fsm.grasp(self.SETPOINT_N)
+
+        assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=10.0), rig.fsm.note
+        rig.run(constants.FORCE_MAX_N / constants.FORCE_RAMP_N_S + 0.5)
+
+        assert rig.peak_force <= self.SETPOINT_N + 0.3, (
+            f"the contact pressed {rig.peak_force:.1f} N for a {self.SETPOINT_N:.0f} N grip"
+        )
+        assert rig.force_n == pytest.approx(self.SETPOINT_N, abs=0.8)
+
+    def test_a_grasp_at_the_slider_s_fast_end_still_reaches_contact(self) -> None:
+        """The deadline must be sized from the speed the move runs at.
+
+        A setpoint too small for the tick's own step has the approach slowed for
+        it, so a deadline computed from the slider speed would declare the move
+        lost before it could arrive.  Contact, not the deadline, must end it.
+        """
+        rig = Rig(config=PlantConfig(contact_k=500.0))
+        rig.fsm.set_speed(constants.SPEED_MAX_MM_S)
+        assert rig.open()
+        rig.sim.inject(obj_mm=40.0)
+        rig.fsm.grasp(self.SETPOINT_N)
+
+        assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=10.0), (
+            f"the grasp ended in {rig.fsm.state.value}, not on contact: {rig.fsm.note}"
+        )
+
+    def test_dribbling_away_at_the_setpoints_slows_down_the_approach(self) -> None:
+        """A setpoint under the plant's own friction is honoured, not ignored.
+
+        Measured before the budget was spent here: a 1 N setpoint ran at the
+        slider's maximum and pressed 3.1 N, three times what was asked for.
+        """
+        rig = Rig(config=PlantConfig(contact_k=500.0))
+        rig.fsm.set_speed(constants.SPEED_MAX_MM_S)
+        assert rig.open()
+        rig.sim.inject(obj_mm=40.0)
+        rig.fsm.grasp(1.0)
+        rig.peak_force = 0.0
+
+        assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=30.0), rig.fsm.note
+        assert rig.peak_force <= 1.0 + 0.3, (
+            f"a 1 N setpoint pressed {rig.peak_force:.2f} N"
+        )
+
+    def test_a_setpoint_under_the_floor_is_pressed_at_the_floor(self) -> None:
+        """A setpoint small enough to ask for a speed under the floor travels at
+        the floor instead — and on the plant it still cannot move the jaws.
+
+        The floor is a speed that breaks away from rest, and a setpoint smaller
+        than the floor's own press cannot talk it down.  Measured here: a 0.1 N
+        grasp at the maximum slider speed hands over without leaving the open
+        stop, on the stillness channel reading the jaws at rest.  That is the
+        behaviour ``constants.SPEED_MIN_MM_S`` is there to keep out of the
+        operator's way, so the floor is not to be lowered — the setpoint under
+        it is a setpoint the gripper cannot honestly serve.
+        """
+        rig = Rig(config=PlantConfig(contact_k=500.0))
+        rig.fsm.set_speed(constants.SPEED_MAX_MM_S)
+        assert rig.open()
+        started_mm = rig.position_mm
+
+        rig.fsm.grasp(0.1)
+        assert rig.fsm.profile is not None
+        assert rig.fsm._tick_press_cap_mm_s() < constants.SPEED_MIN_MM_S
+        assert rig.fsm.profile.speed_mm_s == constants.SPEED_MIN_MM_S
+
+        assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=5.0), rig.fsm.note
+        assert rig.fsm.grip_channel == "接触：静止"
+        assert rig.position_mm == pytest.approx(started_mm, abs=0.1), (
+            "the fixture is supposed to be a grasp the jaws never travel on"
+        )
+
+
+class TestTheTwoRisesAGraspPutsOnThePlot:
+    """What the operator's force plot actually draws, and why it rises twice.
+
+    The plot is the *measured* force and nothing else.  The worker copies the
+    backend's torque straight into the frame the UI receives
+    (``worker._publish``, ``force_n=tele.force_n``), the simulated backend
+    reports ``force_from_torque(tau)`` of the motor's own estimate
+    (``plant.py``), and ``PlotsPage`` appends that ``frame.force_n`` — published
+    at ``TELEMETRY_HZ`` (50) and drawn at ``PLOT_HZ`` (25).  So "why two rises"
+    is "why does the measured torque rise twice", and the answer is the two
+    frames a grasp is run with.
+
+    First rise, the *position frame*.  Until an object is met the grasp is a
+    plain position frame at the slider's speed with ``tau_ff = 0``: the console
+    commands no force at all, and the drive computes its own
+    ``kp·(q_cmd−q) + kd·(dq_cmd−dq)``.  That torque is the first thing the plot
+    shows, and it stops at the setpoint's torque budget — spent across the
+    damping the approach travels with (``MotionFSM._approach_kd``) and the lead
+    it is given (``MotionFSM._approach_lead_rad``).
+
+    Second rise, the *force ramp*.  At contact the frame drops to the setpoint
+    alone, ``kp=kd=0`` (:meth:`MotionFSM._force_frame`), and the feed-forward
+    climbs to it at ``FORCE_RAMP_N_S``.  ``e078d72`` made that climb start from
+    the press already in flight and stop on the setpoint, so it is monotone and
+    cannot overshoot.  Both rises are therefore expected, and neither is a
+    fault: only the first was ever unbounded, and the budget bounds it.
+    """
+
+    OBJECT_MM = 40.0
+
+    def test_the_operator_s_five_newton_grasp_is_a_single_rise(self) -> None:
+        """The 5 N case: no spike, then a fall back to the setpoint.
+
+        A 5 N approach hands over at 4.6 N on this plant — near its own budget
+        rather than far past it — so the curve the plot draws — transit,
+        contact, and the short climb after it — rises once and holds.
+        Reproduced before the press was bounded at 25 mm/s, the same grasp
+        peaked at 12.8 N and fell to 5.
+        """
+        rig = Rig(config=PlantConfig(contact_k=500.0))
+        rig.fsm.set_speed(constants.SPEED_MAX_MM_S)
+        assert rig.open()
+        rig.sim.inject(obj_mm=self.OBJECT_MM)
+        rig.fsm.grasp(5.0)
+
+        forces: list[float] = []
+        for _ in range(int(30.0 / DT)):
+            rig.tick()
+            forces.append(rig.force_n)
+            if rig.fsm.state is MotionState.HOLD_FORCE and rig.force_n >= 4.95:
+                break
+
+        # ``forces[:40]`` is the free-travel acceleration transient every move
+        # has, force-carrying or not; the claim is about the grasp's own shape.
+        body = forces[40:]
+        assert max(body) <= 5.3, f"a 5 N grasp rose to {max(body):.2f} N"
+        assert rig.force_n == pytest.approx(5.0, abs=0.3)
+        falls = [i for i in range(1, len(body)) if body[i] < body[i - 1] - 0.5]
+        assert not falls, f"the rise was not monotone at {falls[:3]}"
+
+    def test_the_operator_s_thirty_newton_grasp_stops_then_climbs(self) -> None:
+        """The 30 N case: the approach stops at its press, then the ramp runs.
+
+        At the bench's 25 mm/s a 30 N setpoint's budget is far above what the
+        plant's friction needs, so the first rise stops at the drive's
+        position-loop press — 13.7 N here — and the second is the
+        feed-forward climbing the rest of the way at exactly
+        ``FORCE_RAMP_N_S``.
+        """
+        rig = Rig(config=PlantConfig(contact_k=500.0))
+        rig.fsm.set_speed(25.0)
+        assert rig.open()
+        rig.sim.inject(obj_mm=self.OBJECT_MM)
+        rig.fsm.grasp(30.0)
+
+        rows: list[tuple[MotionState, float]] = []
+        for _ in range(int(30.0 / DT)):
+            rig.tick()
+            rows.append((rig.fsm.state, rig.force_n))
+            if rig.fsm.state is MotionState.HOLD_FORCE and rig.force_n >= 29.95:
+                break
+
+        hand = next(i for i, (state, _) in enumerate(rows)
+                    if state is MotionState.HOLD_FORCE)
+        press = rows[hand][1]
+        assert press < 0.6 * 30.0, f"the first rise reached {press:.2f} N"
+
+        climb_s = (len(rows) - 1 - hand) * DT
+        assert climb_s > 0.2, "the fixture's press is too close to the setpoint"
+        rate = (rows[-1][1] - press) / climb_s
+        assert rate == pytest.approx(constants.FORCE_RAMP_N_S, rel=0.1)
+        assert max(f for _, f in rows[40:]) <= 30.3
+
+    def test_the_first_rise_is_the_setpoint_s_own_torque(self) -> None:
+        """A harder setpoint may press harder on the way in — within itself.
+
+        The frame the approach sends still carries no force, but the budget the
+        setpoint names is now spent across the damping and the lead the approach
+        is given, so the *ceiling* on the first rise is the setpoint's torque.
+        Measured at 25 mm/s: 4.6 N for a 5 N grasp, 13.5 for a 30 N one.
+
+        The inverse of what this test asserted before, and deliberately: the
+        earlier law could not let a small setpoint press past its own budget, so
+        a 5 N grasp met the same plant with the same 12.8 N the speed had always
+        given it.  A ceiling that the thing under it cannot reach is not one.
+        """
+        def press_at(setpoint_n: float) -> float:
+            rig = Rig(config=PlantConfig(contact_k=500.0))
+            assert rig.open()  # at the default speed; the grasp is what is timed
+            rig.fsm.set_speed(25.0)
+            rig.sim.inject(obj_mm=self.OBJECT_MM)
+            rig.fsm.grasp(setpoint_n)
+            assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=30.0), rig.fsm.note
+            return rig.force_n  # the tick of hand-over is the press
+
+        small, large = press_at(5.0), press_at(30.0)
+        assert small <= 5.3, f"a 5 N grasp pressed {small:.2f} N"
+        assert large <= 30.3, f"a 30 N grasp pressed {large:.2f} N"
+        assert small < large, "the setpoint is not a lever on the approach's press"
+
+
+class TestAGraspAtTheSlidersSlowEnd:
+    """A free approach that lags its reference must not be read as a contact.
+
+    The other half of the lost-motion gap, and the one a force move is *more*
+    exposed to than a plain one: at this slow end the budget is already spent on
+    the damping, so the approach is given no lead and the push behind it is the
+    tick's own ``kp·v·dt`` — whatever friction eats into that shows up as
+    tracking lag, which the gap integrates.  On a mechanism with friction to
+    spare the gap therefore reaches ``CONTACT_LOST_MM`` in free travel, and an
+    uncorroborated grip would be made at a pose the object is nowhere near.
+
+    The friction here is deliberately modest — five times what the simulated
+    unit's own free travel draws (``test_plant``), where the plain move's own
+    friction tests go to a hundred times.  It is not an extreme mechanism that
+    fails; it is an ordinary one at the slow end of the slider, which is where a
+    careful operator works.
+
+    Measured on this plant, 10 mm/s and a 5 N setpoint: the uncorroborated gap
+    first reads contact at 75.5 mm — 35.5 mm short of the object, with the jaws
+    still travelling at 9.4 of the 10 mm/s asked for — while with the channel
+    corroborated the grip is made at the object, 39.9 mm.  The same numbers,
+    before the corroboration existed (``e078d72``), were a grip made 35.4 mm
+    short, a force phase that drove the jaws at up to 115 mm/s against the
+    10 mm/s slider, and a ``放开`` that ended 45 mm clear of the object.
+    """
+
+    #: Five times the plant's own free-travel friction; see ``test_plant``.
+    FRICTION_NM = 0.05
+    SPEED_MM_S = 10.0
+    SETPOINT_N = 5.0
+    OBJECT_MM = 40.0
+
+    def _grasp(self, coulomb: float | None = None) -> Rig:
+        rig = Rig(
+            config=PlantConfig(
+                coulomb=self.FRICTION_NM if coulomb is None else coulomb
+            )
+        )
+        rig.fsm.set_speed(self.SPEED_MM_S)
+        assert rig.open()
+        rig.sim.inject(obj_mm=self.OBJECT_MM)
+        rig.fsm.grasp(self.SETPOINT_N)
+        return rig
+
+    def test_the_grip_is_made_where_the_object_is(self) -> None:
+        """The hand-over pose is the object, not wherever the gap ran out."""
+        rig = self._grasp()
+
+        assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=30.0), rig.fsm.note
+        assert rig.fsm.grip_mm == pytest.approx(
+            self.OBJECT_MM, abs=constants.TOL_MM + 0.5
+        ), f"the grip froze at {rig.fsm.grip_mm:.2f} mm, not at the object"
+
+    def test_the_release_opens_the_distance_it_promises(self) -> None:
+        """``放开`` opens ``RELEASE_OPEN_MM`` from the object, not from a grip
+        point the object was never at."""
+        rig = self._grasp()
+        assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=30.0), rig.fsm.note
+        rig.run(constants.FORCE_MAX_N / constants.FORCE_RAMP_N_S + 0.5)
+
+        base = max(rig.position_mm, rig.fsm.grip_mm or rig.position_mm)
+        rig.fsm.move_to_mm(base + constants.RELEASE_OPEN_MM, "back_off")
+        assert rig.run_until(MotionState.HOLD, timeout_s=30.0), rig.fsm.note
+
+        assert rig.position_mm == pytest.approx(
+            self.OBJECT_MM + constants.RELEASE_OPEN_MM, abs=constants.TOL_MM + 0.5
+        ), f"the release ended at {rig.position_mm:.2f} mm"
+
+    def test_a_mechanism_without_the_friction_still_reaches_the_object(self) -> None:
+        """The control: the plant's own free travel is light enough that the jaw
+        tracks its reference, and that case must not change."""
+        rig = self._grasp(coulomb=0.01)
+
+        assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=30.0), rig.fsm.note
+        assert rig.fsm.grip_mm == pytest.approx(
+            self.OBJECT_MM, abs=constants.TOL_MM + 0.5
+        )
+
+
+class TestWhatAHeldGripRemembersAboutWhereItWasMade:
+    """The pose a grip *froze* at, which is not the pose the jaws are in.
+
+    A held grip carries no position gain, so the torque climbs to its setpoint
+    by driving the jaws into the object and they come to rest wherever its
+    stiffness balances that — millimetres of real travel against a compliant
+    one.  Everything that has to measure from the object needs the pose the grip
+    was made at rather than the pose the jaws have since reached; the release is
+    the one that is visible to an operator, and the bench log of 2026-10-09 has
+    it: `夹取 20 N`, `放开`, `放开` — twice, on every cycle, because one press
+    was being eaten by the draw-in.
+    """
+
+    #: A compliant object: at 20 N the jaws are pushed ~9 mm into it, which is
+    #: most of `RELEASE_OPEN_MM`.  The default plant bends 0.2 mm — a stiff
+    #: object makes the draw-in invisible, not absent.
+    SOFT = PlantConfig(contact_k=8.0)
+    SETPOINT_N = 20.0
+    OBJECT_MM = 40.0
+
+    def _held(self, rig) -> None:
+        assert rig.open()
+        rig.sim.inject(obj_mm=self.OBJECT_MM)
+        rig.fsm.grasp(self.SETPOINT_N)
+        assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=15.0), rig.fsm.note
+        rig.run(1.5)
+
+    def test_a_held_grip_remembers_the_pose_it_froze_at(self) -> None:
+        fsm, backend = servo(start_mm=60.0)
+        fsm.hold_force(self.SETPOINT_N, 60.0)
+        assert fsm.grip_mm == pytest.approx(60.0)
+
+        backend.mm = 55.0  # the jaws are driven into what they are holding
+        run_ticks(fsm, backend, 10)
+
+        assert fsm.state is MotionState.HOLD_FORCE
+        assert fsm.grip_mm == pytest.approx(60.0), "not where the jaws are now"
+
+    def test_the_draw_in_is_travel(self) -> None:
+        """The measurement this class exists for, against the plant."""
+        rig = Rig(config=self.SOFT)
+        self._held(rig)
+
+        made_at = rig.fsm.grip_mm
+        assert made_at is not None
+        drawn_in = made_at - rig.position_mm
+
+        assert drawn_in > 2.0, f"the drawn-in travel should be visible: {drawn_in:.2f} mm"
+        assert rig.force_n == pytest.approx(self.SETPOINT_N, abs=0.8), "at the setpoint"
+
+    def test_the_object_is_what_makes_it_draw_in(self) -> None:
+        """The same console against two objects: the difference is the object.
+
+        Which is what makes the pose the grip was made at the only stable
+        reference — the pose the jaws sit at is a consequence of what is being
+        held, and at 20 N against something soft enough it is most of the way to
+        the ten millimetres a release opens.
+        """
+        firm = Rig(config=PlantConfig(contact_k=500.0))
+        soft = Rig(config=self.SOFT)
+        self._held(firm)
+        self._held(soft)
+
+        assert abs(firm.fsm.grip_mm - firm.position_mm) < 0.5
+        assert abs(soft.fsm.grip_mm - soft.position_mm) > 2.0
+
+    @pytest.mark.parametrize("state", ["idle", "hold", "servo", "release"])
+    def test_nothing_but_a_held_grip_has_a_grip_pose(self, state: str) -> None:
+        """``None`` everywhere else, so the release falls back to the reading.
+
+        The pose is kept on the state machine between states, and a stale one is
+        worse than none: a release measured from the last grip's pose after the
+        operator has moved the jaws would open from somewhere they are not.
+        """
+        fsm, backend = servo(start_mm=60.0)
+        fsm.hold_force(self.SETPOINT_N, 60.0)
+        leave = {
+            "idle": fsm.idle,
+            "hold": lambda: fsm.hold(60.0),
+            "servo": lambda: fsm.move_to_mm(70.0, "slider"),
+            "release": fsm.release,
+        }[state]
+        leave()
+
+        assert fsm.grip_mm is None
+
+
 class TestTimeout:
-    """The deadline is the third and last of the three "it is not moving" guards.
+    """The deadline is the last of the "it is not moving" guards.
 
     A frozen axis trips the stall counter in 0.1 s; a jam met at cruise speed
-    trips lost-motion contact detection in about 20 ms.  What is left is a move
-    that never reaches cruise — so contact detection cannot see it — and that
-    moves more than the stall threshold counts as progress.  That is the case
-    these tests construct, because it is the only one the deadline is for.
+    trips lost-motion contact detection in about 20 ms; and a force-carrying
+    move has both — the gap detector where it is blind, and the stall counter
+    everywhere else (see
+    ``TestAGraspThatMeetsItsObjectInTheLastMillimetre``).  What is left is a
+    move that creeps: it keeps delivering more than the stall counter counts as
+    movement, so it never looks held, and it never arrives either.  That is the
+    case these tests construct, because it is the only one the deadline is for.
     """
 
     def test_a_move_that_never_converges_stops_and_reports_it(self) -> None:
@@ -971,7 +1802,10 @@ class TestTimeout:
             state["n"] += 1
             b.mm = 0.05 if state["n"] % 2 else 0.0
 
-        ticks = int(round((constants.STALL_TIMEOUT_MIN_S + 0.5) / DT))
+        # Past the deadline, then long enough for the grip to climb the whole way
+        # to its setpoint at FORCE_RAMP_N_S.
+        settle_s = constants.FORCE_MAX_N / constants.FORCE_RAMP_N_S + 0.5
+        ticks = int(round((constants.STALL_TIMEOUT_MIN_S + settle_s) / DT))
         run_ticks(fsm, backend, ticks, on_tick=buzz)
 
         assert fsm.state is MotionState.HOLD_FORCE

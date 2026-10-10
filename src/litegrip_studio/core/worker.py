@@ -343,6 +343,11 @@ class WorkerLoop:
         # first paint happens before there has been time for two.
         self._pub_accum = 1.0
         self._last_state = ""
+        #: Where the jaws were when the last force-carrying close was commanded,
+        #: so the hand-over can log how far into the move the grip was declared.
+        #: That distance is what separates a grasp from a mechanism that had not
+        #: broken away from rest yet — see :meth:`_log_hand_over`.
+        self._force_from_mm: float | None = None
 
     # ── lifecycle ───────────────────────────────────────────────────────────
     def run(self) -> None:
@@ -543,6 +548,31 @@ class WorkerLoop:
         if self._motion.state.value != self._last_state:
             self._last_state = self._motion.state.value
             self._signals.motion_state.emit(self._last_state)
+            if self._motion.state is MotionState.HOLD_FORCE:
+                self._log_hand_over()
+
+    def _log_hand_over(self) -> None:
+        """Record where a grip was declared, how far in, and on which channel.
+
+        The pose alone cannot say whether a grasp met its object.  A grip
+        declared a millimetre into a close is a mechanism that had not broken
+        away from rest yet being read as an obstruction, and the operator sees
+        the consequence rather than the cause: force mode then drives the jaws
+        the rest of the way at the feed-forward, and ``放开``, which opens from
+        the pose the grip was made at, opens all of it again.  Neither number is
+        visible anywhere else after the run, and without them the channel that
+        fired has to be argued about instead of read.
+        """
+        grip = self._motion.grip_mm
+        if grip is None:
+            return
+        travelled = (
+            ""
+            if self._force_from_mm is None
+            else f"，已驶出 {abs(self._force_from_mm - grip):.1f} mm"
+        )
+        channel = self._motion.grip_channel or "未知"
+        self._log("info", f"夹取：在 {grip:.1f} mm 交棒{travelled}，原因 {channel}")
 
     def _motion_label(self) -> str:
         """What the axis is doing, for the status line.
@@ -900,8 +930,10 @@ class WorkerLoop:
             elif isinstance(command, cmd.Open):
                 self._motion.open(command.source)
             elif isinstance(command, cmd.Close):
+                self._force_from_mm = self._measured_mm()
                 self._motion.close(command.source, force_n=command.force_n)
             else:
+                self._force_from_mm = self._measured_mm()
                 self._motion.grasp(command.force_n, command.source)
         elif isinstance(command, cmd.BackOff):
             # Gated exactly like the moves above, and for the same reason: it is
@@ -919,7 +951,27 @@ class WorkerLoop:
             # closed end, so a target-relative release would drive back into the
             # object.  ``move_to_mm`` clamps, so a release at the top of the
             # travel is a move of zero length rather than an out-of-range one.
-            self._motion.move_to_mm(measured + command.delta_mm, command.source)
+            #
+            # Except while a grip is being held, which is the one case this
+            # command exists for.  A held grip is not held *at* the pose it froze
+            # at: the torque climbs to its setpoint by driving the jaws into the
+            # object, and they settle wherever its stiffness balances that —
+            # millimetres in at 20 N against a compliant object.  Opening from
+            # there means opening that much less than the button claims, which is
+            # how a single press stopped freeing what the jaws were holding.
+            # Measured from the pose the grip was made at, the distance opened is
+            # the clearance the object gets.  ``max`` because the jaws can also
+            # have been pushed *out* — by hand, or by an object that springs back
+            # — and there the reading is the further end and the one to use.
+            grip = self._motion.grip_mm
+            base = measured if grip is None else max(measured, grip)
+            if base > measured:
+                self._log(
+                    "info",
+                    f"放开：夹取后已内收 {base - measured:.1f} mm，"
+                    f"从夹取点 {base:.1f} mm 再张开 {command.delta_mm:.1f} mm",
+                )
+            self._motion.move_to_mm(base + command.delta_mm, command.source)
         elif isinstance(command, cmd.Stop):
             self._end_probe_on_interrupt(command.describe())
             if self._estop.is_set():
