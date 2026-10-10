@@ -108,10 +108,11 @@ class TestTheChecksAreNotVacuous:
     def test_the_travel_check_fails_when_the_file_scale_is_used(
         self, monkeypatch
     ) -> None:
-        """Defeated by putting the file's own millimetres per rad back, which is
-        what the SDK does and what the check exists to catch: the recorded
-        extremes would then read as the file's 120 mm nominal stroke, and the
-        slider would cover the middle of a travel whose ends nobody has seen."""
+        """Defeated by putting the file's own millimetres per rad back, which for
+        a file the SDK wrote before 2026-10-10 is its 120 mm nominal over the
+        span and is what the check exists to catch: the recorded extremes would
+        then read as that stroke, and the slider would cover the middle of a
+        travel whose ends nobody has seen."""
         from litegrip_studio import calibration, units
 
         monkeypatch.setattr(

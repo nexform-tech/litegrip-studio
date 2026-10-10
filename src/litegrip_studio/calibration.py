@@ -401,9 +401,10 @@ def limits_from_raw(
     The angles are taken from the file; the millimetres-per-rad is not.  It is
     derived from them and from the operator's measured travel
     (:func:`~litegrip_studio.units.derive_scale`), because the file's own copy
-    of it is the nominal stroke of whichever unit that file was written for.  The
-    file's value is not discarded, though — :func:`validate_limits` compares the
-    two, and the disagreement is how a file from another gripper is caught.
+    of it is the stroke that file was written with, over the span it recorded —
+    a configuration, not a measurement of the unit on the bench.  The file's
+    value is not discarded, though — :func:`validate_limits` compares the two,
+    and the disagreement is how a file from another gripper is caught.
     """
     closed = float(raw["zero_position_rad"])
     opened = float(raw["max_position_rad"])
@@ -441,14 +442,15 @@ def validate_limits(
 
     That check is deliberately a wide one, and deliberately not a comparison
     against the travel the operator measured.  A file the SDK or an older
-    console wrote carries the *nominal* stroke it was configured with — 120 mm
-    by default, as the operator's own file does — divided by the span it
-    recorded, so the implied stroke says which nominal was set rather than how
-    wide this gripper's jaws are, and it reads 120 mm for a 60 mm unit and a
-    120 mm unit alike.  Comparing it with the measurement would therefore fire
-    on every file written that way, including the operator's own, and a warning
-    that is always on is a warning nobody reads.  What is left worth catching is
-    a file whose implied stroke is not even the right order of magnitude.
+    console wrote carries the stroke it was *configured* with divided by the span
+    it recorded — the SDK's 120 mm nominal in files written before 2026-10-10, as
+    the operator's own file does, and its measured 85 mm default since — so the
+    implied stroke says which stroke was in force rather than how wide this
+    gripper's jaws are, and a 60 mm unit and an 85 mm unit can imply the same
+    number.  Comparing it with the measurement would therefore fire on every file
+    written that way, including the operator's own, and a warning that is always
+    on is a warning nobody reads.  What is left worth catching is a file whose
+    implied stroke is not even the right order of magnitude.
     """
     problems: list[str] = []
     warnings: list[str] = []

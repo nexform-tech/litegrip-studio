@@ -678,20 +678,22 @@ from the commit history, the git tag is the only source of truth, and `0.0.0-sem
   orders of magnitude (outside
   `STROKE_MIN_MM` / `STROKE_MAX_MM`). That test **cannot** be tightened into a comparison with the
   measured travel: files written by the SDK and by earlier versions of the console all carry
-  "nominal travel ÷ span", and that nominal is the SDK's own default rather than a measurement of
-  the unit it was recorded on, so a 60 mm
-  gripper and a 120 mm gripper write the same number — tightening it would make every file,
-  including this machine's own, warn, and an alarm that is always on is no alarm at all.
+  "configured stroke ÷ span" — the SDK's 120 mm nominal in files written before 2026-10-10, its
+  measured 85 mm default since, whatever the caller had set — and that is not a measurement of the
+  unit the file was recorded on, so a 60 mm gripper and an 85 mm gripper can write the same
+  number — tightening it would make every file, including this machine's own, warn, and an alarm
+  that is always on is no alarm at all.
   Telling which gripper a file belongs to is the job of the measured-angle frame check
   (`frame_mismatch`) and of a plausible range for the derived coefficient.
 - The force limit is the 40 N mechanical rating; the theoretical 100 N (10 Nm × 10) appears only as
   a greyed-out, unselectable comment. Changing it means editing `constants.FORCE_MAX_N`, one place.
 - **The mm conversion is derived from the two angles and the measured travel, not read from the
-  file's `rad_to_mm`.** The SDK writes that field as "nominal travel ÷ span", so every calibration
-  file on this machine claims a 120 mm coefficient no matter which gripper the two angles were
-  recorded on. Loading such a file makes a gripper whose real travel is 85 mm read 120 mm, while
-  the slider covers only part of it and neither end is reachable — which is where "a slice taken
-  out of the middle of 0–120" came from. The two angles in the file are measurements and the
+  file's `rad_to_mm`.** The SDK writes that field as "configured stroke ÷ span" — the 120 mm
+  nominal in files written before 2026-10-10, its measured 85 mm default since — so it reports the
+  stroke that was set rather than the unit the two angles came from. Loading such a file makes a
+  gripper read that stroke across its jaws, while the slider covers only part of it and neither end
+  is reachable, which is where "a slice taken out of the middle of 0–120" came from. The two angles
+  in the file are measurements and the
   coefficient is derived, so `units.derive_scale()` computes it:
   `(measured travel + SPAN_INSET_MM) / span`. On this machine that is
   `(85 + 1) / 1.681925 = 51.13 mm/rad`, so the two recorded limits span 86.00 mm, the slider's
@@ -709,8 +711,8 @@ from the commit history, the git tag is the only source of truth, and `0.0.0-sem
   before saving), which is the number the console actually moves with: reading it back is
   self-consistent, and the cross-check (the coefficient the SDK applied equals the one in the file)
   means something. The coefficient the probe computed itself stays in `raw` for display and
-  comparison; it describes "the nominal travel that was set at the time ÷ the span", not how wide
-  this gripper is.
+  comparison; it describes "the stroke that was set at the time ÷ the span", not how wide this
+  gripper is.
 - **Why the top of the range is inset by 1 mm**: the probe pushes the open limit out under 40 N of
   pressure and the linkage gives about 1 mm under that force, so the recorded open limit is slightly
   past the mechanical end. Commanding the recorded limit directly presses the stop on every full

@@ -24,7 +24,7 @@ from .can_link import parse_link
 from .core.motion import MotionFSM, MotionParams, MotionState
 from .units import Limits, frame_mismatch
 
-#: The three calibrations this console has to get right, as (closed, open,
+#: The calibrations this console has to get right, as (closed, open,
 #: file_scale, agrees, description).  The first is the SDK's uncalibrated default
 #: pair, whose two angles are ordered the other way round and whose range this
 #: bench's encoder readings fall outside of — the two facts the checks below turn
@@ -49,7 +49,7 @@ from .units import Limits, frame_mismatch
 #: :func:`check_the_fallback_calibration_is_usable`.  The reverse template carries
 #: these same numbers mirrored, so it is the same case again.
 KNOWN_CALIBRATIONS = (
-    (0.0, 1.14, 120.0 / 1.14, False, "SDK 默认值（两个角次序相反，且在实测角度之外）"),
+    (0.0, 1.14, 120.0 / 1.14, False, "旧 SDK 默认值（2026-10-10 换 85 mm 之前写出的文件）"),
     (
         0.052071,
         -1.357481,
@@ -58,6 +58,9 @@ KNOWN_CALIBRATIONS = (
         "SDK 模板（calibration_normal.json，上游已按本机重新实测）",
     ),
     (1.775959, -0.064279, 65.21, False, "用户标定（示例）"),
+    # The pair the current SDK default config carries.  Kept last: the three
+    # above are the ones the direction check addresses by index.
+    (0.0, 1.14, 86.0 / 1.14, True, "SDK 当前默认值（实测行程 + 内缩 ÷ 默认跨度）"),
 )
 
 #: The two angles the bench unit this console was debugged against stands at, all
@@ -162,7 +165,7 @@ def check_the_direction_is_read_from_the_two_angles() -> None:
     two angles were recorded the other way round is converted by what it says.
     That ordering is also what the SDK's uncalibrated default pair looks like, so
     it cannot decide whether a calibration is good either.  Two things have to
-    hold instead, and both are checked here on all three datasets: every
+    hold instead, and both are checked here on every dataset: every
     conversion agrees with the ordering the angles have, and the calibration's
     range contains the angles its own gripper is standing at.
     """
@@ -203,11 +206,13 @@ def check_the_travel_is_derived_from_the_recorded_angles() -> None:
 
     Three things have to hold on each, and the third is the one the operator
     sees: 0 mm is the recorded closed angle, the recorded extremes span the
-    travel plus the probe's inset rather than the file's nominal stroke, and the
-    top of the commanded range is that inset short of the recorded open one.
-    Move by the file's own scale instead and the recorded span comes out as that
-    file's nominal — 120 mm for the defaults — a slider covering the middle of a
-    travel nobody has seen the ends of, which is what this check exists to catch.
+    travel plus the probe's inset rather than the stroke the file was written
+    with, and the top of the commanded range is that inset short of the recorded
+    open one.  Move by the file's own scale instead and the recorded span comes
+    out as that file's stroke — 120 mm for a file the SDK wrote before
+    2026-10-10, 86 mm for one it writes at today's 85 mm default — a slider
+    covering the middle of a travel nobody has seen the ends of, which is what
+    this check exists to catch.
 
     All three are stated without a sign, and the first dataset is the one that
     needs that: its two angles are the other way up, and every one of them holds
@@ -235,13 +240,16 @@ def check_the_travel_is_derived_from_the_recorded_angles() -> None:
             f"{label} 的量程顶端离记录的张开角 {gap_mm:.2f} mm，应为 {inset:.0f} mm"
         )
 
-        # The file's own number is not what the console moves by.  On the first
-        # and third datasets it differs from the derivation by far more than
-        # rounding — 52.09 against 52.69, 46.73 against 65.21 — and that
-        # difference is the witness.  On the template the two are the same
-        # number, because the SDK's shipped files are this unit's again; the
-        # equality is the fact being pinned there, and the tolerance keeps it
-        # from turning into a claim about the last decimal of a stored float.
+        # The file's own number is not what the console moves by.  On the old
+        # SDK default it differs from the derivation by far more than rounding —
+        # 105.26 against 75.44, the 120 mm nominal over the 85 mm measurement —
+        # and on the user calibration too, 65.21 against 46.73; that difference
+        # is the witness.  On the template the two are the same number, because
+        # the SDK's shipped files are this unit's again, and on the current
+        # default they agree by construction: since 2026-10-10 the SDK derives
+        # its scale the same way the console does, measured travel plus inset
+        # over the recorded span.  The tolerance keeps each equality from turning
+        # into a claim about the last decimal of a stored float.
         same = math.isclose(limits.rad_to_mm, file_scale, rel_tol=1e-9)
         assert same is agrees, (
             f"{label}：文件自带的 mm/rad（{file_scale}）与推导值（{limits.rad_to_mm}）"
@@ -405,7 +413,7 @@ CHECKS = (
     Check("单位换算往返一致", check_units_round_trip),
     Check("方向取自记录的两个角度", check_the_direction_is_read_from_the_two_angles),
     Check("标定零点不属于本机时被拦下", check_a_calibration_from_another_frame_is_refused),
-    Check("三份标定的 0 点与量程顶端正确", check_the_travel_is_derived_from_the_recorded_angles),
+    Check("每份标定的 0 点与量程顶端正确", check_the_travel_is_derived_from_the_recorded_angles),
     Check("被控对象在阶跃下收敛且不过冲", check_plant_settles_on_a_step),
     Check("CAN 口探测结果读取正确", check_the_can_probe_is_read_correctly),
     Check("一次运动能到位并停住", check_a_move_arrives_and_stops),
