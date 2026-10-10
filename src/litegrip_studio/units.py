@@ -44,9 +44,10 @@ class Limits:
     it rather than assuming the SDK's sign.
 
     ``rad_to_mm`` is DERIVED rather than read from the file — see
-    :func:`derive_scale` — because the file's copy of it is the SDK's nominal
-    stroke over this travel, which describes the unit the file was written for
-    rather than the one on the bench.  ``max_stroke_mm`` is the operator's
+    :func:`derive_scale` — because the file's copy of it is the stroke the SDK
+    was configured with, over this travel, which describes the configuration the
+    file was written under rather than the unit on the bench.
+    ``max_stroke_mm`` is the operator's
     measured travel: the top of the commanded range, and therefore of the slider,
     which lands one millimetre inside the recorded open extreme.
     """
@@ -156,14 +157,15 @@ def derive_scale(
     """Millimetres per rad, derived from a calibration's angles and a measured travel.
 
     The scale is never read from the file.  The SDK writes ``rad_to_mm`` as
-    ``nominal stroke / travel`` using whatever nominal it holds at the time, so
-    every file on this machine says 120 mm worth of scale no matter which gripper
-    the angles were recorded on — load one and a gripper whose jaws travel 85 mm
-    reads 120 mm across them, with the slider covering the middle 70% of a travel
-    no operator has ever seen the ends of.  The angles in the file are
-    measurements; the scale is a derived quantity, so it is derived here from the
-    one number that is a measurement of *this* unit: the travel across the jaws,
-    taken with calipers.
+    ``stroke / travel`` using whatever stroke it held at the time — the 120 mm
+    nominal before 2026-10-10, the measured 85 mm default since — so the field
+    reports the configuration rather than the unit the angles came from, and a
+    60 mm gripper writes the same number as an 85 mm one.  Load such a file and
+    the gripper reads that stroke across its jaws, with the slider covering the
+    middle 70% of a travel no operator has ever seen the ends of.  The angles in
+    the file are measurements; the scale is a derived quantity, so it is derived
+    here from the one number that is a measurement of *this* unit: the travel
+    across the jaws, taken with calipers.
 
     The recorded extremes span ``travel_mm + inset_mm`` and not ``travel_mm``,
     because the probe finds the open limit by pressing into it under force and

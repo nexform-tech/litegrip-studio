@@ -239,14 +239,16 @@ FORCE_RAMP_S = 0.05
 #: operator is then holding an unusable console and a file that looks fine.
 #: Moving this console to another unit means editing this number and re-probing.
 #:
-#: Deliberately NOT the SDK's 120 mm.  ``GripperConfig.max_stroke_mm``, the
-#: README's spec table and every calibration file the SDK writes are built around
-#: 120 mm, but that is the nominal stroke of the unit those files were taken on —
-#: it is not a measurement of this one, and it is not even the SDK's own number
-#: (its guided probe hardcodes 120.0 while the other two calibrations divide by
-#: the configured value).  The bench unit's jaws were measured with calipers at
-#: 85 mm across the full travel, and this number decides two things that have to
-#: be right for the operator to trust the display: the millimetres per rad the
+#: This used to be deliberately NOT the SDK's number: the SDK carried a nominal
+#: 120 mm that belonged to no gripper in the family.  Since the 85 mm correction
+#: the two agree — ``GripperConfig.max_stroke_mm`` now defaults to the measured
+#: 85 mm, and every probe derives its scale through it — which is what lets the
+#: console's derived coefficient and the SDK's written one be the same number.
+#: That agreement is with the SDK's *default*, not with every file: a file's own
+#: ``rad_to_mm`` is read as-is, and files written before the correction still
+#: carry the 120 mm nominal.  The bench unit's jaws were measured with calipers
+#: at 85 mm across the full travel, and this number decides two things that have
+#: to be right for the operator to trust the display: the millimetres per rad the
 #: angles are converted with, and the top of the slider.
 DEFAULT_TRAVEL_MM = 85.0
 
@@ -275,9 +277,12 @@ STROKE_MAX_MM = 300.0
 # mm/rad, and the same number derived at 10 mm would be 8.0.
 #
 # The same band is deliberately NOT applied to the mm/rad a file carries.  That
-# one is a nominal stroke over a span, so it reads 120 mm for a 60 mm unit and a
-# 120 mm unit alike — see ``calibration.validate_limits`` — and banding it would
-# mean banding the wrong quantity.
+# one is a *configured* stroke over a span rather than a measurement of the unit
+# the angles came from — the SDK divides by whatever ``max_stroke_mm`` it held,
+# the 120 mm nominal before 2026-10-10 and the measured 85 mm default since — so
+# it reads the same stroke for a 60 mm unit and an 85 mm unit alike; see
+# ``calibration.validate_limits``.  Banding it would mean banding the wrong
+# quantity.
 RAD_TO_MM_MIN = 30.0
 RAD_TO_MM_MAX = 200.0
 # How far outside its own calibrated travel the measured angle may sit before
