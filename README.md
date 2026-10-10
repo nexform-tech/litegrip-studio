@@ -26,6 +26,23 @@ it runs the same motion state machine the real gripper does.
 
 ## 🚀 Quick start
 
+### 1. Install the dependencies
+
+Python 3.10 and three libraries, into the interpreter your `python3` points at:
+
+```bash
+python3 -m pip install PyQt5 pyqtgraph numpy
+```
+
+Add `python3 -m pip install pytest` to run the test suite, and
+`python3 -m pip install pyinstaller` to package. The SDK needs no install — it is vendored under
+`src/litegrip`.
+
+**Do not use `pip install -e .`**: the version in `pyproject.toml` is semantic-release's
+placeholder, which is not a valid PEP 440 version, so setuptools refuses to build.
+
+### 2. Run
+
 ```bash
 ./run_litegrip_studio.sh sim        # simulation, no hardware needed
 ./run_litegrip_studio.sh selftest   # self-check: no Qt, no hardware
@@ -39,12 +56,20 @@ to be installed or checked out beside it — the LiteGrip SDK is vendored under 
 the launcher puts `src/` on `PYTHONPATH`. Two environment variables override the defaults:
 `PYTHON_BIN` for the interpreter, and `LITEGRIP_SDK_PATH` for the SDK, which is what a developer
 running against SDK HEAD sets. It must point at a checkout holding the `litegrip` package — the
-checkout root or its `src/` — and a path that does not is reported rather than quietly ignored. The
-launcher otherwise uses `python3`, so where Qt lives in a virtualenv, point `PYTHON_BIN` at it:
+checkout root or its `src/` — and a path that does not is reported rather than quietly ignored.
+
+The launcher uses `python3`, so where the dependencies live in a virtualenv, point `PYTHON_BIN` at
+it:
 
 ```bash
+python3 -m venv .venv
+.venv/bin/python3 -m pip install PyQt5 pyqtgraph numpy
 PYTHON_BIN=.venv/bin/python3 ./run_litegrip_studio.sh sim
 ```
+
+**A `ModuleNotFoundError: No module named 'PyQt5'` means the dependencies went to a different
+interpreter.** `./run_litegrip_studio.sh -h` prints the one the launcher uses (`当前解释器：…`);
+install into that one, or point `PYTHON_BIN` at the one you installed into.
 
 Remaining arguments are passed to the program unchanged, for example
 `./run_litegrip_studio.sh sim --log-level DEBUG`. `-h` lists every subcommand.

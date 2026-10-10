@@ -24,6 +24,22 @@
 
 ## 🚀 快速开始
 
+### 1. 装依赖
+
+需要 Python 3.10 和三个库，装进你的 `python3` 指向的那个解释器：
+
+```bash
+python3 -m pip install PyQt5 pyqtgraph numpy
+```
+
+跑测试套件再加 `python3 -m pip install pytest`，打包再加 `python3 -m pip install pyinstaller`。
+SDK 不用装——已 vendor 在 `src/litegrip`。
+
+**别用 `pip install -e .`**：`pyproject.toml` 里的版本号是 semantic-release 的占位符，不是
+合法版本号，setuptools 会拒绝构建。
+
+### 2. 跑
+
 ```bash
 ./run_litegrip_studio.sh sim        # 仿真，不需要硬件
 ./run_litegrip_studio.sh selftest   # 自检：不需要 Qt、不需要硬件
@@ -36,12 +52,19 @@
 检出一份：LiteGrip SDK 已 vendor 在 `src/litegrip`，启动脚本把 `src/` 放进 `PYTHONPATH`。
 两个环境变量可覆盖默认值：`PYTHON_BIN` 换解释器，`LITEGRIP_SDK_PATH` 换 SDK——后者是给对着
 SDK HEAD 跑的开发者的。它必须指到含有 `litegrip` 包的检出目录（检出根目录或它的 `src/`），
-指错了会直接报错，不会悄悄忽略。脚本默认用 `python3`，所以 Qt 装在虚拟环境里时，把
-`PYTHON_BIN` 指过去：
+指错了会直接报错，不会悄悄忽略。
+
+脚本默认用 `python3`，所以依赖装在虚拟环境里时，把 `PYTHON_BIN` 指过去：
 
 ```bash
+python3 -m venv .venv
+.venv/bin/python3 -m pip install PyQt5 pyqtgraph numpy
 PYTHON_BIN=.venv/bin/python3 ./run_litegrip_studio.sh sim
 ```
+
+**报 `ModuleNotFoundError: No module named 'PyQt5'`，就是依赖装到了另一个解释器里。**
+`./run_litegrip_studio.sh -h` 会打印它实际用的那个（`当前解释器：…`），把依赖装到它上面，
+或者用 `PYTHON_BIN` 指到你装过的那个。
 
 其余参数原样传给程序，例如 `./run_litegrip_studio.sh sim --log-level DEBUG`。
 `-h` 看全部子命令。
