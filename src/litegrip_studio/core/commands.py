@@ -361,6 +361,41 @@ class CancelCalibration(Command):
         return "取消标定"
 
 
+# ── maintenance ─────────────────────────────────────────────────────────────
+@dataclass(frozen=True)
+class WriteZero(Command):
+    """Declare the current encoder angle to be zero, in the drive's flash.
+
+    Carries no position, deliberately.  Which pose gets zeroed is whatever the
+    jaws are at when the operator confirms, and a pose travelling in a command
+    would be a pose from before the dialog — the jaws can be pushed between the
+    two, and this one is irreversible.
+
+    Not coalescable, and not droppable: it is a flash write the operator asked
+    for by name, and a queue that folded two of them together would be choosing
+    an instant for a write nobody chose twice.
+    """
+
+    def describe(self) -> str:
+        return "电机标零（把当前位置写成编码器零点）"
+
+
+@dataclass(frozen=True)
+class ClearZeroNotice(Command):
+    """The operator has read the 标零 warning and dismisses it.
+
+    A command rather than a page-local flag, because the warning is about a
+    *fact* — the angle frame moved — that no later status frame contradicts.  A
+    banner cleared locally would come straight back the next time anything
+    re-rendered it, and there is no edge in the loop for the worker to watch:
+    ``_track_alert`` retires the alerts whose condition changes, and this one
+    does not change until somebody says they have read it.
+    """
+
+    def describe(self) -> str:
+        return "已了解标零提示"
+
+
 # ── housekeeping ────────────────────────────────────────────────────────────
 @dataclass(frozen=True)
 class Heartbeat(Command):
@@ -417,6 +452,8 @@ AnyCommand = Union[
     RecordOpenLimit,
     RecordCloseLimit,
     CancelCalibration,
+    WriteZero,
+    ClearZeroNotice,
     Heartbeat,
     Inject,
     Shutdown,

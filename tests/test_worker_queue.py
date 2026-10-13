@@ -21,7 +21,7 @@ from typing import Callable
 import pytest
 
 from litegrip_studio import calibration, constants
-from litegrip_studio.backend import GripperBackend
+from litegrip_studio.backend import GripperBackend, ZeroResult
 from litegrip_studio.backend.plant import PlantConfig
 from litegrip_studio.backend.sim import SimBackend
 from litegrip_studio.calibration import CalibrationInfo
@@ -164,6 +164,17 @@ class RecordingBackend(GripperBackend):
         self._served_rad: float | None = None
         self.error_code = constants.ERROR_DISABLED
         self.rx_frames = 0
+        #: The physical angle the encoder now calls zero.  Zero until 标零 runs,
+        #: and nonzero afterwards for the rest of the test — which is the whole
+        #: point of modelling it: the reported frame moves and the mechanism
+        #: does not, and every stale target is expressed in the frame that just
+        #: stopped existing.
+        self.zero_offset_rad = 0.0
+        #: What :meth:`write_zero` leaves behind.  ``False`` is the re-enable
+        #: that did not take (the SDK discards its own enable result), and a
+        #: nonzero ``zero_after_rad`` is a drive that did not accept the frame.
+        self.zero_enabled = True
+        self.zero_after_rad = 0.0
 
     def _record(self, name: str, *args) -> None:
         if name in self.fail:
@@ -227,7 +238,12 @@ class RecordingBackend(GripperBackend):
         self._claim()
         if self.enabled or self._served_rad is None:
             self._served_rad = self.q_rad
-        q_rad = self._served_rad
+        # The encoder reports in whichever frame is in force, while ``_limits``
+        # was measured in the one that was in force when the file was written.
+        # Subtracting the offset here and *not* re-deriving the limits is what
+        # the hardware does, and it is the whole of the 标零 hazard: the angles
+        # on file are now wrong by the offset and the millimetres follow them.
+        q_rad = self._served_rad - self.zero_offset_rad
         return Telemetry(
             position_rad=q_rad,
             velocity_rad_s=0.0,
@@ -243,6 +259,47 @@ class RecordingBackend(GripperBackend):
     def zero_torque(self) -> None:
         self._claim()
         self._record("zero_torque")
+
+    # ── maintenance ─────────────────────────────────────────────────────────
+    def write_zero(self) -> ZeroResult:
+        """Move the encoder frame, and leave the mechanism where it is.
+
+        The two are separate on purpose.  A fake that only recorded the call
+        would let the worker pass a test whose whole subject is the frame change
+        — a replay of the bug this feature is about, where the console goes on
+        moving by numbers measured against an offset that has been replaced.
+        ``q_rad`` is untouched, because 标零 writes flash rather than moving
+        anything; only the offset moves, so ``read`` starts naming a different
+        angle for the same jaws.
+        """
+        self._claim()
+        if "write_zero" in self.fail:
+            # Fail the way the SDK does rather than the way the recorder
+            # generically does: ``Gripper.write_zero`` disables the drive, and
+            # then sends 0xFE, so a write that raises has already left a dark
+            # motor behind.  A fake that raised before the disable would let the
+            # worker's resync be wrong here and nowhere notice.  (The other
+            # order — raising before the disable — is real too, which is why the
+            # worker calls the outcome unknowable instead of naming one.)
+            self.enabled = False
+            self.error_code = constants.ERROR_DISABLED
+            raise RuntimeError("write_zero 故意失败")
+        self._record("write_zero")
+        at = self.q_rad if self._served_rad is None else self._served_rad
+        # Offset such that the drive reads back exactly ``zero_after_rad``: the
+        # normal case leaves 0.0, and a nonzero one models a drive that ignored
+        # the 0xFE frame (``WriteZeroResult.ok`` is False there).
+        self.zero_offset_rad = at - self.zero_after_rad
+        self.enabled = self.zero_enabled
+        self.error_code = (
+            constants.ERROR_ENABLED if self.enabled else constants.ERROR_DISABLED
+        )
+        return ZeroResult(
+            before_rad=at,
+            after_rad=self.zero_after_rad,
+            tolerance_rad=1e-3,
+            enabled=self.enabled,
+        )
 
     # ── calibration ─────────────────────────────────────────────────────────
     def load_calibration(self, path: str | None = None) -> bool:
@@ -2518,6 +2575,262 @@ class TestAProbeThatIsMovingNothing:
         lines = [text for _l, text in bench.signals.of("log")]
         assert any("张开极限" in text for text in lines), lines
         assert any("步未移动" in text or "最大步数" in text for text in lines), lines
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 标零: the console's one irreversible action
+# ═══════════════════════════════════════════════════════════════════════════
+class TestTheZeroWrite:
+    """Rewriting the motor's encoder offset, and what the console does about it.
+
+    The write is irreversible and it moves the *frame*, not the mechanism: the
+    jaws stay where they are and every angle on file starts naming a different
+    place.  Nothing here blocks the gate — the operator was told in so many words
+    instead — so the two things worth testing are that the FSM is never left
+    executing a target from the frame that just stopped existing, and that the
+    warning cannot be taken down by anything except the operator.
+    """
+
+    def test_it_needs_a_connection_first(self) -> None:
+        bench = Bench()
+        bench.signals.calls.clear()
+
+        bench.send(cmd.WriteZero())
+
+        assert "write_zero" not in bench.backend.names()
+        assert "请先连接" in bench.signals.alerts()[-1]
+
+    def test_it_needs_an_enabled_motor(self) -> None:
+        """The reverse of the intuitive reading, which is why it is spelled out:
+        a DM drive ignores 0xFE precisely *because* it is disabled, so the one
+        case an operator hits looks like a dead button."""
+        bench = Bench()
+        bench.send(cmd.Connect())
+        bench.signals.calls.clear()
+
+        bench.send(cmd.WriteZero())
+
+        assert "write_zero" not in bench.backend.names()
+        alert = bench.signals.alerts()[-1]
+        assert "标零" in alert and "使能" in alert
+
+    def test_the_estop_refuses_it(self) -> None:
+        bench = Bench()
+        bench.bring_up()
+        bench.loop.estop("测试")
+        bench.tick()
+        bench.signals.calls.clear()
+
+        bench.send(cmd.WriteZero())
+
+        assert "write_zero" not in bench.backend.names()
+        assert "急停" in bench.signals.alerts()[-1]
+
+    def test_a_probe_running_refuses_it(self) -> None:
+        """A probe owns the axis and is driving it.  The write takes the axis
+        away for its duration, and the probe's next frame would be aimed at a
+        frame that moved underneath it."""
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.StartGuidedCalibration())
+        bench.tick()
+        assert bench.loop.probe is not None
+        bench.signals.calls.clear()
+
+        bench.send(cmd.WriteZero())
+
+        assert "write_zero" not in bench.backend.names()
+        assert any("标定进行中" in text for text in bench.signals.alerts())
+
+    def test_the_write_reaches_the_drive_and_the_notice_says_what_it_cost(self) -> None:
+        bench = Bench()
+        bench.bring_up()
+
+        bench.send(cmd.WriteZero())
+
+        assert "write_zero" in bench.backend.names()
+        headline, detail = bench.signals.of("zero_notice")[-1]
+        assert "标零" in headline
+        assert "标定" in headline, "the consequence is the headline, not a footnote"
+        assert "重新标定" in detail
+        assert bench.loop.zero_notice, "in force in the loop, not just on the wire"
+
+    def test_the_encoder_moved_and_the_mechanism_did_not(self) -> None:
+        """The whole of the hazard in two numbers: the jaws are exactly where
+        they were, and this console now reads a different angle for them."""
+        bench = Bench()
+        bench.bring_up()
+        before_rad = bench.backend.q_rad
+        was_mm = bench.backend.read().position_mm
+
+        bench.send(cmd.WriteZero())
+
+        assert bench.backend.q_rad == pytest.approx(before_rad), (
+            "标零 writes flash, not motion"
+        )
+        assert bench.backend.read().position_rad == pytest.approx(0.0)
+        assert bench.backend.read().position_mm != pytest.approx(was_mm), (
+            "the millimetres this console moves by are the ones that just moved"
+        )
+
+    def test_the_axis_is_re_anchored_into_the_new_frame(self) -> None:
+        """Every target in the FSM is expressed in the frame it was measured in,
+        and 标零 replaces that frame.  A hold carried over would command the
+        place the old frame named — a real, silent move to somewhere nobody
+        asked for."""
+        bench = Bench()
+        bench.bring_up()
+        bench.tick(5)
+        stale_rad = bench.backend.read().position_rad
+        bench.backend.calls.clear()
+
+        bench.send(cmd.WriteZero())
+        bench.tick(5)
+
+        frames = [args[0] for name, args in bench.backend.calls if name == "stream_frame"]
+        assert frames, "an enabled axis is talked to every tick"
+        now_rad = bench.backend.read().position_rad
+        assert now_rad == pytest.approx(0.0), "the frame really did move"
+        assert all(f == pytest.approx(now_rad) for f in frames)
+        assert stale_rad != pytest.approx(now_rad)
+
+    def test_the_gate_is_left_alone(self) -> None:
+        """The decision this feature was built to: warn, do not block.  A zero at
+        a stop moves the frame by well under ``CALIB_MISMATCH_RAD``, so the gate
+        *cannot* catch it — which is precisely why the notice has to be loud and
+        why the operator has to be able to say they have read it."""
+        bench = Bench()
+        bench.bring_up()
+
+        bench.send(cmd.WriteZero())
+
+        assert bench.loop.gate is GateState.READY
+        assert bench.loop.motion.state is not MotionState.FAULT
+
+    def test_the_notice_stays_until_the_operator_says_they_have_read_it(self) -> None:
+        """Not routed through the alert machinery, deliberately: ``_track_alert``
+        retires an alert when its condition changes, and this condition cannot
+        change.  The old calibration does not become correct again."""
+        bench = Bench()
+        bench.bring_up()
+        bench.send(cmd.WriteZero())
+        assert bench.loop.zero_notice
+
+        # Frames, motion and a fault cycling through: everything that takes the
+        # other alerts down, and none of it is an answer to this one.
+        bench.send(cmd.MoveToMm(20.0), count=40)
+        bench.backend.error_code = constants.ERROR_OC
+        bench.tick(2)
+        bench.backend.error_code = constants.ERROR_ENABLED
+        bench.tick(10)
+
+        assert bench.loop.zero_notice
+        assert len(bench.signals.of("zero_notice")) == 1, "put up once, not once a tick"
+
+        bench.send(cmd.ClearZeroNotice())
+
+        assert bench.loop.zero_notice == ""
+        assert bench.signals.of("zero_notice")[-1] == ("", "")
+
+    def test_a_clear_with_nothing_to_clear_says_nothing(self) -> None:
+        """The 已了解 button is on a banner that is usually not up; a dismissal
+        that announced itself would be noise in the log of every session."""
+        bench = Bench()
+        bench.bring_up()
+        bench.signals.calls.clear()
+
+        bench.send(cmd.ClearZeroNotice())
+
+        assert not bench.signals.has("zero_notice")
+
+    def test_a_re_enable_that_did_not_take_is_not_reported_as_a_finished_zero(self) -> None:
+        """``WriteZeroResult.ok`` means the drive accepted the frame, which is
+        not the same as the motor having come back — the SDK re-enables around
+        the write and drops that result (gripper.py:1431)."""
+        backend = RecordingBackend()
+        backend.zero_enabled = False
+        bench = Bench(backend)
+        bench.bring_up()
+
+        bench.send(cmd.WriteZero())
+
+        assert not bench.loop.enabled
+        headline, detail = bench.signals.of("zero_notice")[-1]
+        assert "失能" in headline
+        assert "重新使能" in detail
+
+    def test_a_write_the_drive_ignored_is_not_reported_as_done(self) -> None:
+        """``ok`` is a read-back within tolerance, and a drive that took the
+        frame but not the offset reads back where it was.  Reported as
+        unconfirmed rather than as a zero that landed."""
+        backend = RecordingBackend()
+        backend.zero_after_rad = 0.4
+        bench = Bench(backend)
+        bench.bring_up()
+
+        bench.send(cmd.WriteZero())
+
+        headline, detail = bench.signals.of("zero_notice")[-1]
+        assert "未确认" in headline
+        assert "0.400000" in detail, "the number, not an adjective"
+
+    def test_a_write_that_failed_still_resyncs_the_console(self) -> None:
+        """The write disables and re-enables underneath this class, so a failure
+        can leave a dark motor and a moved offset, and which of the two it left
+        is not knowable from here.  What is knowable is that the pose the last
+        frame described was measured against an offset that may no longer apply,
+        so nothing may go on being computed from it."""
+        bench = Bench(RecordingBackend(fail=("write_zero",)))
+        bench.bring_up()
+        assert bench.loop.enabled
+        bench.backend.calls.clear()
+
+        bench.send(cmd.WriteZero())
+
+        assert "标零失败" in bench.signals.alerts()[-1]
+        assert not bench.loop.enabled, "a motor that may be dark is not believed lit"
+        assert bench.loop.last_frame.cmd_mm is None, "nothing is left executing"
+        assert "stream_frame" not in bench.backend.names()
+        headline, detail = bench.signals.of("zero_notice")[-1]
+        assert "未确认" in headline
+        assert "重新使能" in detail and "重新标定" in detail
+
+    def test_a_backend_that_cannot_zero_refuses_rather_than_inventing_one(self) -> None:
+        """The simulator is the case.  A half-mirror would be worse than the
+        refusal: the plant's pose is at once its physics and the angle it
+        reports, so shifting only the report would make the demo disagree with
+        the hardware in exactly the way this whole feature is about."""
+        clock = FakeClock()
+        bench = Bench(RecordingSim(clock=clock), clock=clock)
+        bench.bring_up()
+
+        bench.send(cmd.WriteZero())
+
+        assert "不支持标零" in bench.signals.alerts()[-1]
+        assert bench.loop.zero_notice == "", (
+            "nothing was written, so there is nothing to warn about"
+        )
+        assert bench.loop.enabled, "and the motor was not left in doubt"
+        assert bench.loop.motion.state is MotionState.HOLD, (
+            "the axis was idled for a call that never happened, so the hold goes "
+            "back on: an enabled motor being sent no frames is what 停止 avoids"
+        )
+
+    def test_the_console_announces_the_axis_being_taken(self) -> None:
+        """The call takes the axis for up to a second and cannot be interrupted,
+        so a second press queued behind it would zero the axis twice — the second
+        time at whatever pose the jaws had drifted to.  The button is greyed on
+        the strength of this."""
+        bench = Bench()
+        bench.bring_up()
+        bench.signals.calls.clear()
+
+        bench.send(cmd.WriteZero())
+
+        assert bench.signals.of("busy") == [
+            (True, "正在写入编码器零点（电机将短暂失能）…"),
+            (False, ""),
+        ]
 
 
 # ═══════════════════════════════════════════════════════════════════════════

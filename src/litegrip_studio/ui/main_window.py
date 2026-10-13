@@ -96,7 +96,7 @@ class MainWindow(QMainWindow):
 
         self.tabs = QTabWidget()
         self.control_page = ControlPage(worker.submit, settings)
-        self.status_page = StatusPage()
+        self.status_page = StatusPage(worker.submit)
         self.plots_page = PlotsPage()
         self.calibration_page = CalibrationPage(worker.submit, settings)
         self.connect_bar = ConnectBar(worker.submit)
@@ -304,6 +304,7 @@ class MainWindow(QMainWindow):
         worker.alert.connect(self._on_alert)
         worker.alert_cleared.connect(self._on_alert_cleared)
         worker.busy.connect(self._on_busy)
+        worker.zero_notice.connect(self.status_page.set_zero_notice)
 
         self._heartbeat = QTimer(self)
         self._heartbeat.setInterval(constants.HEARTBEAT_INTERVAL_MS)
@@ -477,6 +478,7 @@ class MainWindow(QMainWindow):
 
     def _on_busy(self, busy: bool, what: str) -> None:
         self.calibration_page.set_busy(busy, what)
+        self.status_page.set_busy(busy, what)
         # Set *and* cleared.  The status bar this replaced only ever set it —
         # showMessage with no timeout stays up until something else clears it —
         # so the first busy spell of a session held the line for the rest of it.

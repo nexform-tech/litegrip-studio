@@ -73,6 +73,7 @@ from typing import Any, Callable
 from PyQt5.QtCore import QThread, pyqtSignal
 
 from .. import constants
+from ..backend import Unsupported, ZeroResult
 from ..calibration import (
     PROVENANCE_FACTORY,
     PROVENANCE_MEMORY,
@@ -348,6 +349,10 @@ class WorkerLoop:
         #: That distance is what separates a grasp from a mechanism that had not
         #: broken away from rest yet — see :meth:`_log_hand_over`.
         self._force_from_mm: float | None = None
+        #: The 标零 warning in force, or ``""``.  Held here rather than on the
+        #: page because the page cannot know whether the write went through, and
+        #: because it has to outlive a repaint: see :meth:`_write_zero`.
+        self._zero_notice = ""
 
     # ── lifecycle ───────────────────────────────────────────────────────────
     def run(self) -> None:
@@ -1028,6 +1033,12 @@ class WorkerLoop:
         elif isinstance(command, cmd.CancelCalibration):
             self._cancel_probe()
 
+        # ── maintenance ─────────────────────────────────────────────────────
+        elif isinstance(command, cmd.WriteZero):
+            self._write_zero()
+        elif isinstance(command, cmd.ClearZeroNotice):
+            self._clear_zero_notice()
+
         # ── housekeeping ────────────────────────────────────────────────────
         elif isinstance(command, cmd.Heartbeat):
             # Nothing to do: ``submit`` already recorded it, on the thread that
@@ -1177,22 +1188,39 @@ class WorkerLoop:
                 "修好文件或重新标定后即可恢复",
                 kind="refusal",
             )
+        measured = self._anchor_here("使能后尚未读到位置")
+        if measured is None:
+            self._log("info", "电机已使能；尚未读到位置，先零重力，读到后自动保持")
+        elif state is GateState.READY:
+            self._log("info", f"电机已使能，保持当前位置 {measured:.1f} mm")
+
+    def _anchor_here(self, release_reason: str) -> float | None:
+        """Re-anchor the axis to wherever the jaws now are, or leave it free.
+
+        Every position the FSM holds is expressed in the frame it was measured
+        in, so the two commands that can change which frame that is — 使能, which
+        forgets the pose a hand may have moved the jaws out of while the drive
+        was dark, and 标零, which rewrites the offset under it — have to re-take
+        the hold rather than go on executing a target that now names another
+        place.  ``_hold_measured`` is what does the re-taking; this only decides
+        whether there is anything to take it from yet.
+
+        With no frame counted since the axis came back, there is nothing to
+        freeze and the FSM is left holding nothing rather than a placeholder —
+        the same argument as :meth:`_measured_mm`, one layer down.  The tick
+        picks the hold up as soon as a frame arrives (:attr:`_awaiting_position`).
+
+        Returns the measurement it anchored to, or ``None`` when it left the axis
+        free, so the caller can say which of the two happened.
+        """
         measured = self._measured_mm()
         if measured is None:
-            # Enabled, but no frame has been counted since this energisation —
-            # so it does not know where the jaws are, and must not pretend it
-            # does.  Holding a position here would freeze the motor's placeholder
-            # angle, or the angle from before the last 失能, and send the axis to
-            # it; zero gain instead leaves the motor where it is until the first
-            # frame arrives, which the tick below picks up.
             self._awaiting_position = True
-            self._motion.release("使能后尚未读到位置")
-            self._log("info", "电机已使能；尚未读到位置，先零重力，读到后自动保持")
-        else:
-            self._awaiting_position = False
-            self._hold_measured("使能后尚未读到位置")
-            if state is GateState.READY:
-                self._log("info", f"电机已使能，保持当前位置 {measured:.1f} mm")
+            self._motion.release(release_reason)
+            return None
+        self._awaiting_position = False
+        self._hold_measured(release_reason)
+        return measured
 
     def _clear_fault(self) -> None:
         if not self._connected:
@@ -1647,6 +1675,160 @@ class WorkerLoop:
             self._probe.cancel()
             self._log("warn", f"「{what}」中断了正在进行的标定，标定已取消")
 
+    # ── maintenance ─────────────────────────────────────────────────────────
+    def _write_zero(self) -> None:
+        """Declare the current encoder angle zero, and say what that cost.
+
+        A maintenance action rather than a calibration step, and the two are not
+        interchangeable.  It writes the motor's flash, it is irreversible, and it
+        does **not** re-measure anything: the span already on file stays the
+        right length, while every *angle* in it — both ends, and therefore every
+        millimetre computed from them — is now offset by the angle that was
+        zeroed.  Closing at the closed stop moves the frame by well under
+        ``CALIB_MISMATCH_RAD``, so the gate does not catch it and the console
+        goes on moving: the error is real, small, and silent, which is exactly
+        why the operator is told in so many words instead of being stopped.
+
+        Nothing here blocks the gate.  What it does instead is refuse to leave
+        the FSM executing a target from the old frame: after the write the axis
+        is re-anchored (:meth:`_anchor_here`) and everything that reports a pose
+        is re-read, so the console describes the gripper it now has rather than
+        the one whose numbers were just invalidated.
+        """
+        # One ladder, in the order the causes explain each other — the same one
+        # `_start_probe` walks, and for the same reason: the E-stop explains the
+        # disabled motor, and "enable it first" is advice the operator cannot
+        # take until the latch is released.
+        if self._estop.is_set():
+            self._alert("warn", "急停中，无法标零", kind="refusal")
+            return
+        if not self._connected:
+            self._alert("warn", "请先连接", kind="refusal")
+            return
+        if not self._enabled:
+            # Said in full because it is the case an operator hits: 标零 on a
+            # console that has connected but not enabled looks like a dead
+            # button, and the reverse of the intuitive reading is what is going
+            # on — a DM drive ignores 0xFE precisely *because* it is disabled.
+            self._alert(
+                "warn", "标零需要电机使能；请先使能再标零", kind="refusal"
+            )
+            return
+        if self._probe is not None and self._probe.is_active:
+            # A probe owns the axis and is driving it; the write takes the axis
+            # away for its duration, and the probe's next frame would be aimed
+            # at a frame that has moved underneath it.
+            self._alert("warn", "标定进行中，无法标零；请先取消标定", kind="refusal")
+            return
+
+        self._motion.idle()
+        self._signals.busy.emit(True, "正在写入编码器零点（电机将短暂失能）…")
+        result = None
+        failure: Exception | None = None
+        try:
+            result = self.backend.write_zero()
+        except Unsupported as exc:
+            # Not a failure, and not the operator's fault: the simulator
+            # refuses, and saying so is the whole message.
+            self._alert("warn", f"本后端不支持标零: {exc}")
+        except Exception as exc:  # noqa: BLE001 - reported, never fatal
+            failure = exc
+            self._alert("error", f"标零失败: {exc}")
+        finally:
+            self._signals.busy.emit(False, "")
+
+        if result is None and failure is None:
+            # The backend refused the operation outright, so nothing was written
+            # and the frame has not moved.  Retaking the hold is not inventing
+            # work, though: the axis was idled for a call that then never
+            # happened, and an enabled motor being sent no frames is the state
+            # 停止 exists to avoid.  The measurement is still the one this
+            # energisation took, so the hold is exact.
+            self._anchor_here("标零被拒绝，重新保持")
+            return
+
+        # Every path from here on reached the drive.  The write disables and
+        # re-enables the motor underneath this class, so on *both* outcomes the
+        # count of status frames has to be restarted: the pose the previous one
+        # described was measured against the offset that may no longer apply.
+        self._enabled = bool(result.enabled) if result is not None else False
+        self._have_position = False
+        # Forces a fresh look at the error code: the drive was cycled, so
+        # whatever ``_service_faults`` last reported describes a motor that no
+        # longer exists.
+        self._reported_error = -1
+        self._anchor_here("标零后尚未读到位置")
+
+        if result is not None:
+            self._log(
+                "warn",
+                f"编码器零点已写入：{result.before_rad:.6f} → {result.after_rad:.6f} rad",
+            )
+            self._set_zero_notice(*self._zero_written_notice(result))
+        else:
+            # A failure raised before the 0xFE frame leaves the frame alone; one
+            # raised after it does not, and the SDK's own sequence can raise from
+            # between the disable and the re-enable.  Which of those happened is
+            # not knowable from here, so this says the state is unknown rather
+            # than claiming either one.
+            self._set_zero_notice(
+                "标零未确认完成",
+                f"写入过程中出错（{failure}）。零点可能已经改变，电机也可能仍处于失能；"
+                "请重新使能，并在重新标定之前不要按毫米使用。",
+            )
+
+    def _zero_written_notice(self, result: ZeroResult) -> tuple[str, str]:
+        """What to tell the operator about a write that went through.
+
+        Both halves of the message are load-bearing, and neither is about the
+        write having worked.  The first is the consequence: the calibration on
+        file was measured against the offset that has just been replaced, so its
+        two angles are both wrong by that amount — and because the amount is
+        small next to ``CALIB_MISMATCH_RAD``, the gate will not notice.  The
+        second exists because ``WriteZeroResult.ok`` means the drive *accepted
+        the frame*, which is not the same as the motor having come back: the SDK
+        re-enables around the write and drops that result (gripper.py:1431).
+        """
+        detail = (
+            "当前标定文件中的角度是在旧零点下测得的，"
+            "所以位置读数、目标位置和行程限制都整体偏了一个零点偏移，"
+            "而偏移量小于闸门的容差，控制台不会自行发现。"
+            "请重新标定（自动或手动两点）后再按毫米运动。"
+        )
+        if not result.enabled:
+            return (
+                "电机标零后处于失能状态",
+                f"{detail}另外，写零后的重新使能没有成功，电机现在是失能的；"
+                "请重新使能。",
+            )
+        if not result.ok:
+            return (
+                "电机标零结果未确认",
+                f"回读角度 {result.after_rad:.6f} rad 未落回零点容差以内，"
+                f"驱动器可能没有接受这次写入。{detail}",
+            )
+        return "电机已标零：标定需要重做", detail
+
+    def _set_zero_notice(self, headline: str, detail: str) -> None:
+        """Put up the 标零 notice, and keep it until the operator retracts it.
+
+        Deliberately *not* routed through :meth:`_alert`, which is the one path
+        that would take it down again: ``_track_alert`` retires an alert when the
+        condition it named changes, and this condition cannot change — the old
+        calibration does not become valid again.  The only thing that ends it is
+        the operator saying they have read it (:class:`ClearZeroNotice`).
+        """
+        self._zero_notice = f"{headline}\n{detail}"
+        self._log("warn", f"{headline}：{detail}")
+        self._signals.zero_notice.emit(headline, detail)
+
+    def _clear_zero_notice(self) -> None:
+        if not self._zero_notice:
+            return
+        self._zero_notice = ""
+        self._log("info", "已确认标零提示")
+        self._signals.zero_notice.emit("", "")
+
     # ── shutdown and safety ─────────────────────────────────────────────────
     def _service_watchdog(self) -> None:
         """Stop if the GUI has gone away.
@@ -1853,6 +2035,11 @@ class WorkerLoop:
         return self._enabled
 
     @property
+    def zero_notice(self) -> str:
+        """The 标零 warning in force, as one string, or ``""``."""
+        return self._zero_notice
+
+    @property
     def last_frame(self) -> TelemetryFrame:
         return self._last_frame
 
@@ -1927,6 +2114,12 @@ class GripperWorker(QThread):
     alert_cleared = pyqtSignal()
     #: (busy, what) — a blocking call is in progress; the GUI must say so.
     busy = pyqtSignal(bool, str)
+    #: (headline, detail) — the 标零 notice in force, or ``("", "")`` when the
+    #: operator has dismissed it.  Its own signal rather than an ``alert``
+    #: because it is the one thing the operator dismisses by hand, and because
+    #: the alert machinery would retract it on the next tick.  See
+    #: :meth:`WorkerLoop._set_zero_notice`.
+    zero_notice = pyqtSignal(str, str)
 
     def __init__(
         self,

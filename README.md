@@ -167,7 +167,7 @@ way.
 | Page | Contents |
 | --- | --- |
 | Control | Position slider, open all / close all, stop (hold position), zero gravity (back-drivable), speed, grasp force, grasp / let go |
-| Status | Telemetry table, temperature, faults and clearing them, link health |
+| Status | Telemetry table, temperature, faults and clearing them, link health, and the 电机标零 maintenance action |
 | Plots | pyqtgraph position and force plots (the force axis autoscales) |
 | Calibration | Provenance banner, the 自动标定 and manual two-point wizards, the file actions, the gate |
 
@@ -547,6 +547,44 @@ the axis to itself to do it.
   is handed back at the *angle the encoder reports*, because a hold in millimetres would have to
   come from the very limits that are still in doubt.
 
+### Motor zero (电机标零)
+
+The status page's **维护** area holds one action: **电机标零…**, which tells the drive that wherever
+the jaws are at that moment is angle zero. The offset goes into the motor's own flash over CMD
+`0xFE`, and there is no undo — the console cannot read it back and cannot put it back. It is a
+maintenance action rather than a step in calibration, and it is what to reach for when the jaws and
+the numbers have drifted far enough apart that measuring the ends again is the point.
+
+**It re-measures nothing.** The span on file keeps its length; both of its angles, and therefore
+every millimetre computed from them, are now offset by the angle that was zeroed. Afterwards the
+same jaws are read as a different place.
+
+The confirmation dialog names three consequences before the write, and the banner repeats them
+after:
+
+- **Re-calibration is required.** Until the file is remade (自动标定 or the manual two-point
+  probe), the position reading, every target and the travel limits are all shifted together.
+- **The gate will not catch it.** A zero taken at a stop moves the frame by well under
+  `CALIB_MISMATCH_RAD` (0.15 rad), so the console goes on moving by millimetres that are now wrong.
+  That is why the warning is stated in so many words instead of the motion being blocked.
+- **The motor is briefly limp.** The SDK disables the drive, sends `0xFE` and re-enables it, so for
+  about a second the jaws can be pushed by hand and Esc does not take effect until the write ends.
+  Keep hands and workpieces clear of the jaws before confirming.
+
+The warning is dismissed by the operator and by nothing else, through the 已了解 button in the
+banner. The worker does not retract it, because nothing in the loop can: a calibration measured
+against the old offset does not become correct again on its own. Immediately after the write the
+axis is re-anchored to a fresh measurement, so the FSM is never left executing a target expressed in
+the frame that just stopped existing.
+
+标零 needs the console connected and the motor enabled — a DM drive ignores `0xFE` precisely *because*
+it is disabled, so the refusal for a disabled motor is the one an operator meets. It is also refused
+while a probe is running, which owns the axis and would have its next frame aimed at a frame that
+moved underneath it.
+
+The simulated backend refuses 标零 rather than faking the frame shift; see the known limitations
+below.
+
 ---
 
 ## 🏗️ Architecture
@@ -590,7 +628,10 @@ threads and is tested with plain pytest; only `backend/` touches the SDK; the Qt
 
 The backend interface exposes only the primitives the state machine needs and **never an SDK
 convenience method** — that is what makes the same state machine run on the real gripper and on
-the simulation, so the simulation actually exercises the logic instead of standing next to it.
+the simulation, so the simulation actually exercises the logic instead of standing next to it. The
+one named exception is `write_zero`, which is 标零: it never runs on the control path, so the
+reason the other convenience methods are banned (they block inside a loop with no abort hook) does
+not apply to it.
 
 ### The reference generator
 
@@ -774,6 +815,11 @@ from the commit history, the git tag is the only source of truth, and `0.0.0-sem
 
 ## ⚠️ Known limitations
 
+- **电机标零 is refused by the simulated backend.** The refusal is deliberate, not an omission. The
+  plant's `q` is at once the mechanism's physics *and* the angle it reports, so a simulator that
+  shifted only the report would integrate against a state that no longer matches what it says —
+  disagreeing with the hardware in exactly the way this feature is about. In sim the button reports
+  本后端不支持标零; on the bench it works.
 - **The SDK's own `calibrate()` is not offered in this version.** It has no stdin
   dependency, but it cannot be interrupted and drives the motors for about 24 seconds — better to
   offer only the two wizards on the calibration page (自动标定 and the two-point manual one) than a

@@ -17,7 +17,7 @@ import json
 import pytest
 
 from litegrip_studio import calibration, constants
-from litegrip_studio.backend import GripperBackend
+from litegrip_studio.backend import GripperBackend, Unsupported
 from litegrip_studio.backend.sim import SimBackend
 from litegrip_studio.calibration import PROVENANCE_INVALID, PROVENANCE_USER
 from litegrip_studio.core.worker import GateState, evaluate_gate
@@ -409,3 +409,30 @@ class TestASavedProbeResultStopsBeingInMemory:
         )
         assert on_disk["rad_to_mm"] == pytest.approx(limits.rad_to_mm)
         assert on_disk["rad_to_mm"] != pytest.approx(self.PROBE["rad_to_mm"])
+
+
+class TestTheZeroWriteIsRefused:
+    """标零 is the one operation the simulator declines outright.
+
+    It is a refusal rather than an omission, and the alternative is worse than
+    the refusal.  ``Plant.q`` is at once the mechanism's physics *and* the angle
+    it reports, so shifting only the report would leave the plant integrating
+    against a state that no longer matches what it says, and the simulator would
+    disagree with the hardware in exactly the way this feature is about.  A
+    scenario that wants to rehearse 标零 can move ``q`` and re-derive the
+    calibration; the console cannot, and does not pretend to.
+    """
+
+    def test_it_says_so_rather_than_faking_the_frame(self) -> None:
+        sim = SimBackend(clock=FakeClock())
+        sim.connect()
+        sim.enable()
+        before = sim.read()
+
+        with pytest.raises(Unsupported):
+            sim.write_zero()
+
+        after = sim.read()
+        assert after.position_rad == pytest.approx(before.position_rad)
+        assert after.position_mm == pytest.approx(before.position_mm)
+        assert sim._enabled, "and it did not disable the plant on the way out"

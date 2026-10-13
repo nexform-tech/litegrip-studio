@@ -1,9 +1,14 @@
-"""The status page: the numbers, and the two things it must not claim.
+"""The status page: the numbers, the two things it must not claim, and 标零.
 
-Nothing here is interactive, so the tests are about honesty rather than about
-commands: a motor that is not being addressed has no fault information and no
-link health, and a page that rendered both as "fine" would be a page that reads
-green while the gripper is unplugged.
+Most of what is here is about honesty rather than about commands: a motor that is
+not being addressed has no fault information and no link health, and a page that
+rendered both as "fine" would be a page that reads green while the gripper is
+unplugged.
+
+The maintenance action is the exception, and it is tested the way the console
+tests every modal: the dialog is a value supplied by a stub, the *decision* is
+what is asserted, and what the dialog says is checked against the consequences
+the operator is being asked to accept.
 """
 
 from __future__ import annotations
@@ -11,8 +16,10 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
+from PyQt5.QtWidgets import QPushButton
 
 from litegrip_studio import constants
+from litegrip_studio.core import commands as cmd
 from litegrip_studio.core.worker import (
     CONN_CONNECTED,
     CONN_DISCONNECTED,
@@ -21,7 +28,7 @@ from litegrip_studio.core.worker import (
 )
 from litegrip_studio.telemetry import EMPTY_FRAME, TelemetryFrame
 from litegrip_studio.ui import theme
-from litegrip_studio.ui.status_page import StatusPage
+from litegrip_studio.ui.status_page import CANCEL, WRITE, StatusPage
 
 READY_REASON = "用户标定：/tmp/cal.json"
 
@@ -30,9 +37,28 @@ def frame(**changes) -> TelemetryFrame:
     return dataclasses.replace(EMPTY_FRAME, **changes)
 
 
+class Recorder:
+    """Stands in for ``WorkerLoop.submit``: records instead of queueing."""
+
+    def __init__(self) -> None:
+        self.commands: list[object] = []
+
+    def __call__(self, command) -> int:
+        self.commands.append(command)
+        return len(self.commands)
+
+    def of(self, kind) -> list:
+        return [c for c in self.commands if isinstance(c, kind)]
+
+
 @pytest.fixture
-def page(qapp) -> StatusPage:
-    return StatusPage()
+def submitted() -> Recorder:
+    return Recorder()
+
+
+@pytest.fixture
+def page(qapp, submitted) -> StatusPage:
+    return StatusPage(submitted)
 
 
 class TestTheReadings:
@@ -299,3 +325,214 @@ class TestTheGate:
             page.update_frame(frame(enabled=True, error_code=constants.ERROR_ENABLED))
 
         assert page.gate_alert[2] == "缺少标定文件"
+
+
+class TestTheZeroButtonIsOnlyOfferedWhenItCouldWork:
+    """The button is live on a connected, idle console — and nowhere else.
+
+    The *not-enabled* case is deliberately not gated here.  The worker refuses
+    it with a sentence naming the reason, and a greyed-out control that says
+    nothing is how an operator concludes the console is broken.
+    """
+
+    def test_it_starts_dead_on_a_console_that_has_connected_to_nothing(
+        self, page
+    ) -> None:
+        assert page.zero_button.isEnabled() is False
+
+    def test_connecting_brings_it_up(self, page) -> None:
+        page.set_conn_state(CONN_CONNECTED, "实机 can0")
+
+        assert page.zero_button.isEnabled() is True
+
+    def test_losing_the_link_takes_it_down_again(self, page) -> None:
+        page.set_conn_state(CONN_CONNECTED, "实机 can0")
+        page.set_conn_state(CONN_DISCONNECTED, "已断开")
+
+        assert page.zero_button.isEnabled() is False
+
+    def test_a_busy_console_does_not_offer_a_second_one(self, page) -> None:
+        """The write takes the axis for up to a second; a second press queued
+        behind it would zero again at whatever pose the jaws had reached."""
+        page.set_conn_state(CONN_CONNECTED, "实机 can0")
+        page.set_busy(True, "正在写入编码器零点（电机将短暂失能）…")
+
+        assert page.zero_button.isEnabled() is False
+
+        page.set_busy(False, "")
+
+        assert page.zero_button.isEnabled() is True
+
+
+class FakeButton:
+    def __init__(self, label: str) -> None:
+        self.label = label
+        self.properties: dict[str, object] = {}
+
+    def setProperty(self, name: str, value) -> None:
+        self.properties[name] = value
+
+
+class FakeMessageBox:
+    """A ``QMessageBox`` that records instead of showing.
+
+    Stands in for the module-level name, so the same patch reaches the dialog
+    the page builds.  The three role constants are copied across because
+    ``_prompt_zero`` reads them off the class.
+    """
+
+    Warning = 2
+    DestructiveRole = 3
+    RejectRole = 1
+
+    def __init__(self, _parent) -> None:
+        self.text = ""
+        self.detail = ""
+        self.default = ""
+        self.buttons: list[FakeButton] = []
+
+    def setIcon(self, *_a) -> None:
+        pass
+
+    def setWindowTitle(self, *_a) -> None:
+        pass
+
+    def setText(self, text: str) -> None:
+        self.text = text
+
+    def setInformativeText(self, text: str) -> None:
+        self.detail = text
+
+    def addButton(self, label: str, _role) -> FakeButton:
+        button = FakeButton(label)
+        self.buttons.append(button)
+        return button
+
+    def setDefaultButton(self, button: FakeButton) -> None:
+        self.default = button.label
+
+    def exec_(self) -> None:
+        pass
+
+    def clickedButton(self):
+        """Nothing was clicked, so every test here gets the cancel branch."""
+        return None
+
+
+@pytest.fixture
+def boxes(monkeypatch) -> list[FakeMessageBox]:
+    made: list[FakeMessageBox] = []
+
+    def build(parent):
+        box = FakeMessageBox(parent)
+        made.append(box)
+        return box
+
+    # The role constants travel with the name, because ``_prompt_zero`` reads
+    # them off whatever it finds there.
+    build.Warning = FakeMessageBox.Warning
+    build.DestructiveRole = FakeMessageBox.DestructiveRole
+    build.RejectRole = FakeMessageBox.RejectRole
+    monkeypatch.setattr("litegrip_studio.ui.status_page.QMessageBox", build)
+    return made
+
+
+class TestConfirmingTheZero:
+    def test_it_asks_before_write(self, page, submitted, monkeypatch) -> None:
+        monkeypatch.setattr(page, "_prompt_zero", lambda: WRITE)
+
+        page._on_zero_clicked()
+
+        assert len(submitted.of(cmd.WriteZero)) == 1
+
+    def test_cancelling_sends_nothing(self, page, submitted, monkeypatch) -> None:
+        """A confirmation that queued the command anyway would be a dialog in
+        front of a done deal."""
+        monkeypatch.setattr(page, "_prompt_zero", lambda: CANCEL)
+
+        page._on_zero_clicked()
+
+        assert submitted.commands == []
+
+    def test_the_command_carries_no_pose(self, page, submitted, monkeypatch) -> None:
+        """Which angle becomes zero is whatever the jaws are at when the write
+        lands.  A pose captured before the dialog would be a pose from before
+        the operator pushed the jaws."""
+        monkeypatch.setattr(page, "_prompt_zero", lambda: WRITE)
+
+        page._on_zero_clicked()
+
+        written = submitted.of(cmd.WriteZero)[0]
+        assert dataclasses.fields(written) == ()
+
+    def test_the_dialog_names_the_three_consequences(
+        self, page, monkeypatch, boxes
+    ) -> None:
+        """Read off the dialog's own text rather than restated here, because the
+        text *is* the thing being checked: what the operator is told they are
+        accepting.
+
+        Three of them, and each is a different way to be surprised: the write is
+        irreversible, the axis is briefly not under the console's control, and
+        the numbers the console has been moving by are wrong afterwards.
+        """
+        page._prompt_zero()
+
+        box = boxes[-1]
+        text = box.text + box.detail
+        assert "不可撤销" in text
+        assert "失能" in text          # the axis is not under control during it
+        assert "重新标定" in text       # and the numbers are wrong afterwards
+
+    def test_the_safe_answer_is_the_default(self, page, monkeypatch, boxes) -> None:
+        """A stray Return must not write the flash.  The default is whichever
+        button ``setDefaultButton`` was handed, so that is what is recorded."""
+        page._prompt_zero()
+
+        assert boxes[-1].default == "取消"
+
+
+class TestTheZeroNotice:
+    """The warning that outlives every frame, and the only thing that ends it."""
+
+    def test_a_write_puts_it_up(self, page) -> None:
+        page.set_zero_notice("电机已标零：标定需要重做", "当前标定文件中的角度是在旧零点下测得的。")
+
+        severity, headline, detail = page.zero_alert
+        assert severity == "warn"
+        assert "标零" in headline
+        assert "旧零点" in detail
+
+    def test_frames_do_not_take_it_down(self, page) -> None:
+        """Which is the whole reason it is not an alert: no status frame can
+        contradict it, so nothing in the loop has an edge to watch for."""
+        page.set_zero_notice("电机已标零：标定需要重做", "……")
+        for _ in range(5):
+            page.update_frame(frame(enabled=True, error_code=constants.ERROR_ENABLED))
+
+        assert page.zero_alert[1] == "电机已标零：标定需要重做"
+
+    def test_a_dropped_link_does_not_take_it_down_either(self, page) -> None:
+        page.set_zero_notice("电机已标零：标定需要重做", "……")
+        page.set_conn_state(CONN_DISCONNECTED, "已断开")
+
+        assert page.zero_alert[0] == "warn"
+
+    def test_the_empty_pair_is_the_operator_having_dismissed_it(self, page) -> None:
+        page.set_zero_notice("电机已标零：标定需要重做", "……")
+        page.set_zero_notice("", "")
+
+        assert page.zero_alert[0] is None
+
+    def test_the_banner_owns_the_command_that_clears_it(
+        self, page, submitted
+    ) -> None:
+        """The button sits inside the banner, so it cannot outlive the message
+        it belongs to — ``Banner.set(None)`` hides the whole strip, button and
+        all, and there is no second place to dismiss from."""
+        page.set_zero_notice("电机已标零：标定需要重做", "……")
+        assert page._zero_banner.findChild(QPushButton) is page.zero_dismiss
+
+        page.zero_dismiss.click()
+
+        assert len(submitted.of(cmd.ClearZeroNotice)) == 1
