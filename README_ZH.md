@@ -269,7 +269,9 @@ sudo ip link set can0 up
 1. **操作员指定的文件**——`--calibration`、`~/.litegrip/litegrip_studio.ini` 里记住的
    `calibration/path`，或 `$LITEGRIP_CALIB`。**这才是这台夹爪的参数**，也是唯一能离开默认的路。
 2. **SDK 包内的出厂标定文件**（`litegrip/factory_calibration.json`，只读）——什么都没指定时
-   上位机跑的就是它，每台机器都有，因为它随 vendor 进来的 SDK 一起发布。
+   上位机跑的就是它，每台机器都有，因为它随 vendor 进来的 SDK 一起发布。本仓库把这一份覆盖成了
+   本机手推记录的那组值，而不是上游用探针测出来的；`src/litegrip/VENDORED.md` 记了这次分叉，
+   含它自己的哈希。
 
 指定的文件存在但不可用时到此为止：文件损坏不会因此改用出厂数值，指定的路径已经不存在也一样
 ——两种情况都会如实报出来。`LITEGRIP_FACTORY_CALIB` 直接顶掉第 2 级，给把标定放在别处的台架用；
@@ -285,7 +287,7 @@ sudo ip link set can0 up
   `log.info` 能区分。对真机意味着毫米读数系统性错掉而界面看不出来。
 - **SDK 不强制标定**。`connect()` / `enable()` 都不会自动加载。不加载就用
   `GripperConfig` 默认值 `pos_closed_rad=0.0 / pos_open_rad=1.14`，而实机标定值是
-  **闭合数值更大**（随 SDK vendor 进来的那份兜底是 `0.052071 / -1.357`）。映射式
+  **闭合数值更大**（随 SDK vendor 进来的那份兜底是 `0.029564 / -1.141`）。映射式
   `mm = (pos_closed_rad - position_rad) * rad_to_mm` 方向**恰好相反**，会算出负毫米并
   朝错误方向顶到硬限位。
 - **`load_calibration()` 会覆盖 `kp` / `kd` / `grasp_torque_threshold`**，且字段读取

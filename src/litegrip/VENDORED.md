@@ -27,8 +27,9 @@ suite about upstream's internals; the console pins the part of the SDK surface i
 (`tests/test_vendored_sdk.py`, `tests/test_real_backend_api.py`) and records the tree hash below so
 drift cannot go unnoticed.
 
-Every file here is that commit's byte for byte, with no local override. That was not always true —
-see **No local override** for the divergence this repository used to carry and why it is gone.
+Every file here is that commit's byte for byte, with one declared exception: this bench's
+`factory_calibration.json`, re-recorded by hand. The tree hash below covers every *other* file, and
+**Local override** records the exception with a hash of its own.
 
 ## What the `b9caae8` → `5b7da89` move changed
 
@@ -59,44 +60,82 @@ upstream and re-vendor, or — when a local divergence is genuinely unavoidable 
 this file with the reason, so the person re-vendoring sees it.
 
 The tree hash below is what makes a silent edit visible: `tests/test_vendored_sdk.py` recomputes it
-and fails when it no longer matches. There is no divergence to declare today, so the tree hash is
-the whole of the check, and any edit at all — the calibration data included — moves it.
+and fails when it no longer matches. It covers every file except the one **Local override** declares,
+so an edit to any other file moves it, and an edit to the overridden file is caught by that file's
+own hash instead.
 
 ## Tree hash
 
 ```text
-4c9b2e7f4b84690c3c95ffdfb3ee7b2e240ffc3e2daeea2f870818eca8be146f
+696c22bd33727a5732e643e7dfcfffe46f93b9a6aa2f96c79af2a1deb97ef0b3
 ```
 
 The recipe, so it can be recomputed without reading the test: take every file under `src/litegrip/`
-except `VENDORED.md` (this file holds the hash, so it cannot be part of it) and `__pycache__`,
-ordered by its POSIX path relative to `src/litegrip/`; feed each path, a newline, then the file's
-bytes into one SHA-256 stream; read the hex digest.
+except `VENDORED.md` (this file holds the hash, so it cannot be part of it), `__pycache__`, and the
+overridden `factory_calibration.json` (whose content is pinned by its own hash in **Local override**
+instead), ordered by its POSIX path relative to `src/litegrip/`; feed each path, a newline, then the
+file's bytes into one SHA-256 stream; read the hex digest.
 
 ```bash
 python3 - <<'PY'
 import hashlib, pathlib
 root = pathlib.Path("src/litegrip")
+overridden = "factory_calibration.json"
 h = hashlib.sha256()
 for p in sorted(root.rglob("*")):
-    if p.is_file() and "__pycache__" not in p.parts and p.name != "VENDORED.md":
-        h.update((p.relative_to(root).as_posix() + "\n").encode())
-        h.update(p.read_bytes())
+    if not p.is_file() or "__pycache__" in p.parts or p.name == "VENDORED.md":
+        continue
+    if p.relative_to(root).as_posix() == overridden:
+        continue
+    h.update((p.relative_to(root).as_posix() + "\n").encode())
+    h.update(p.read_bytes())
 print(h.hexdigest())
 PY
 ```
 
-## No local override
+## Local override
 
-The two upstream repositories used to disagree about `factory_calibration.json`, and this repository
-carried the C++ one: [litegrip-cpp](https://github.com/nexform-tech/litegrip-cpp) at
+One file here is not upstream's, and it is the only one. `tests/test_vendored_sdk.py` hashes it on
+its own and fails when it stops matching what this section records, so a re-vendor that copies
+upstream's file back over it is a loud failure rather than a quiet change of millimetres.
+
+### The factory calibration, re-recorded by hand
+
+Upstream's `factory_calibration.json` carries the geometry the SDK's motor-driven probe measured for
+the reference unit. This bench is calibrated by hand instead: the operator pushes the jaws onto each
+stop and records the encoder at both, and on this unit that recording is the one in force. The pair
+recorded on 2026-10-13 is `0.029564 / -1.141184`, a 1.170748 rad span, with `rad_to_mm` at
+`73.45731105242119` — which is what the console derives for that span over `DEFAULT_TRAVEL_MM` plus
+`SPAN_INSET_MM` (`86 / 1.170748`), so the fallback carries the scale the console moves by and not
+one that merely looks plausible.
+
+The override is data only. No file of code under `src/litegrip/` is edited: the one place in the SDK
+that illustrates the span-versus-travel derivation with the shipped numbers — `GripperGeometry` in
+`constants.py` — still shows upstream's.
+
+Its hash, so a re-vendor can tell this file from upstream's:
+
+```text
+8f891b1022d35d13f27eb029ada0e6d8f94d45ad70ee69ee84eeac4154174b15
+```
+
+### The override this repository used to carry
+
+Before the above, this repository carried the C++ SDK's copy of the same file. The two upstream
+repositories disagreed about those numbers, and this repository took the C++ one:
+[litegrip-cpp](https://github.com/nexform-tech/litegrip-cpp) at
 `a2354fec5179cd968e24b8e1c00b7787d7009cce`. Upstream Python's copy held another unit's reading —
 `0.0 / -1.651026 / 1.651026 / 52.69`, a span implying 86.99 mm where this bench travels 85 mm.
 
 Upstream's `b9caae8` ("fix: ship the factory geometry in the calibration files") closed the gap. All
-three shipped calibration files now carry `0.052071 / -1.357481 / 1.409552 / 61.01229326764816`,
-which is the unit on this bench, and the same numbers the override was carrying. Taking upstream's
-file back is therefore not a change of numbers, and the override is gone rather than moved.
+three of upstream's shipped calibration files carry `0.052071 / -1.357481 / 1.409552 /
+61.01229326764816` since then, which is the unit on this bench, and the same numbers that override
+was carrying. Taking upstream's file back was therefore not a change of numbers, and that override
+is gone rather than moved.
+
+The override above is a different claim about the same file, not a revival of this one: it is this
+bench's hand-recorded pair against upstream's probe-measured one, rather than a choice between the
+two upstream repositories.
 
 One key still differs from the C++ copy: upstream's file carries `work_stroke_mm: 80.0` and the C++
 one has no such key at all. Upstream's commit says why it kept it — dropping it "would let open() run
@@ -142,7 +181,12 @@ what a commit carries before copying it, ask the commit:
 Then, in one commit:
 
 1. Update the commit and date in the table above.
-2. Recompute the tree hash with the recipe above and replace it.
+2. Settle the local override, then recompute the tree hash with the recipe above and replace it. The
+   copy above brings upstream's `factory_calibration.json` back with it, which silently reverts the
+   fallback — the override hash test is what catches that. If upstream now carries this bench's
+   hand-recorded pair, delete the override from **Local override** and take the file as it comes;
+   if it does not, restore the file (`git show HEAD:src/litegrip/factory_calibration.json >
+   src/litegrip/factory_calibration.json`) and leave that section as it is.
 3. Run the suite: `env -u LITEGRIP_SDK_PATH python3 -m pytest -q`. The SDK-surface tests are the
    contract — if upstream changed a signature the console calls, they fail here rather than on the
    bench.

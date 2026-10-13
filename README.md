@@ -323,7 +323,9 @@ console resolves the calibration itself, and there is now one automatic source:
    file that describes this gripper**, and naming one is the only way off the default.
 2. **The SDK's factory calibration file** (`litegrip/factory_calibration.json` inside the vendored
    SDK package, read-only) — what the console runs on when nothing is named, and every machine has
-   it.
+   it. This repository ships that one file overridden with this bench's hand-recorded pair rather
+   than upstream's probe-measured numbers; `src/litegrip/VENDORED.md` records the override, hash
+   included.
 
 A named file that exists but cannot be used stops there: a corrupt file is never a reason to fall
 back to the factory numbers, and neither is a name that no longer exists — both are reported as
@@ -342,7 +344,7 @@ decides the provenance itself rather than trusting the SDK's return value:
 - **The SDK does not require a calibration.** Neither `connect()` nor `enable()` loads one. Without
   it you get `GripperConfig`'s defaults, `pos_closed_rad=0.0 / pos_open_rad=1.14`, whereas on real
   hardware the closed value is the **larger** one (the fallback vendored with the SDK has
-  `0.052071 / -1.357`). The mapping `mm = (pos_closed_rad - position_rad) * rad_to_mm` then runs
+  `0.029564 / -1.141`). The mapping `mm = (pos_closed_rad - position_rad) * rad_to_mm` then runs
   **exactly backwards**, computing negative millimetres and driving into the hard stop.
 - **`load_calibration()` overwrites `kp` / `kd` / `grasp_torque_threshold`**, and reads its fields
   without protection: a bad file raises `KeyError`.

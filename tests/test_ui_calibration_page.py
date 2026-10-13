@@ -37,14 +37,14 @@ from litegrip_studio.ui.calibration_page import (
 from litegrip_studio.units import Limits
 
 USER_LIMITS = Limits(1.775959, -0.064279, 65.21, 120.0)
-#: The factory file this console falls back to, as the console reads it.  The
-#: file carries 61.01229326764816 mm/rad over a 1.409552 rad span, which is what
-#: the console derives from that span over ``DEFAULT_TRAVEL_MM`` plus the probe's
-#: inset — ``derive_scale(1.409552, 85.0)`` — so the two agree exactly and the
-#: scale here is the one the file carries *and* the one the console moves by.
-#: They used to differ by 1.2 %: the file was another unit's until upstream
-#: re-measured it in ``b9caae8``.
-FACTORY_LIMITS = Limits(0.052071, -1.357481, 61.01229326764816, 85.0)
+#: The factory file this console falls back to, as the console reads it.  It is
+#: this repository's declared override of the vendored SDK's file (``VENDORED.md``)
+#: and carries this bench's hand-recorded pair.  Its own 73.45731105242119 mm/rad
+#: is what the console derives over the recorded 1.170748 rad span under
+#: ``DEFAULT_TRAVEL_MM`` plus ``SPAN_INSET_MM`` — ``derive_scale(1.170748, 85.0)``
+#: — so the two agree exactly, and the scale here is the one the file carries
+#: *and* the one the console moves by.
+FACTORY_LIMITS = Limits(0.029564, -1.141184, 73.45731105242119, 85.0)
 
 #: A stand-in for where the SDK was checked out.  The shortened form of a
 #: factory path is relative to that root, so the tests that assert on it
@@ -825,3 +825,27 @@ class TestThePageDoesNotDecideHowBigTheWindowIs:
         assert scroll is not None, "the page must scroll rather than force the window"
         for readout in (page._phase_label, page._progress, page._position, page._note):
             assert not scroll.isAncestorOf(readout)
+
+
+# ── the fixture itself ──────────────────────────────────────────────────────
+class TestTheFixtureIsTheFileItClaims:
+    """``FACTORY_LIMITS`` stands in for the file this console falls back to, and
+    nothing above reads that file.
+
+    A fixture left behind when the file moves therefore fails nothing: every test
+    in this module still passes, describing a gripper no machine would load.  The
+    other two modules that carry calibration fixtures compare theirs against the
+    file for that reason (``TestTheFixturesAreTheFilesTheyClaim``,
+    ``TestTheFixtureIsTheFileItClaims``), and this is this file's.
+    """
+
+    def test_it_is_the_file_the_console_reads_it_from(self) -> None:
+        path = calibration.factory_path()
+        raw, problems = calibration.parse_calibration_json(
+            path.read_text(encoding="utf-8")
+        )
+
+        assert problems == [], f"{path} 读不出来：{problems}"
+        assert calibration.limits_from_raw(raw) == FACTORY_LIMITS, (
+            "FACTORY_LIMITS 与出厂标定文件不一致了，两份要一起改"
+        )
