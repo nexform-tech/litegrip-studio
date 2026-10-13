@@ -796,12 +796,17 @@ class TrajectoryPlayer:
     def _align_to_start(self) -> None:
         """Walk to sample 0 at a bounded speed, so following starts in place.
 
-        This used to be one ``goto_rad(..., duration=1.0)``.  ``duration`` reads
-        like a ramp but is only a deadline: the CAN layer sends ``q = q_target``
-        from the first frame and holds it, so that frame demanded ``kp`` times
-        the whole error.  That is the same full-torque step #22 reports for the
-        teleop follower — at the shipped ``kp`` of 100 Nm/rad any error past
-        ~0.1 rad saturates the DM4310.
+        This used to be one ``goto_rad(..., duration=1.0)``.  At the time
+        ``duration`` read like a ramp but was only a deadline: the CAN layer sent
+        ``q = q_target`` from the first frame and held it, so that frame demanded
+        ``kp`` times the whole error.  That is the same full-torque step #22
+        reports for the teleop follower — at the shipped ``kp`` of 100 Nm/rad any
+        error past ~0.1 rad saturates the DM4310.
+
+        ``goto_rad`` runs that bounded ramp itself now, but this loop stays: the
+        alignment has to be interruptible every frame (``self._running``) and has
+        to keep time on the replay's own pacer, neither of which a call into the
+        action engine can give it.
 
         The target is walked in at ``motion_config.speed_mm_s`` with that same
         speed fed forward as ``dq``, and each frame is capped to

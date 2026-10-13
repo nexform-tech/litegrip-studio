@@ -51,17 +51,55 @@ class GripperParams:
 
 
 # ═════════════════════════════════════════════════════════════════════════
-# Unit conversion (nominal — calibrate for accuracy)
+# Gripper geometry and unit conversion
 # ═════════════════════════════════════════════════════════════════════════
+
+class GripperGeometry:
+    """The LiteGrip two-finger gripper's nominal geometry.
+
+    These are the numbers every uncalibrated default in this package comes
+    from.  They are the measured geometry of the reference unit, not a
+    tolerance to be picked per gripper: an ``85 mm`` jaw travel is what the
+    calipers read, and the ``1 mm`` inset is how far the probe presses into
+    the open stop while looking for it.
+
+    **Keep the two apart; do not fold the inset into the travel.** The
+    calibration probe measures the span *between the two stops*, which is
+    ``SPAN_MM`` (86 mm) — the jaws at rest on the closed stop, and pressed
+    ~1 mm past where the jaws have run out of travel on the open one.  The
+    millimetres-per-radian scale is that span over the measured travel in
+    radians (``rad_to_mm``); deriving it from the 85 mm jaw travel instead
+    would leave every mm-based move 1.2% short — 1 mm lost per full stroke.
+    The factory calibration's own numbers show the pair: 1.409552 rad of
+    travel is 86 mm at ``61.01229326764816`` mm/rad, and 85 mm at
+    ``60.303``.
+
+    ``work_stroke_mm`` is measured from the closed zero like
+    :attr:`JAW_TRAVEL_MM`, so a full-stroke ``work_stroke_mm`` is 85 mm, not
+    ``SPAN_MM``.
+    """
+
+    #: Jaw travel measured with calipers, from the closed stop (mm).
+    JAW_TRAVEL_MM: Final = 85.0
+
+    #: How far the calibration probe presses into the open stop (mm).
+    STOP_INSET_MM: Final = 1.0
+
+    #: What the recorded extremes span (mm) — the numerator of the scale.
+    SPAN_MM: Final = JAW_TRAVEL_MM + STOP_INSET_MM
+
 
 class UnitConversion:
     """Unit conversion coefficients.
 
-    Nominal values for a 120 mm stroke gripper.  Run calibrate() to get
-    accurate per-unit values.
+    Nominal values for this gripper — see :class:`GripperGeometry`.  They are
+    the span over the uncalibrated placeholder travel
+    (:attr:`~litegrip.models.GripperConfig.pos_closed_rad`, ``1.14 rad``), and
+    every motion is refused until a real calibration replaces them.  Run
+    ``calibrate()`` to get accurate per-unit values.
     """
-    RAD_TO_MM: Final = 120.0 / 1.14   # ≈ 105.26 mm/rad
-    MM_TO_RAD: Final = 1.14 / 120.0   # ≈ 0.0095 rad/mm
+    RAD_TO_MM: Final = GripperGeometry.SPAN_MM / 1.14   # ≈ 75.44 mm/rad
+    MM_TO_RAD: Final = 1.14 / GripperGeometry.SPAN_MM   # ≈ 0.01326 rad/mm
     NM_TO_N: Final = 10.0             # approximate N per Nm
     N_TO_NM: Final = 0.1              # approximate Nm per N
 

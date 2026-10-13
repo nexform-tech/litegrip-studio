@@ -7,6 +7,8 @@ from enum import IntEnum, IntFlag
 import time
 from typing import Optional
 
+from .constants import GripperGeometry, UnitConversion
+
 
 class GripperMode(IntEnum):
     """Gripper control mode."""
@@ -96,19 +98,22 @@ class GripperConfig:
     # defaults still in place every direction is a guess.
     calibrated: bool = False
 
-    # Mechanical stroke (mm) — set to match your gripper's physical travel
-    max_stroke_mm: float = 120.0
+    # Jaw travel (mm) — the caliper measurement of your gripper's travel.
+    # :meth:`LiteGrip.calibrate` derives ``rad_to_mm`` from it plus the probe
+    # inset, because the recorded extremes span that inset more than the jaws
+    # actually open; see :class:`~litegrip.constants.GripperGeometry`.
+    max_stroke_mm: float = GripperGeometry.JAW_TRAVEL_MM
 
     # Working stroke (mm) — the opening the motions are allowed to reach, from
-    # the closed zero.  ``0`` (or anything ≥ the mechanical stroke) means "no
-    # limit": :meth:`actions.open` then presses onto the open mechanical stop as
-    # before.  Set it below the mechanical stroke to keep a margin at the open
-    # end (e.g. 80 mm of travel on an 87 mm mechanical stroke leaves 7 mm), so a
-    # plain open no longer drives into the stop.
+    # the closed zero.  ``0`` (or anything ≥ the jaw travel) means "no limit":
+    # :meth:`actions.open` then presses onto the open mechanical stop as before.
+    # Set it below the jaw travel to keep a margin at the open end (e.g. 80 mm on
+    # an 85 mm travel leaves 5 mm), so a plain open no longer drives into the
+    # stop.
     work_stroke_mm: float = 0.0
 
     # Unit conversion — update after calibration
-    rad_to_mm: float = 105.26              # rad → mm
+    rad_to_mm: float = UnitConversion.RAD_TO_MM   # rad → mm
     nm_to_n: float = 10.0                  # Nm → N (approximate)
 
     # Grasp detection
@@ -161,7 +166,7 @@ class CalibrationData:
     zero_position: float = 1.14            # closed limit (rad)
     max_position: float = 0.0              # open limit (rad)
     travel_range: float = 1.14             # |max - zero| (rad)
-    rad_to_mm: float = 105.26              # calibrated conversion
+    rad_to_mm: float = UnitConversion.RAD_TO_MM   # calibrated conversion
     motor_type: str = "DM4310"
     can_id: int = 0x08
     mst_id: int = 0x18

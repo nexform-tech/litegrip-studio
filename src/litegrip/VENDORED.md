@@ -12,7 +12,7 @@ that has nothing but this repository.
 | | |
 | --- | --- |
 | Upstream | <https://github.com/nexform-tech/litegrip-python> |
-| Commit | `b9caae84360d9a32332c811f1af348181616a2fd` (2026-10-08) |
+| Commit | `5b7da892e34b1fb8a405cc6db9b924c656daf802` (2026-10-13) |
 | License | Apache-2.0 — `LICENSE` is that commit's file, copied verbatim |
 
 `src/litegrip/` holds the modules, the `can/` and `protocols/` subpackages, `py.typed`, and the
@@ -30,6 +30,27 @@ drift cannot go unnoticed.
 Every file here is that commit's byte for byte, with no local override. That was not always true —
 see **No local override** for the divergence this repository used to carry and why it is gone.
 
+## What the `b9caae8` → `5b7da89` move changed
+
+Twenty-three upstream commits, eleven files under `src/litegrip/`. Most of the range is the
+trajectory and force-hold engine and the readme. Three parts of it reach this console:
+
+- **`LiteGrip.write_zero()` is new** (`gripper.py`). It rewrites the encoder offset over CMD `0xFE`,
+  disabling and re-enabling the motor around the frame. The console's 电机标零 action is built on
+  it; nothing in `litegrip_studio/` rolls its own sequence.
+- **`factory_calibration.json` now carries `kp: 100.0` where it carried `5.0`** ("fix: align the
+  factory calibration with the default stiffness"). This changes no motion here: the console
+  streams its own MIT frames and passes its own gains to `send_mit_frame`, and never calls an SDK
+  convenience method that would read the config's. It does travel further than that, though — the
+  SDK's `save_calibration` writes `config.kp` back out, so a calibration the console saves after
+  this re-vendor carries `100.0` where one saved before carried `5.0`. The two shipped
+  `calibration_*.json` templates were *not* touched upstream and still say `5.0`.
+- **The range ends in `feat!: remove set_force from the public API`** — a breaking change for
+  upstream's own callers, and inert here. The console's `SetForce` command and
+  `MotionFSM.set_force` are its own, and no module under `src/litegrip_studio/` calls the SDK's.
+  It is not on the `FORBIDDEN` list in `tests/test_real_backend_api.py` for the same reason: that
+  list names methods the console refuses to use, and this one is no longer there to refuse.
+
 ## Do not edit these files
 
 An edit inside `src/litegrip/` is a fork of upstream that nothing records. It also survives only
@@ -44,7 +65,7 @@ the whole of the check, and any edit at all — the calibration data included �
 ## Tree hash
 
 ```text
-9b8b57df1a3ed4b5bf66f1bb8526f0cbf04f81ae6667c4de73acf2f289be2bad
+4c9b2e7f4b84690c3c95ffdfb3ee7b2e240ffc3e2daeea2f870818eca8be146f
 ```
 
 The recipe, so it can be recomputed without reading the test: take every file under `src/litegrip/`

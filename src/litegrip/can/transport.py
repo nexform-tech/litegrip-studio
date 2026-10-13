@@ -236,7 +236,10 @@ class CanTransport:
             timeout: Max wait time if send buffer is full (seconds).
 
         Raises:
-            OSError: on send failure after timeout.
+            TimeoutError: the send buffer stayed full for ``timeout`` seconds and
+                the frame could not be sent.  ``TimeoutError`` is an ``OSError``.
+                The frame is *not* dropped silently: a caller that cannot send
+                must find out, or it reports motion that never happened.
         """
         if not self._is_open or self._sock is None:
             raise RuntimeError("Transport not open")
@@ -264,12 +267,18 @@ class CanTransport:
             except BlockingIOError:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    # 丢帧改报错：缓冲满意味着这一帧**没发出去**，而调用方拿到
+                    # 一个 None 就会当成发出去了（实测里正是这条链让夹爪
+                    # 「位移 0.000 mm 却返回 True」）。docstring 一直承诺的是
+                    # OSError，这里只是把实现改成与它一致。
                     log.warning(
                         "CAN send timeout on %s (buffer full >%.1fs), "
-                        "frame to 0x%03X dropped",
+                        "frame to 0x%03X not sent",
                         self._channel, timeout, can_id & CAN_SFF_MASK,
                     )
-                    return
+                    raise TimeoutError(
+                        f"CAN 发送超时：{self._channel} 的发送缓冲在 {timeout:.1f} s "
+                        f"内一直满，帧 0x{can_id & CAN_SFF_MASK:03X} 没发出去。")
                 select.select([], [self._sock], [], remaining)
 
     def send_multi(self, can_id: int, data: bytes, count: int,

@@ -12,6 +12,7 @@ Reference: DM4310/DM4340/DM6248P CAN protocol specification.
 
 from __future__ import annotations
 
+import math
 import struct
 from dataclasses import dataclass
 from enum import IntEnum
@@ -98,7 +99,21 @@ def _is_int_register(rid: int) -> bool:
 
 def float_to_uint(value: float, value_min: float, value_max: float,
                   bits: int) -> int:
-    """Quantize a float to unsigned integer of given bit width."""
+    """Quantize a float to unsigned integer of given bit width.
+
+    Out-of-range values are clamped — that is the documented saturation of
+    this codec.  Non-finite ones are **rejected**: a NaN has no position on
+    the scale at all, and the clamp would silently hand it the top of the
+    range (``value_max``), which is a real command the caller never asked for.
+    On a motion frame that is ``q = +12.5 rad`` or ``tau = +tau_max``.
+
+    Raises:
+        ValueError: ``value`` is NaN or infinite.
+    """
+    if not math.isfinite(value):
+        raise ValueError(
+            f"cannot encode a non-finite value: value={value!r} "
+            f"(range [{value_min}, {value_max}], {bits} bits)")
     value = max(value_min, min(value_max, value))
     span = value_max - value_min
     offset = value - value_min
@@ -135,6 +150,10 @@ def pack_mit_frame(
 
     Returns:
         8-byte CAN payload.
+
+    Raises:
+        ValueError: any field is NaN or infinite.  Nothing non-finite ever
+            becomes bytes: see :func:`float_to_uint`.
     """
     q_uint = float_to_uint(q, -q_max, q_max, 16)
     dq_uint = float_to_uint(dq, -dq_max, dq_max, 12)
