@@ -2,16 +2,17 @@
 
 **English** | [简体中文](README_ZH.md)
 
-**LiteGrip Studio** is the PyQt5 operator console for the LiteGrip adaptive two-finger gripper:
-opening and closing, positioning by dragging, force-limited grasping, speed, live state and fault
-monitoring, plots, and a full calibration page.
+**LiteGrip Studio** is the operator console for the LiteGrip adaptive two-finger gripper. You drag
+a slider to move the jaws, press a button to open or close them, grasp with a force limit you set,
+and watch position, force, temperature and faults live. It talks to the gripper over SocketCAN by
+importing the LiteGrip Python SDK in the same process — there is no cross-language bridge.
 
-It drives the gripper over SocketCAN by importing `litegrip` in the same process — there is no
-cross-language bridge. With no hardware attached the backend switches to a built-in simulated
-plant, and **every interaction still works**: the simulation is not a stand-in for the interface,
-it runs the same motion state machine the real gripper does.
+With no gripper attached it runs a built-in simulated one, and **every control still works**: the
+simulation is not a stand-in for the interface, it runs the same motion state machine the hardware
+does. You can install it, try every page and run the test suite with no machine.
 
----
+The window is four tabs — 控制, 状态, 曲线, 标定 — in Simplified Chinese, and this manual quotes the
+labels as they appear on screen.
 
 ## Related repositories
 
@@ -24,11 +25,9 @@ it runs the same motion state machine the real gripper does.
 
 ---
 
-## 🚀 Quick start
+## 1. Install
 
-### 1. Install the dependencies
-
-Python 3.10 and three libraries, into the interpreter your `python3` points at:
+Python 3.10 or newer, and three libraries, into the interpreter your `python3` points at:
 
 ```bash
 python3 -m pip install PyQt5 pyqtgraph numpy
@@ -38,28 +37,35 @@ Add `python3 -m pip install pytest` to run the test suite, and
 `python3 -m pip install pyinstaller` to package. The SDK needs no install — it is vendored under
 `src/litegrip`.
 
-**Do not use `pip install -e .`**: the version in `pyproject.toml` is semantic-release's
-placeholder, which is not a valid PEP 440 version, so setuptools refuses to build.
+Two things not to do:
 
-### 2. Run
+- **Do not run `pip install -e .`.** The version in `pyproject.toml` is semantic-release's
+  placeholder, which is not a valid PEP 440 version, so setuptools refuses to build.
+- **Do not install a `litegrip` distribution from PyPI.** The console reads its fallback calibration
+  from the `litegrip` it imported, so a package of the same name would load a different set of
+  numbers without saying so.
+
+## 2. Run it
 
 ```bash
-./run_litegrip_studio.sh sim        # simulation, no hardware needed
+./run_litegrip_studio.sh sim        # the console, against the built-in simulated gripper
+./run_litegrip_studio.sh gui        # the console, against a real gripper on can0
 ./run_litegrip_studio.sh selftest   # self-check: no Qt, no hardware
-./run_litegrip_studio.sh test       # test suite
-./run_litegrip_studio.sh gui        # real gripper over SocketCAN
-./run_litegrip_studio.sh build      # one-file executable
+./run_litegrip_studio.sh test       # the test suite
+./run_litegrip_studio.sh build      # one-file executable in dist/
 ```
 
-Every path in the scripts is quoted: this repository's directory name contains a space. Nothing has
-to be installed or checked out beside it — the LiteGrip SDK is vendored under `src/litegrip`, and
-the launcher puts `src/` on `PYTHONPATH`. Two environment variables override the defaults:
-`PYTHON_BIN` for the interpreter, and `LITEGRIP_SDK_PATH` for the SDK, which is what a developer
-running against SDK HEAD sets. It must point at a checkout holding the `litegrip` package — the
-checkout root or its `src/` — and a path that does not is reported rather than quietly ignored.
+Start with `sim`: it needs no hardware and exercises the same code.
 
-The launcher uses `python3`, so where the dependencies live in a virtualenv, point `PYTHON_BIN` at
-it:
+`selftest` runs pure logic only — unit conversions, calibration direction, rejection of a zero that
+belongs to another machine, plant convergence, arrival, torque limits, the emergency stop — and
+imports no Qt at all, so it still works on a machine where PyQt5 is broken. It prints one `PASS` or
+`FAIL` per check and a final count.
+
+Nothing has to be installed or checked out beside this repository: the SDK is vendored under
+`src/litegrip`, and the launcher puts `src/` on `PYTHONPATH`.
+
+The launcher uses `python3`. Where the dependencies live in a virtualenv, point `PYTHON_BIN` at it:
 
 ```bash
 python3 -m venv .venv
@@ -67,66 +73,51 @@ python3 -m venv .venv
 PYTHON_BIN=.venv/bin/python3 ./run_litegrip_studio.sh sim
 ```
 
-**A `ModuleNotFoundError: No module named 'PyQt5'` means the dependencies went to a different
+**`ModuleNotFoundError: No module named 'PyQt5'` means the dependencies went to a different
 interpreter.** `./run_litegrip_studio.sh -h` prints the one the launcher uses (`当前解释器：…`);
 install into that one, or point `PYTHON_BIN` at the one you installed into.
 
-Remaining arguments are passed to the program unchanged, for example
-`./run_litegrip_studio.sh sim --log-level DEBUG`. `-h` lists every subcommand.
+Extra arguments are passed to the program unchanged, for example
+`./run_litegrip_studio.sh sim --log-level DEBUG`; `-h` lists every subcommand.
 
-### Connecting to real hardware
+### Options
 
-**You do not have to bring the interface up yourself.** When you press Connect, the console looks
-at `can0` first, and only intervenes when the interface really is wrong — down, or at the wrong
-bitrate — and only in that one place:
+| Option | Default | Effect |
+| --- | --- | --- |
+| `--backend {sim,real}` | `real` | Drive the simulated plant instead of hardware |
+| `--can-channel NAME` | `can0` | SocketCAN interface to use |
+| `--can-bitrate INT` | `1000000` | Bitrate to configure the interface to on connect |
+| `--no-can-setup` | off | Do not prepare the interface on connect, and raise no authorization prompt |
+| `--can-id INT` | from the calibration file | Motor CAN ID |
+| `--mst-id INT` | from the calibration file | Host CAN ID |
+| `--calibration PATH` | the remembered path, then the bundled file | Calibration file to load |
+| `--log-level LEVEL` | `INFO` | Console log level; the log file always records `DEBUG` |
+| `--log-file PATH` | `~/.litegrip/logs/litegrip-studio.log` | Where the log is written |
+| `--selftest` | off | Run the Qt-free, hardware-free self-check and exit |
+| `--version` | | Print the version and exit |
 
-- Privilege is escalated through `pkexec`, the desktop's own authorization dialog. **This process
-  never touches the password**, so it cannot write it into a log either.
-- An interface that is already configured: no privileged command runs and **no dialog appears**.
-  That is deliberate, so that bringing the interface up by hand does not make every connection
-  prompt you. "Configured" is judged on more than the up flag and the bitrate: the controller's
-  `can state` is checked too, because a **bus-off interface reports all of those fields as
-  perfectly normal** while being unable to send a single frame.
-- Configuration adds `restart-ms 100`: the controller reopens itself 100 ms after entering
-  bus-off. Without it — the kernel default is 0 — it stays down **forever**, every subsequent
-  frame send returns ENETDOWN, and `connect()` only opens a socket, so nothing is reported until
-  the first action that really sends a frame (enable). What you then see is a kernel message,
-  "Network is down, errno 100".
-- **Not every adapter implements `restart-ms`**, and the ones that do not say so: the gs_usb
-  clone on this bench (`1d50:606f`) answers "Device doesn't support restart from Bus Off." When
-  that specific refusal comes back, the console drops the option, configures without it, and
-  brings the interface up anyway — one authorization, and a log line saying the difference. On
-  such an adapter a bus-off controller does **not** recover by itself; the next Connect
-  reconfigures it.
-- **A USB-CAN adapter can lose its USB endpoint table**, and then no configuration command
-  raises it: `sudo ip link set can0 up` answers "RTNETLINK answers: No such file or directory"
-  (ENOENT) while `ip -details link show can0` reads perfectly normal. This is the kernel refusing
-  a transfer whose endpoint is no longer in the device's table; it is not about the bitrate, and
-  nothing userspace can set on the interface repairs it. Only a fresh probe of the device does,
-  which is why **unplugging the adapter and plugging it back in repairs it** — and so does
-  `sudo modprobe -r gs_usb && sudo modprobe gs_usb`, without touching the cable. The console does
-  the second one by itself when Connect hits this, then configures and raises the interface again.
-  That reload resets every `gs_usb` interface on the machine, including adapters this console is
-  not using — and it is attempted for `gs_usb` only, because unbinding an unknown driver is not
-  something to do on a guess. When it still does not come up, the message tells you to replug
-  rather than quoting an `ip link` command that cannot work.
-- A CAN FD interface is reported, never changed. The SDK detects FD from the interface MTU and
-  works with it, whereas changing the interface back to classic CAN would change every other node
-  on that bus too.
-- When ENETDOWN does happen, **it is treated as a link problem rather than a motor problem**: the
-  message names the interface and `ENETDOWN`, and asks you to check the adapter and wiring before
-  reconnecting. The kernel's errno and a driver fault code are entirely different things — the
-  driver's codes are only 0/1/9/0xA/0xB/0xC — and repeating one as the other only sends people
-  looking at the 24 V supply.
-- An authorization prompt that is dismissed, a `can0` that does not exist, an `ip` that fails:
-  **the connection attempt continues anyway**, and the log and the banner say what happened. This
-  step must never be the reason a connection fails, because something else may well own the
-  interface — only the connection itself can say whether the link works.
+## 3. Connect to a real gripper
 
-If a unit file or a script owns the interface and you do not want the prompt, turn the step off
-with `--no-can-setup`; for a bitrate other than 1 Mbit, use `--can-bitrate`.
+**You do not have to bring the interface up yourself.** Press 连接 and the console looks at `can0`,
+intervening only when the interface really is wrong:
 
-To do it by hand, the equivalent three commands are still these:
+- Privilege is escalated through `pkexec`, the desktop's own authorization dialog. The console never
+  sees the password, so it cannot write it into a log either.
+- An interface that is already configured raises no dialog and runs no privileged command, so
+  bringing `can0` up by hand does not make every connection prompt you.
+- Configuration adds `restart-ms 100`: the controller reopens itself 100 ms after going bus-off
+  instead of staying down forever. **Not every adapter implements it.** When one refuses that
+  option, the console drops it, configures without it, and says so in the log — and on such an
+  adapter a bus-off controller does not recover by itself, so the next 连接 reconfigures it.
+- A CAN FD interface is reported, never changed: the SDK detects FD and works with it, whereas
+  switching the interface back to classic CAN would change every other node on that bus.
+- A dismissed authorization prompt, a `can0` that does not exist, an `ip` that fails: **the
+  connection attempt continues anyway**, and the log and the banner say what happened.
+
+If a unit file or a script owns the interface and you do not want the prompt, pass `--no-can-setup`.
+For a bitrate other than 1 Mbit, pass `--can-bitrate`.
+
+To do it by hand, the equivalent commands are:
 
 ```bash
 sudo ip link set can0 down
@@ -135,616 +126,334 @@ sudo ip link set can0 up
 ./run_litegrip_studio.sh gui
 ```
 
-If the middle command fails with "Device doesn't support restart from Bus Off.", your adapter
-does not implement `restart-ms` — drop that one option and run the other two. The console does
-this by itself, and a failure message quotes the form that works on your hardware.
+If the middle command fails with "Device doesn't support restart from Bus Off.", your adapter does
+not implement `restart-ms` — drop that one option and run the other two.
 
 If the last command fails with "RTNETLINK answers: No such file or directory" while the first two
-worked, the adapter has lost its USB endpoint table and the three commands cannot help. Unplug it,
-plug it back in, and reconnect. `sudo modprobe -r gs_usb && sudo modprobe gs_usb` does the same
-thing without the cable, and takes every `gs_usb` interface on the machine down with it.
+worked, the adapter has lost its USB endpoint table and no `ip link` command will bring it back.
+Unplug the adapter and plug it back in, or run `sudo modprobe -r gs_usb && sudo modprobe gs_usb`,
+which does the same thing without touching the cable — and which takes every `gs_usb` interface on
+the machine down with it. The console does this by itself when 连接 hits it.
 
-**On a real gripper, run 自动标定 from the calibration page before touching the
-slider.** The console starts on the SDK's factory calibration, which describes whichever unit it
-was taken on — on any other gripper every millimetre and every force reading is wrong. If the
-calibration page shows `BLOCKED`, nothing will move until you deal with it.
+## 4. Calibrate before you move anything
+
+The console starts on the **factory calibration file bundled with the SDK**, which was recorded on
+the unit it ships with. Another gripper of the same design is not a different machine: the readings
+are the right order of magnitude and the ends of the travel are roughly where you expect them. What
+differs between two units is their manufacturing tolerance — the jaws, the linkage, the encoder
+zero — so a reading can be a little off, and removing that is what a calibration is for.
+
+So on real hardware, run 自动标定 from the 标定 tab before you rely on the numbers. Until a
+calibration belongs to *your* gripper, treat what is on screen as close rather than exact.
+
+If the calibration page shows 运动闸门：已阻断 (`BLOCKED`), nothing will move until you deal with it.
+That is the design: the console refuses motion rather than driving by numbers it cannot vouch for.
+See [Calibration](#calibration).
 
 ---
 
-## 🖥️ The window
+## The window
 
-Four tabs, plus the connection bar that is always visible (connect / disconnect / enable /
-disable / clear fault / reset emergency stop), the emergency-stop button, and the log dock.
+Four tabs, plus the connection bar that is always visible, the emergency-stop button, and the log
+dock.
 
-Above the tabs sits one **alert banner**, and it carries the alert in force rather than a
-history. The worker takes it down again when the condition behind it stops holding — a fault
-that cleared, an emergency stop that was reset, a refusal whose reason no longer applies — so
-a console that has recovered stops reading as a broken one. What it does not retract is the
-report of a single event (a save that failed, a probe that ended): those stay until the next
-alert replaces them. Successes do not reach the banner at all. The log has all of it either
-way.
-
-| Page | Contents |
+| Tab | What is on it |
 | --- | --- |
-| Control | Position slider, open all / close all, stop (hold position), zero gravity (back-drivable), speed, grasp force, grasp / let go |
-| Status | Telemetry table, temperature, faults and clearing them, link health, and the 电机标零 maintenance action |
-| Plots | pyqtgraph position and force plots (the force axis autoscales) |
-| Calibration | Provenance banner, the 自动标定 and manual two-point wizards, the file actions, the gate |
+| 控制 | The position slider, the motion buttons, speed and grasp force |
+| 状态 | Live readings, temperatures, faults, link health, and the motor maintenance action |
+| 曲线 | Position and force plots |
+| 标定 | Calibration: the two probes, the file actions, the gate |
 
-**Esc is an application-level shortcut**: it works with a spinbox focused and with a modal dialog
-open.
+### The bar that is always there
 
-### Light and dark
+**连接与电源** holds six buttons and two status lights:
 
-The console opens dark, which is what a bench under a machine tends to be, and is what it opened
-in before there was a choice. The button beside the emergency stop switches it to light and back,
-and the choice is written to `~/.litegrip/litegrip_studio.ini` under `view/theme`.
+| Button | What it does |
+| --- | --- |
+| 连接 | Connect to the gripper (becomes 连接中… while it works) |
+| 断开 | Disconnect |
+| 使能 | Enable the motor — nothing moves before this |
+| 失能 | Disable the motor |
+| 清除故障 | Clear a latched fault |
+| 急停复位 | Reset the latched emergency stop |
 
-Nothing is written until you switch, so "nobody has chosen" stays distinguishable from a choice
-that happens to match the default.
+Each one is enabled only when its command could actually be accepted, so a greyed-out 使能 means
+the console is not connected yet, not that the button is broken.
 
-The palette is litearm-studio's in both themes: the same ink ramp, the same semantic fill/edge
-pairs, and the same type scale. What is this console's own is the meaning layer — blue for the
-position that was *commanded*, green for the one the jaws *measured* — and those two are the same
-colours on the slider, in the readout and in the plots.
+**急停 (Esc)** zeroes the torque and disables the motor immediately, and **latches**: every motion
+is refused until you press 急停复位. It is on the **Esc** key, and that works with a spinbox focused
+and with a dialog open — the one shortcut that is deliberately allowed to interrupt anything.
 
-### The slider
+### 控制 — moving the jaws
 
-The core of the requirement. Three visual elements, two independent values:
+**位置（拖动即控制，松手执行）** is the slider. Drag it to set a target; the command is sent when
+you release. Two markers move with it:
 
-| Element | Source | Meaning |
-| --- | --- | --- |
-| Handle | The user's drag; the measurement when the slider is not driving | The commanded target |
-| Target hairline (cyan) | The last command | Where the jaws are heading |
-| Measured triangle (thick green) | Telemetry | Where the jaws actually are |
+- the **cyan hairline** is where the jaws are heading — the last command;
+- the **green triangle** is where they actually are, from telemetry.
 
-The left end is the closed position and the right end the widest opening, with a fixed-width read-
-out to the right showing actual / target / error. **The bar follows the gripper as it moves**: when
-the open and close buttons drive it the handle follows the measurement, and while you drag, the
-handle follows your finger while the measured marker moves on its own — otherwise the slider under
-your finger gets pulled back by telemetry. A command is sent on release by default, matching
-litearm-studio's `onValueChange` / `onValueCommit` split; "follow while dragging" can be switched
-on.
+The read-out beside it shows 实际位置, 目标 and 误差. **While the jaws are holding something the
+read-out shows the actual position only.** A grasp drives to 0 mm under a force cap, so its target
+is always the closed end and its error is the width of the object — both true, and side by side they
+read as a move that has gone badly wrong.
 
-Following live is safe only because every motion command goes through the rate-limited reference
-generator: drag out a 120 mm jump and the gripper still crosses it at the configured speed.
+| Control | What it does |
+| --- | --- |
+| 全部闭合 | Travel to the closed position in one press |
+| 全部张开 | Travel to the widest opening in one press |
+| 拖动时实时跟随 | Send the target while you drag, instead of on release |
+| 停止（保持位置） | Stop, and hold the angle the jaws are at |
+| 零重力（可手掰） | Zero stiffness and zero torque: the jaws can be pushed by hand with the motor enabled |
 
-While the jaws are holding something (`frame.grasped`, which is `HOLD_FORCE`) the read-out shows
-**the actual position only**. A grasp drives to 0 mm under a force cap, so its target is the closed
-end and its error is the width of the object — both true, and side by side they read as a move that
-has gone badly wrong ("28 mm short of the target, and not closing"). During the approach, before
-the jaws meet anything, the target and the error are shown as usual: they are the real trajectory
-and the real following error, which is what an operator watching for contact is reading them for.
+**速度** is the travel speed, 5–150 mm/s and 50 mm/s by default.
 
-The frame a held grip sends carries **no gains at all** — `kp=0` and `kd=0` — so the torque in it is
-the setpoint and nothing else. Any gain adds a term that depends on something other than the
-setpoint, and the grip stops being the number on the slider: a position term makes it depend on how
-far the jaws sank into the object, a velocity term on how fast they were still moving when they
-arrived. One consequence is worth knowing before **Let go**: with nothing holding the pose the grip
-was made at, the setpoint is reached by driving the jaws a little further *into* the object, so they
-hold it from a position that is not quite where they met it.
+**夹持力** is the force limit for a grasp, 0–40 N. The box turns orange above 35 N and red at 40 N,
+which is the mechanism's rating rather than a target to aim at. Two buttons sit with it:
 
-Nor is the setpoint switched on. The torque climbs to it at `FORCE_RAMP_N_S`, 20 newtons per second,
-starting from the torque already in flight: a grasp that met its object and handed over at the ~10 N
-the approach had pressed with reaches 20 N half a second later, as a rise the operator can watch
-rather than a jump. The rate is the constant on purpose — a ramp specified as a *time* is at its
-steepest in its first tick, which is a step with a slow tail, and the mechanism answers a step with
-a lurch.
+| Button | What it does |
+| --- | --- |
+| 夹取 N N | Close the jaws onto an object and hold it at the set force |
+| 放开 | Open 10 mm clear of the object being held — measured from the pose the grip was made at, so the 10 mm is the clearance the object actually gets |
 
-A grasp is two frames, not one, and the force plot draws both. Until the jaws meet something the
-approach is a **position** frame carrying the slider's speed and `tau_ff = 0`: the console commands
-no force at all, and the drive computes `kp·(q_cmd−q) + kd·(dq_cmd−dq)` itself. That torque is the
-first rise on the plot, and it is bounded by the setpoint's own torque. The press a frame applies
-when it meets something is `kp·(v·dt + lead) + kd·v`, and the two terms the console supplies — the
-damping the approach travels with (`MotionFSM._approach_kd`) and the lead it is given
-(`MotionFSM._approach_lead_rad`) — are sized so that whole expression fits inside the budget the
-setpoint names, at any speed. The slider keeps deciding how fast the approach travels; above the
-speed whose damping alone would spend the budget it is the damping that yields, not the speed. A
-*plain* move carries no setpoint and keeps the slider's speed and the operator's damping both. The
-second rise is the ramp above, from that press to the setpoint. Two rises on the plot are expected,
-then; only the first was ever unbounded, and it no longer is.
+Both 停止（保持位置） and 零重力（可手掰） stay available when the gate is `BLOCKED`. Closing,
+opening, grasping and releasing are refused, so with a bad calibration the ways to move the jaws are
+零重力 and your hands.
 
-The hand-over is logged: the pose the grip was made at, how far the jaws had travelled to reach it,
-and which of the three contact channels declared it. The pose alone does not say what happened — a
-grip made at the object is a grasp, and the same reading taken a millimetre into a close is a
-mechanism that had not broken away from rest yet being read as an obstruction, after which force
-mode drives the jaws the rest of the way at the ramp rather than the slider. The channel is what
-tells those apart after the run, and the log is the only place that survives it.
+### 状态 — readings and faults
 
-Do not lower `SPEED_MIN_MM_S` to chase a very small setpoint. The one speed a setpoint still
-decides is the speed whose tick's own step `kp·v·dt` would spend the whole budget: a setpoint that
-cannot cover it at the speed asked for has the approach slowed until it can
-(`MotionFSM._tick_press_cap_mm_s`), which on this bench is 36.8 mm/s for a 1 N grasp and 736 mm/s
-at 20 N. Those are the same order as the speeds the slider offers, so at the setpoints the bench
-uses the floor never binds; it binds only under 0.14 N, where the setpoint's own speed drops below
-it — a 0.1 N grasp asks for 3.7 mm/s and runs at 5. Measured on the plant, that 0.1 N grasp at the
-maximum slider speed never leaves the open stop at all — the jaws sit there, and the stillness
-channel reads that rest as contact, handing over to force mode without having travelled. The floor's
-job is to keep the approach a speed that moves, and a setpoint below it cannot fix that by being
-smaller.
+**实时读数** shows 位置, 速度, 夹持力, 力矩, 速度参考, 误差, MOS 温度 and 线圈温度.
+Temperature rows turn amber 10 °C below the limit and red at it (70 °C MOS, 80 °C coil).
 
-Each end of the slider has a **one-press** button, placed next to the end it drives:
+**链路与回路** shows 运动状态, 已抓取, 状态帧, 帧速率, 链路静默, tick 耗时, tick 超时 and 错误码.
 
-| Button | Command | Where it goes |
-| --- | --- | --- |
-| Close all (left) | `Close()` | Travel 0.0 mm, the closed position the calibration recorded |
-| Open all (right) | `Open()` | `limits.max_stroke_mm`, the top of the range — 1 mm inside the recorded open limit |
+**连接与故障** shows a link light and a fault light. When a fault is latched, the hint under it says
+what to check: undervoltage → the 24 V supply; overcurrent → a mechanical jam; over-temperature →
+wait for the MOS or the coil to cool.
 
-Both commands go through the rate-limited reference generator rather than jumping, and Stop or the
-emergency stop can take over at any moment while the button is held. The tooltip names the exact
-millimetre figure and refreshes as soon as a calibration arrives — before one is read the tooltip
-**quotes no number**, because at that point no millimetre figure belongs to this gripper. The
-tooltip quotes the **range** (`max_stroke_mm`), not the span the calibration file records: once
-mm/rad has been derived from the measured travel the two differ, and quoting the span sends people
-looking for travel that cannot be reached.
+**维护** holds the one maintenance action, **电机标零…**. See [Calibration](#calibration).
 
-Directly under **Grasp** in the force box is a **Let go** button: it opens 10 mm clear of the object
-being held (`RELEASE_OPEN_MM`), to release it. It measures from the **measurement**, not from the
-last command's target — a grasp drives to 0 mm under a force cap, so its target is always the closed
-end and "target + 10 mm" is a command straight back into the object. There is one exception, and it
-is the case the button exists for: while a grip is held the reference is the pose the grip was
-**made** at. A held force carries no position term, so the setpoint is reached by driving the jaws
-*into* the object until its own stiffness balances the torque — millimetres of travel against a
-compliant object, a fraction of one against a stiff object. Measuring from where the jaws are now
-would spend part of the 10 mm on that draw-in and leave them resting on the object, and the button
-would open less than it says; measured from where the grip was made, the 10 mm is the clearance the
-object gets. The draw-in is logged, so the number is visible. At the top of the range it is a move
-of zero length (`move_to_mm` clamps) rather than an error. It is a millimetre command, so the gate
-refuses it like any other move; with an unusable calibration the two ways to let go are **zero
-gravity (back-drivable)** and **stop**.
+### 曲线 — plots
 
-### The force plot autoscales
+Two plots share a time axis, over the last 10 seconds:
 
-The force plot used to be pinned to the 40 N rating, which states what the mechanism is **allowed**
-to do rather than what it **is** doing: a 12 N grasp was drawn in the bottom third of the axis, and
-the ripple inside the grasp — the thing that tells you whether it is settling or still climbing —
-was a few pixels tall. The axis is now fitted to the data in the window on every redraw:
+- **位置 (mm)** — 实测 (solid) against 目标 (dashed). The axis is scaled to the calibrated travel.
+- **夹持力 (N)** — 力. The axis fits itself to the data on screen, so a 12 N grasp fills the plot
+  instead of hiding in the bottom third of a 40 N axis.
 
-- rounded up to 1 / 2 / 5 × 10ⁿ (10 N, 20 N, 50 N), so the reading has a reference point;
-- **a peak is never outside the plot**: it opens the axis immediately;
-- it only closes again once both peaks are within three quarters of the axis, which stops 8.6 N
-  (→ 10 N) and 8.7 N (→ 20 N) from flipping back and forth at 25 Hz across a step boundary;
-- the floor is 2 N (1 N each way): unloaded, the braking torque is a fraction of a newton, and an
-  axis fitted to that magnifies noise into a screen-filling waveform that looks like a grasp.
+**暂停** freezes them and 清空 empties them; resuming clears the buffer and starts drawing again,
+which the note under the plots says.
 
-The sign of the force is kept — the SDK makes no promise about the sign of its torque — so the
-axis **crosses zero** and a negative braking torque is not clipped. The position plot does not do
-this: its axis is scaled to the travel, so the same motion looks the same on any gripper.
+### The rest of the window
+
+- **The alert banner** above the tabs carries one alert at a time. Alerts that describe a condition
+  — a fault, an emergency stop, a refusal — are taken down again when the condition stops holding,
+  so a console that has recovered stops looking broken. Alerts that report a single event — a save
+  that failed, a probe that ended — stay until the next one replaces them. Everything, including
+  successes, is in the log.
+- **日志** at the bottom is the log dock. **显示调试信息** adds debug lines to what the console
+  shows; the file always records them either way.
+- **深色 / 浅色** in the status bar switches theme. The console opens dark. Nothing is written until
+  you choose, so "nobody has chosen" stays distinguishable from a choice that matches the default.
+- The status bar also shows **位置** and **闸门** — the gate word, `READY` or `BLOCKED`.
 
 ---
 
-## 📐 Calibration: where the file comes from
+## Calibration
 
-This was confirmed against the source while designing, and the answer is not either/or. The
-console resolves the calibration itself, and there is now one automatic source:
+### What the console runs on
 
-1. **The file the operator named** — `--calibration`, the path remembered in
-   `~/.litegrip/litegrip_studio.ini` under `calibration/path`, or `$LITEGRIP_CALIB`. **This is the
-   file that describes this gripper**, and naming one is the only way off the default.
-2. **The SDK's factory calibration file** (`litegrip/factory_calibration.json` inside the vendored
-   SDK package, read-only) — what the console runs on when nothing is named, and every machine has
-   it. This repository ships that one file overridden with this bench's hand-recorded pair rather
-   than upstream's probe-measured numbers; `src/litegrip/VENDORED.md` records the override, hash
-   included.
+There are two sources, and the console resolves which one applies itself:
 
-A named file that exists but cannot be used stops there: a corrupt file is never a reason to fall
-back to the factory numbers, and neither is a name that no longer exists — both are reported as
-such. `LITEGRIP_FACTORY_CALIB` replaces item 2 outright, for a bench that keeps its calibration
-elsewhere, and no factory file is ever a save target.
+1. **A file you named** — `--calibration`, the path remembered in the settings file, or
+   `$LITEGRIP_CALIB`. **This is the file that describes your gripper**, and naming one is the only
+   way off the default.
+2. **The calibration file bundled inside the SDK** (`litegrip/factory_calibration.json`), which is
+   what the console runs on when you have named nothing.
 
-So: **the factory file is the default, and naming a file is what replaces it.** `~/.litegrip/`
-`litegrip_calibration.json` is still where a calibration is *saved*, but sitting there is not what
-makes it the one in effect — the console reads the path it remembers, and a file it never wrote
-does not load itself. The process has several traps, which is why the console reads the files and
-decides the provenance itself rather than trusting the SDK's return value:
+This repository ships that bundled file **overridden with this bench's hand-recorded values** rather
+than upstream's probe-measured numbers; `src/litegrip/VENDORED.md` records the override, its hash
+included.
 
-- **It does not say which file it read.** `load_calibration()` returns `True` for the named file
-  and for the factory default alike; only one `log.info` line distinguishes them. On real hardware
-  that means millimetre readings that are systematically wrong with nothing on screen to show it.
-- **The SDK does not require a calibration.** Neither `connect()` nor `enable()` loads one. Without
-  it you get `GripperConfig`'s defaults, `pos_closed_rad=0.0 / pos_open_rad=1.14`, whereas on real
-  hardware the closed value is the **larger** one (the fallback vendored with the SDK has
-  `0.029564 / -1.141`). The mapping `mm = (pos_closed_rad - position_rad) * rad_to_mm` then runs
-  **exactly backwards**, computing negative millimetres and driving into the hard stop.
-- **`load_calibration()` overwrites `kp` / `kd` / `grasp_torque_threshold`**, and reads its fields
-  without protection: a bad file raises `KeyError`.
+A named file that is missing, or that exists but cannot be used, is reported as such and **stops
+there** — the console does not quietly fall back to the factory numbers, because moving on numbers
+from a file you did not choose, with nothing on screen to say so, is the worst available outcome.
 
-The ordering `zero_rad <= open_rad` is what the SDK's defaults look like — `(0.0, 1.14)` — and it
-is still the signature the console recognises them by. But an ordering is not a defect: the same
-two numbers, read in the same order, are a file whose angles were recorded with the encoder reading
-*growing* as the jaws open, and every number derived from that file stays self-consistent. So the
-console *reads* the direction out of the two angles (`Limits.direction`) and every conversion,
-clamp and velocity feed-forward uses it, which makes either ordering work end to end. What refuses
-a file is `frame_mismatch`, below, which never looks at the ordering.
+### The gate
 
-All of the above is decided by **reading files**, and a file can be perfectly self-consistent while
-describing a different gripper — as long as it was calibrated against another encoder zero (a
-different unit, or the same one reassembled and recalibrated). Travel, coefficient and direction
-all check out, the gate calls it a user calibration, and every millimetre the operator sees is off
-by a constant. Nothing in the file can reveal this; only the measured angle can. **When the
-measured angle falls outside the calibrated travel by more than `CALIB_MISMATCH_RAD` (0.15 rad) the
-gate goes `BLOCKED`**, reporting the measured value and the travel interval together.
+**运动闸门** on the calibration page, and **闸门** in the status bar, read `READY` or `BLOCKED`.
 
-The 0.15 rad tolerance is there because a calibration that stops at the soft limit rather than at
-the hard stop — the recommended kind — leaves a gripper resting on its hard stop **legitimately**
-outside its commandable travel; on this machine that margin is at most 0.0866 rad. A zero that
-belongs to another frame is off by a radian (1.885 rad was measured once). 0.15 rad sits between
-the two: it neither closes the gate by mistake nor lets a mismatch through.
+`BLOCKED` means the console will not send a motion: there is no calibration at all, the file failed
+validation, a named file is not there, the calibration belongs to a different machine, or a probe
+result has not been written out yet. The page says which, and it is checked before any frame is
+sent rather than in the widgets.
 
-This check runs **after the measured angle is known and before any frame is sent.** Before the
-frame is not a preference but a requirement: once a position has been clamped into the travel by
-`clamp_mm`, a measurement outside the travel and one resting on the travel limit become
-indistinguishable, and the clamped number still looks entirely reasonable. On real hardware this is
-what "it clamps the moment you enable it" is made of.
+With the gate shut, 停止 and 零重力（可手掰） still work — 零重力 is how you move the jaws when the
+file is the thing that is wrong.
 
-The gate has two states: `READY` (a calibration is in effect and it validated) and `BLOCKED`
-(no file at all, a file that failed validation, a named file that is not there, a zero that
-belongs to another machine, or a probe result that has not been written out yet). There is
-nothing to tick and no override: a state whose answer is always the same is not a state, and the
-factory file is what the console runs on by default rather than something it has to be talked
-into. **The gate logic lives in the worker, not the UI**: the UI can disable widgets, but the
-refusal has to happen before a frame is sent.
+### 自动标定 — measure the travel
 
-The safety net that remains is the frame check above. The factory file carries the range of the
-unit it was taken on, so on a different gripper the first reading falls outside that range, and
-the gate goes `BLOCKED` before a frame is sent. A file that loads but does not validate is
-`BLOCKED` too, and so is a probe result still held in memory.
+Needs the motor enabled. Press **开始自动标定** and the console drives the jaws into the open stop
+and then into the closed one, asking you to confirm each with **已到张开极限，确认** and
+**已到闭合极限，确认**. The progress strip under the page shows the phase (正在顶向张开极限,
+正在退回, 正在顶向闭合极限) and the live 实测位置 in both millimetres and radians. **取消标定**
+stops it.
 
-One more thing: the calibration file is loaded by the worker **on connect**, not at start-up, so
-the provenance and the gate always describe the file that was actually handed to the SDK rather
-than the one a command line mentioned at the time.
+The probe presses against the hard stops, which it has to in order to find them, so the jaws will
+push into both ends of the travel. It measures the distance between the hard stops, and it is the
+one action allowed to move before a calibration exists and to travel outside a calibrated range —
+it is the step that produces one.
 
-Changing the calibration invalidates every millimetre held in the loop. The position is **read
-again** from a new frame — the reading was originally converted by the backend using the limits in
-force at the time — and a target being held or moved is **re-anchored** in place, because an
-intention expressed in the old frame's millimetres has no honest conversion. Without those two
-steps, loading a *correct* calibration sends the axis straight for the other end of the new travel.
+### 手动两点标定 — record two points by hand
 
-A probe result lives only in memory at first (`in_memory_unsaved`), and **the gate stays shut
-while it does**: you look at what was measured before deciding it should govern motion. A probe
-that runs to the end therefore **asks** — a dialog with 应用标定 and 暂不, naming the file the
-result would be written to. Nothing is written until that question is answered, because the two
-presses of 记录 are the request to *measure*, not the request to *move by what was measured*.
+For when the stops are not reachable or not detectable — a stiff linkage, a drive that will not take
+a probe step. **开始手动标定** puts the axis in zero gravity and says so, and the console takes it
+back on every way out, including a cancel, because your hands are on the jaws for all of it.
 
-应用标定 writes the result and has the backend read the file back; only then does the provenance
-become `user_file` and the gate `READY`. The path is then remembered in the settings file, so the
-next launch loads it explicitly rather than falling back to the factory numbers. 载入文件… writes
-that same setting, which is what makes a loaded file outlive the run that loaded it. 暂不 leaves the
-result in memory: the gate stays shut, and the axis holds the angle the probe measured rather than
-snapping back. Both the real and the simulated backend read back what they write: a simulation
-that wrote without reading back would leave the operator with the gate shut after a successful
-calibration.
+Then:
 
-The simulator does not remember the path, and the backend decides that rather than the window: a
-remembered path is read on every later launch, including a real one, so remembering
-`litegrip_calibration.sim.json` would have the bench gripper measuring on simulated geometry.
-`SimBackend.remember_calibration_path` is `False` for that reason.
+1. Work the jaws to the **open** extreme and press **记录张开极限**.
+2. Work them to the **closed** extreme and press **记录闭合极限**. That one is 0 mm.
 
-Two things the write deliberately will not do. It will not save a result that failed validation,
-because the file it would replace is a working calibration — the operator keeps a console that
-refuses to move over one that moves on numbers it has just called unusable. And it will not save
-over the SDK's own factory file, which ships with the package and describes whichever unit it was
-taken on. Either refusal reports why and **asks again**, so 应用标定 is its own retry: there is no
-second button whose only job is to repeat the first one.
+The button you press is the whole answer to "which end is zero", so a press that arrives out of step
+is refused out loud rather than taken as whichever point is due. Each wait is bounded at five
+minutes: the axis is limp for the whole procedure, and a console left holding an enabled, limp motor
+is a gripper that falls open on whatever is under it.
 
-The file in force is identified on the page, not just by its label. 载入文件… picks a file and
-actually reads it, and the page then shows which path the numbers came from — two different user
-files used to read identically in the always-on table, which is what made a successful load look
-like nothing had happened. The file you pick is also the file the next launch reads, so a load is
-not undone by a restart; picking the SDK's own `litegrip/factory_calibration.json` is how you go
-back to the default, and the console then forgets the remembered path rather than writing that
-file down as one you chose. 刷新显示 re-reads **the file in force**, and only that file: if it has
-gone, the page says so, keeps the previous result, and names the factory file to load instead,
-because quietly falling back to the default source is the same ambiguity from the other side.
+### Choosing a file, and keeping it
 
-### Enabling: read a position first, then hold it
+| Button | What it does |
+| --- | --- |
+| 载入文件… | Pick a calibration file and read it. The page then shows which path the numbers came from. |
+| 刷新显示 | Re-read **the file in force**, and only that file |
 
-`get_state().position_rad` is `0.0` until the first status frame arrives, and `to_mm(0.0)` lands
-somewhere in the **middle** of the travel, at a position that looks entirely reasonable. So "hold
-in place after enabling", if it happens before that first frame, holds an angle the motor never
-reported: on real hardware this one sends the gripper straight into the closed limit.
+**The file you load is the file the next launch loads.** A load is not undone by a restart. So if
+the remembered file has gone, 载入文件… is the way out: pick another one, or pick the SDK's own
+`litegrip/factory_calibration.json` to go back to the default — the console then forgets the
+remembered path rather than writing the bundled file down as one you chose. 刷新显示 will tell you
+the same thing if the file in force has been deleted, naming the factory file to load.
 
-The position reading therefore has two states, and `TelemetryFrame.position_mm` uses `None` for
-**no measurement yet** — not 0. The worker only produces a number once it has counted status
-frames itself (`_rx_frames > 0`, the same signal the gate and the link liveness check use). Before
-that:
+When a probe runs to the end it **asks** — a dialog with **应用标定** and **暂不**, naming the file
+the result would be written to. Nothing is written until you answer, because pressing 记录 is the
+request to *measure*, not the request to move by what was measured.
 
-- **Enabling** does not hold, it goes to zero gravity (`RELEASE`, `kp=kd=tau=0`). Zero gain needs
-  no position and is the only honest command in that window; the first frame turns it into a hold at
-  the measured position automatically, with a log line.
-- Stop / leaving zero-gravity / clearing a fault / reopening the gate all need to "hold in place",
-  and the rule is the same: with no measurement, zero gravity.
-- A motion request is refused with the reason spelled out: "no position read yet; the motor has
-  never reported a status frame".
-- No number appears anywhere in the interface: the slider draws no measured triangle and does not
-  move its handle, and the read-out, status page, status bar, calibration page and plots all show
-  `—` (the plot records NaN and the line breaks). 0.00 mm is the closed position: a position, and
-  the wrong one.
+- **应用标定** writes the result and reads the file back; the source becomes 用户标定 and the gate
+  goes `READY`. From then on the console loads that file on every launch.
+- **暂不** leaves the result in memory. The gate stays shut and the jaws hold the angle the probe
+  measured rather than snapping back.
 
-The liveness counter `_rx_frames` is deliberately conservative — the SDK's own `enable()` polls
-internally, and the frame it receives is one we never see — so the window may last a few ticks
-longer than strictly necessary. Erring towards refusing motion is the only correct way to err.
+Two things the write refuses, and says why: a result that failed validation, because the file it
+would replace is a working calibration, and the SDK's own bundled file, because it describes
+whichever unit it was taken on. Either refusal asks again, so 应用标定 is its own retry.
 
-### Two rules for the automatic probe
+### What the 来源 row means
 
-The probe is the only action in the application allowed to do two things no other action may, and
-both follow from what it is for:
+| Label | Meaning |
+| --- | --- |
+| 用户标定 | A calibration file that belongs to your gripper |
+| 出厂标定 | The file bundled with the SDK — the default, and not a measurement of your unit |
+| 标定无效 | A user file that failed validation |
+| 未标定 | No file at all |
+| 内存标定（未保存） | A probe result still in memory, not written out; the gate stays shut until it is |
 
-- **It may move before a calibration exists** — it is the step that produces one.
-- **It may travel outside the calibrated travel once one does** — it is looking for the hard stops,
-  and the hard stops are by definition beyond the soft limits.
+**显示技术详情** on the same box opens the raw numbers the console is working from.
 
-The second rule was once missing: `stream_frame`'s travel check only asked whether a usable
-calibration existed, not whether this frame carried a target the check could judge, so any valid
-calibration shut the probe inside the very travel it was there to measure, and it recorded "the
-last step I was allowed to command" as the open limit — a wrong answer that reads like a successful
-measurement. Such frames now say so explicitly (`ungated=True`): the probe steps, which are looking
-for stops beyond the red lines, and the frames that carry no target at all — 零重力 (`RELEASE`),
-the wizard's zero gravity (`ZERO_G`), and the hold a probe is left in, whose pose is the angle the
-encoder has just reported. An ungated frame still refuses non-finite values and negative gains,
-which are wrong whatever the calibration says.
+### 电机标零 — write the encoder zero
 
-The flag is named for what the frame *is* rather than for who sent it, and that includes the
-long-lived states: 零重力 can be held open for an hour without widening what it permits, because what
-it permits is a frame with no stiffness in it. Before it existed there was one flag named after its
-first caller, and 零重力 behind a shut gate — the state an operator needs precisely when the file is
-bad — was refused by the gate it was there to work around.
+On the **状态** tab, under **维护**. **电机标零…** tells the drive that wherever the jaws are at
+that moment is angle zero. The offset goes into the motor's own flash, and **there is no undo** —
+the console cannot read it back and cannot put it back.
 
-The probe also has to know **which way the jaws open**, and it cannot read that from a file: it is
-the thing producing the file. It walks the jaws into the open stop and then into the closed one,
-and the units this console drives have the open stop at the *smaller* angle, so the direction is a
-constant of the machine rather than an answer to collect — one direction, and therefore nothing an
-operator can get wrong before the probe starts. The page shows the raw encoder angle beside the
-millimetres, because the millimetres are computed through the calibration under suspicion.
+It is a maintenance action, not a step in calibration: it re-measures nothing, and it is what to
+reach for when the jaws and the numbers have drifted far enough apart that measuring the ends again
+is the point.
 
-The probe decides it has reached a stop when the angle it reads stops changing, and that same
-signal also means "no frame reached the motor" and "the feedback died" — in which case it records
-both limits at the same position and reports a travel error (real hardware has produced
-`closed -1.370650 rad is not greater than open -1.370650 rad`; two identical figures are exactly
-this). The state machine cannot tell those three apart from the inside, so the worker watches from
-the outside:
+The confirmation names three consequences before the write, and the banner repeats them after:
 
-- **Frames not going out**: `stream_frame` returning False for `PROBE_REFUSED_FAIL_S` (0.5 s,
-  a small part of the 1.8 s stall window) in a row → abort with "no position frame could be sent
-  for N s; the motor received no command at all".
-- **Connection / enable / link / fault**: all four are checked every tick, and any of them wrong
-  aborts immediately, saying which one it was.
+- **Re-calibration is required.** The span on file keeps its length, but both of its angles, and
+  every millimetre computed from them, are now offset. Until you re-calibrate with 自动标定 or the
+  manual probe, all of those are wrong together.
+- **The gate will not catch it.** A zero taken at a stop moves the frame by well under the tolerance
+  the gate checks, so motion is not blocked. This is why the warning is stated in so many words
+  instead of the console refusing.
+- **The motor is briefly limp.** The SDK disables the drive, writes the offset and re-enables it, so
+  for about a second the jaws can be pushed by hand and Esc does not take effect until the write
+  ends. Keep hands and workpieces clear before confirming.
 
-An abort **writes every step the probe judged into the log before stating its conclusion** — in a
-failed probe those lines are the whole truth.
+Confirm with **写入零点**. The warning is dismissed by **已了解** and by nothing else — nothing in
+the console can retract it, because a calibration measured against the old offset does not become
+correct again on its own.
 
-The probe measures the distance between the hard stops (the two hard stops, not the distance
-between the soft limits); the angle it measures is the denominator of the mm conversion, and the
-numerator is the travel the operator measured — see "Known limitations".
-
-### The two-point manual probe
-
-The automatic probe needs the stops to be reachable and detectable. When they are not — a stiff
-linkage, a travel that is not where the SDK expects it, a drive that will not take a probe step at
-all — the manual wizard takes over: the axis is held limp and the operator works the jaws to each
-extreme by hand. **Starting it puts the axis in zero gravity and says so**, and finishing it takes
-the axis back — on every way out, including a cancel, because the operator's hands are on the jaws
-for all of it. The automatic probe is left alone: it drives the jaws into the stops itself and needs
-the axis to itself to do it.
-
-- **Two labelled buttons, not one.** The open extreme is recorded first, then the closed one, which
-  is 0 mm. The label on the button is the operator's whole answer to "which end is zero", so a
-  press that arrives out of step is refused out loud rather than taken as whichever point is due:
-  the two angles swapped pass every check the console makes and drive the gripper backwards.
-- **Nothing is sampled in the background.** The angle recorded is the one the encoder reports on the
-  tick after the press — the first reading after the hand stopped moving. Sweeping the axis and
-  keeping the extremes, which is what the SDK's zero-gravity mode does, measures the travel the hand
-  happened to sweep: a gripper released halfway still looks like a calibration, and neither end is
-  named, so the file cannot say which one is 0 mm.
-- **It needs no declaration of any kind.** The two labelled presses say which end is which, so the
-  direction is whatever the two recorded angles turn out to be rather than anything agreed
-  beforehand. Both points recorded in the same place is reported, not adopted — a file built from
-  it would put every millimetre of the travel at one angle.
-- **Readings are checked before they are believed.** A value outside the SDK's own plausibility
-  bound, or one that moved further in one tick than the mechanism can, is dropped rather than
-  recorded: a lost frame leaves the SDK's cached position at `0.0`, which is inside that bound and
-  is exactly where a misread would put the *open* limit — the one reading that would quietly invert
-  the whole travel. A drop also cancels a press it lands on, since the angle the operator pressed
-  for is the one that could not be read.
-- **Every wait is bounded** at `TWO_POINT_TIMEOUT_S` (5 minutes per point). The axis is limp for the
-  whole procedure, and a console left holding an enabled, limp motor is a gripper that falls open on
-  whatever is under it. A probe that fails or is cancelled stays limp; only one that ran to the end
-  hands the axis back under position control, at the SDK's exit gains — and with the write broken it
-  is handed back at the *angle the encoder reports*, because a hold in millimetres would have to
-  come from the very limits that are still in doubt.
-
-### Motor zero (电机标零)
-
-The status page's **维护** area holds one action: **电机标零…**, which tells the drive that wherever
-the jaws are at that moment is angle zero. The offset goes into the motor's own flash over CMD
-`0xFE`, and there is no undo — the console cannot read it back and cannot put it back. It is a
-maintenance action rather than a step in calibration, and it is what to reach for when the jaws and
-the numbers have drifted far enough apart that measuring the ends again is the point.
-
-**It re-measures nothing.** The span on file keeps its length; both of its angles, and therefore
-every millimetre computed from them, are now offset by the angle that was zeroed. Afterwards the
-same jaws are read as a different place.
-
-The confirmation dialog names three consequences before the write, and the banner repeats them
-after:
-
-- **Re-calibration is required.** Until the file is remade (自动标定 or the manual two-point
-  probe), the position reading, every target and the travel limits are all shifted together.
-- **The gate will not catch it.** A zero taken at a stop moves the frame by well under
-  `CALIB_MISMATCH_RAD` (0.15 rad), so the console goes on moving by millimetres that are now wrong.
-  That is why the warning is stated in so many words instead of the motion being blocked.
-- **The motor is briefly limp.** The SDK disables the drive, sends `0xFE` and re-enables it, so for
-  about a second the jaws can be pushed by hand and Esc does not take effect until the write ends.
-  Keep hands and workpieces clear of the jaws before confirming.
-
-The warning is dismissed by the operator and by nothing else, through the 已了解 button in the
-banner. The worker does not retract it, because nothing in the loop can: a calibration measured
-against the old offset does not become correct again on its own. Immediately after the write the
-axis is re-anchored to a fresh measurement, so the FSM is never left executing a target expressed in
-the frame that just stopped existing.
-
-标零 needs the console connected and the motor enabled — a DM drive ignores `0xFE` precisely *because*
-it is disabled, so the refusal for a disabled motor is the one an operator meets. It is also refused
-while a probe is running, which owns the axis and would have its next frame aimed at a frame that
-moved underneath it.
-
-The simulated backend refuses 标零 rather than faking the frame shift; see the known limitations
-below.
+标零 needs the console connected and the motor enabled, and it is refused while a probe is running.
+The simulated backend refuses it outright, reporting 本后端不支持标零.
 
 ---
 
-## 🏗️ Architecture
+## Troubleshooting
 
-Three SDK constraints decided the structure, all of them confirmed by reading the source:
-
-1. **The SDK is not thread-safe at all** — the whole package contains no `threading` and no locks,
-   and every motion method runs a 200 Hz blocking loop in the caller's thread, sharing one socket
-   and one `MotorState`. ⇒ A single `GripperWorker` (`QThread`) owns the SDK; the GUI thread never
-   touches it, and a cross-thread call raises `RuntimeError`.
-2. **`control_mit_stream()` has no interruption hook** (`protocols/can_bus.py:342` is a bare
-   `while`), and every convenience motion method ends up there. ⇒ **Those methods are not used**;
-   the console sends `send_mit_frame` and calls `poll` on its own 5 ms tick, which is what puts the
-   emergency-stop check inside the loop.
-3. **`move_at_speed()` always appends 20 hold frames** (`gripper.py:1117`) per call. ⇒ "Move while
-   echoing live" cannot be built by calling it in small slices; each slice would stall for 100 ms.
-
-```text
-src/litegrip_studio/
-├── constants.py        # every policy number lives here, testable without Qt or the SDK
-├── units.py            # mm↔rad, travel, limits, clamping (pure functions)
-├── calibration.py      # calibration file parsing/validation/provenance/saving (pure + fs)
-├── settings.py  telemetry.py  logging_setup.py  version.py  selftest.py
-├── backend/
-│   ├── __init__.py     # GripperBackend ABC + _claim() thread-ownership assertion
-│   ├── real.py         # public SDK primitives only
-│   ├── plant.py        # pure simulated plant: step(dt), no threads, no sleep
-│   └── sim.py          # plant + real-time pacing + fault injection
-├── core/
-│   ├── commands.py     # frozen dataclass command set
-│   ├── profile.py      # anti-windup rate-limited reference generator (pure)
-│   ├── motion.py       # MotionFSM: IDLE/HOLD/SERVO/GRASP/HOLD_FORCE/FAULT
-│   ├── calibration_fsm.py
-│   └── worker.py       # GripperWorker(QThread): owns the backend, 200 Hz tick
-└── ui/
-```
-
-The layering rule: **policy numbers** all live in `constants.py`; **pure logic** (`units`,
-`profile`, `calibration`, `plant`, the state machines) depends on neither Qt nor the SDK nor
-threads and is tested with plain pytest; only `backend/` touches the SDK; the Qt layer is thin.
-
-The backend interface exposes only the primitives the state machine needs and **never an SDK
-convenience method** — that is what makes the same state machine run on the real gripper and on
-the simulation, so the simulation actually exercises the logic instead of standing next to it. The
-one named exception is `write_zero`, which is 标零: it never runs on the control path, so the
-reason the other convenience methods are banned (they block inside a loop with no abort hook) does
-not apply to it.
-
-### The reference generator
-
-Every tick anchors the reference to the **measured position**, which is the key to the anti-windup
-behaviour. Recursing through an internal integrator instead would let the reference run to the
-target while blocked, with the error and `kp·err` growing without bound — an infinite clamp:
-
-```python
-v_allow = min(speed_mm_s, sqrt(2*acc*max(rem - TOL_MM, 0)))   # stopping-distance limit
-v_ref   = slew(v_ref, v_allow, acc*dt)                        # trapezoid
-q_cmd   = measured + sign*min(v_ref*dt, rem)                  # anchored, never overshoots
-```
-
-The trapezoid costs three lines and buys a start and stop with no velocity step (no current spike),
-a stopping distance (it never brakes at full speed on the servo alone), and a reference that cannot
-overshoot.
-
-### When a gap counts as an obstruction
-
-Hit something while moving and the move must stop, and the evidence is **lost travel**: the
-reference generator also integrates an ideal path ("where it should have got to by now",
-`virtual_mm`, used only for comparison and never commanded, so it cannot wind up), and the
-measurement failing to keep up with it means something is in the way. The window is 1 mm.
-
-But that test **is a model**: it assumes the mechanism keeps up with the reference while cruising.
-A mechanism that cannot — high friction, tight linkage, a load, or too small a `kp` for the speed
-asked for — accumulates the same 1 mm while **moving perfectly normally**, and then stopping is a
-fault rather than a safety measure: what the operator sees is "it moves twice and stops", not the
-position they dragged to.
-
-So the 1 mm also needs **corroboration** before it counts as contact, on any move: the measured
-speed below 25 % of the reference speed (`CONTACT_STILL_RATIO`). Because the test is a **ratio**
-and not an absolute speed it holds at 5 mm/s and at 150 mm/s alike; a real obstruction collapses
-the speed and is still caught, and a mechanism that genuinely does not move is caught by the stall
-counter and the **arrival timeout**, neither of which changed. A move that carries a force setpoint
-leans on that corroboration hardest: it is given no `lead`, so the push behind its approach is the
-tick's own `kp·v·dt` and whatever friction eats into that shows up as tracking lag, for the gap to
-integrate.
-
-The number has a measured origin: in the simulation, a mechanism with 0.3 Nm of Coulomb friction
-moving at 20 mm/s was declared "position not changing over time" after 2.7 mm while travelling at
-**87 % of the commanded speed**. With the corroboration, the same move completes. The same defect
-reaches the operator as "at low speed the jaws race to the grasp position, and 放开 does not open
-1 cm": 0.05 Nm of Coulomb friction — five times what the simulated unit's own free travel draws —
-at 10 mm/s hands the grip over **35.4 mm short of the object**, force mode then drives the jaws at
-up to **115 mm/s** against that 10 mm/s slider, and 放开, which opens from the pose the grip was
-made at, runs to the open stop, **45 mm clear** of the object. With the corroboration the grip is
-made at the object and 放开 opens `RELEASE_OPEN_MM`.
-`tests/test_motion_fsm.py::TestWhetherAGapIsAnObstruction` and `TestAGraspAtTheSlidersSlowEnd` pin
-both cases.
-
-### A grip is made where the gap detector is blind
-
-The gap is only integrated while the trajectory is at **cruise**, because during the acceleration
-ramp the plant legitimately lags its moving reference by a few millimetres — an artefact of
-accelerating, not of obstruction. A close leaves cruise `speed²/(2·acc) + TOL_MM` before its
-target: 1.2 mm at 25 mm/s, 3.5 mm at 50, because that is where it starts braking. Meet the object
-inside that last stretch and the primary detector has already stopped looking, which is where a
-grip on a stiff or a thin object is made.
-
-So a move that **carries** a force setpoint has **three** contact channels, and they cover each
-other: the gap, the measured torque (`CONTACT_TAU_NM`, and the only channel that works off an old
-reading — a torque is what the drive applied, whenever it was read), and **stillness** —
-`ProfileOutput.stalled`, the trajectory asking for motion for 0.1 s while the jaws deliver less
-than `STALL_RAD` of it. Stillness takes no account of speed, so it reaches the slow end where the
-torque channel cannot, and it costs one thing: the approach gain's press for those 0.1 s.
-
-The numbers come from the simulated plant. A 20 N grasp at 25 mm/s against an object 1 mm short of
-the closed stop pressed **9.2 N for 5.3 s** on the gap and torque channels alone — the gap blind
-for the reason above, and 9.2 N well under the 15 N the torque channel needs — and then jumped to
-the setpoint on the move deadline. With stillness it hands over in **0.25 s**. That press is
-`kd·v_ref`-dominated, so it is the speed slider that sets it, not the setpoint: 9.2 N at 20 mm/s,
-11.4 at 25, 18.8 at the 50 mm/s default.
-`tests/test_motion_fsm.py::TestAGraspThatMeetsItsObjectInTheLastMillimetre` pins the hand-over, the
-requirement that the reading be current (stillness in a cached position is not evidence), and that
-a free approach is not mistaken for contact.
-
-A move that **carries** a force setpoint is also the one exception to what the arrival timeout does.
-It exists to stop a position that is not converging, and a grip that is not converging has already
-reached the state it was aiming for: the feed-forward alone. Taking the position hold instead
-leaves the jaws with nothing but whatever the object's own stiffness offers at the pose they froze
-at, which on the bench is a grip that sags away from its setpoint a few seconds after it took hold.
-`tests/test_motion_fsm.py::TestTimeout` pins both endings.
-
-### Shutdown and safety
-
-Shutdown has three layers, so the motor never stays enabled: `run()`'s `finally` →
-`zero_torque→disable→disconnect`; `app.aboutToQuit` calling the same (idempotent); and
-`SIGINT`/`SIGTERM`. The `terminate()` fallback is **inherently unsafe** — it can stop halfway
-through a frame — and the log says so instead of pretending otherwise.
-
-Three stop semantics, because the SDK's single `stop()` is not enough:
-
-| Button | Behaviour | Motor |
-| --- | --- | --- |
-| Stop | FSM→HOLD at the current rad, reference reset | Stays enabled |
-| Release | Sends `kp=0,kd=0,tau=0` continuously, back-drivable by hand | Stays enabled, back-drivable |
-| **Emergency stop** (red / Esc) | `zero_torque()→disable()` and **latches**: every motion is refused until it is reset | Disabled |
-
-The emergency stop travels on a `threading.Event` rather than the command queue — it must not be
-queueable — and the tick checks it before the state machine. There is also a GUI watchdog: the GUI
-sends a heartbeat every 500 ms, and a worker that does not see one for 3.0 s treats the console as
-dead, zeroes the torque and disables the motor.
+| What you see | What it means, and what to do |
+| --- | --- |
+| `ModuleNotFoundError: No module named 'PyQt5'` | The libraries went to another interpreter. `run_litegrip_studio.sh -h` prints the one in use — install into that one, or set `PYTHON_BIN` |
+| "Network is down, errno 100" after 连接 | The interface is down or bus-off. This is a link problem, not a motor one: check the adapter and the wiring, then reconnect |
+| "RTNETLINK answers: No such file or directory" | The USB-CAN adapter lost its endpoint table. Unplug and replug it, or `sudo modprobe -r gs_usb && sudo modprobe gs_usb` |
+| 连接 does nothing and no dialog appears | Your user dismissed the authorization prompt, or a unit file owns `can0`. Bring the interface up by hand with the three commands above |
+| 运动闸门：已阻断 | The console will not move. The page says which reason applies — no file, an invalid file, a missing file, or a zero that belongs to another machine. 零重力（可手掰） still works |
+| 标定文件已不存在：… | The remembered file has been deleted. 载入文件… picks another, or picks the SDK's `litegrip/factory_calibration.json` to go back to the default |
+| The jaws will not move at all | Check the gate first, then that the motor is enabled (使能), then the emergency-stop banner: a latched 急停 refuses every motion until 急停复位 |
+| Movement refused: "no position read yet" | The motor has never reported a status frame. Enable, and wait for 状态帧 to start counting |
+| 电机标零 reports 本后端不支持标零 | You are on the simulated backend, which refuses 标零 on purpose |
+| The force plot looks like noise | Unloaded, the force is a fraction of a newton. Grasp something, or ignore it |
 
 ---
 
-## 🛠️ Development
+## Known limitations
+
+- **电机标零 is refused by the simulated backend.** Deliberate, not an omission: the simulation's
+  position is at once the mechanism's physics and the angle it reports, so shifting only the report
+  would make it integrate against a state that disagrees with what it says.
+- **The SDK's own `calibrate()` is not offered.** It cannot be interrupted and drives the motors for
+  about 24 seconds — better to offer the two probes on the calibration page than a 24-second window
+  in which the emergency stop does nothing.
+- **The factory calibration is the default, not a measurement of *your* gripper.** It was recorded
+  on the unit it ships with, so on another gripper of the same design the readings are close rather
+  than exact, off by that unit's manufacturing tolerance. The console does not try to judge that —
+  but it does catch a file recorded against a different encoder zero, a reassembled unit or a
+  different design, because such a file's travel does not contain the angle the jaws actually
+  report, and the gate goes `BLOCKED` before a frame is sent.
+- **The travel is a constant for this bench**, 85.0 mm in `constants.DEFAULT_TRAVEL_MM`. It decides
+  both the millimetre conversion and the slider's range, so a console told the wrong one reports
+  every millimetre wrong while looking healthy. Moving this console to another gripper means editing
+  that constant and re-probing — there is no flag, setting or widget for it.
+- **The force limit is the 40 N mechanical rating**, in `constants.FORCE_MAX_N`. The theoretical
+  100 N appears only as a greyed-out comment.
+- **The top of the range stops 1 mm inside the recorded open limit.** The probe presses the open
+  stop out under 40 N and the linkage gives about 1 mm under that force, so commanding the recorded
+  limit directly would press the stop on every full opening. The closed end is not inset: 0 is the
+  calibrated zero.
+
+---
+
+## Files and settings
+
+The console keeps everything for one user under `~/.litegrip/`:
+
+| Path | What it is |
+| --- | --- |
+| `litegrip_studio.ini` | Settings: the last speed and force, whether the slider follows while dragging, the remembered calibration path, the theme, the window geometry and the log's debug toggle |
+| `litegrip_calibration.json` | The default place a calibration is saved — but sitting here is not what makes it load. The console reads the path it remembers |
+| `logs/litegrip-studio.log` | The log, rotated at 512 KiB with three backups, always at `DEBUG` |
+
+Environment variables:
+
+| Variable | Effect |
+| --- | --- |
+| `PYTHON_BIN` | The interpreter the launcher and the build script use |
+| `LITEGRIP_SDK_PATH` | Use an SDK checkout instead of the vendored one; the checkout root or its `src/` |
+| `LITEGRIP_CALIB` | Override the default user calibration path |
+| `LITEGRIP_FACTORY_CALIB` | Replace the factory calibration file with one path of your own |
+
+---
+
+## Development
 
 The tests need neither hardware nor an installed SDK:
 
@@ -754,144 +463,32 @@ The tests need neither hardware nor an installed SDK:
 QT_QPA_PLATFORM=offscreen python3 -m pytest tests/ -q
 ```
 
-`pytest-qt` is not installed; the suite uses plain pytest with a session-scoped `QApplication`
-fixture and `PyQt5.QtTest`, under `QT_QPA_PLATFORM=offscreen`. The root `conftest.py` puts `src/`
-on `sys.path`, which is all the vendored SDK needs to be importable, and `LITEGRIP_SDK_PATH` goes in
-front of it when it is set. No test skips for want of an SDK.
-
-`tests/conftest.py` also points `HOME` at a temporary directory of the session's own, so no test
-reads or writes the operator's `~/.litegrip/` — the calibration, the preferences or the log. A test
-that needs one of those files makes its own, and an exported `LITEGRIP_CALIB` /
-`LITEGRIP_FACTORY_CALIB` is dropped for the same reason. Without it, a calibration saved from a
-console running next to the suite is read by the tests that build a simulator with no path of their
-own, and their numbers move with it.
-
-The `--selftest` mode runs pure logic only (unit conversions, calibration direction checks,
-wrong-zero rejection, plant convergence, arrival, torque limits, emergency-stop disable) and
-**imports no Qt at all** — the machine that needs it most is the one where Qt is broken. A
-sub-interpreter test asserts exactly that.
-
-### About the SDK
+`QT_QPA_PLATFORM=offscreen` is what lets the UI tests build real widgets without a display.
+`tests/conftest.py` points `HOME` at a temporary directory of the session's own, so no test reads or
+writes your `~/.litegrip/`, and it puts `src/` on `sys.path`, which is all the vendored SDK needs.
 
 The SDK is **vendored, not a dependency**: `src/litegrip` holds litegrip-python at a pinned commit,
-so a clone runs with nothing installed beside it. Provenance, the file list, the tree hash and the
-re-vendor commands are in [`src/litegrip/VENDORED.md`](src/litegrip/VENDORED.md).
+so a clone runs with nothing installed beside it. **Do not edit anything under it except the
+factory calibration this repository deliberately overrides** — a local edit survives only until the
+next re-vendor, which copies each file wholesale. `src/litegrip/VENDORED.md` records the file list,
+the tree hash and the re-vendor steps, and `tests/test_vendored_sdk.py` recomputes the hash, so an
+edit in place fails the suite.
 
-Vendoring rather than installing is deliberate. The SDK's one declared dependency, `eclipse-zenoh`,
-is never imported by its library code, so an install step would buy nothing — and a distribution of
-the same name would be a *different* SDK: the numbers the console falls back to are read from the
-file beside whichever `litegrip` was imported, so the wrong one loads a different set of numbers
-without saying so.
+`./run_litegrip_studio.sh build` produces a one-file executable in `dist/`. Releases are automated
+by semantic-release on every merge to `main`; the git tag is the only source of truth for the
+version, and `0.0.0-semantic-release` in `pyproject.toml` is a placeholder that must not be edited
+by hand.
 
-Do not edit anything under `src/litegrip`. A local edit survives only until the next re-vendor,
-which copies each file wholesale; a change that belongs there goes upstream. `VENDORED.md` records a
-hash of the whole tree and `tests/test_vendored_sdk.py` recomputes it, so an edit in place fails the
-suite.
+**The reasons behind all of this — why the architecture is shaped this way, what the slider is
+actually doing, why the calibration gate sits where it does — are in [DESIGN.md](DESIGN.md).** This
+file is the manual.
 
-To run the console or the suite against SDK HEAD instead, set `LITEGRIP_SDK_PATH` to that checkout.
-It goes in front of the vendored copy.
-
-### Packaging
-
-```bash
-./run_litegrip_studio.sh build      # → dist/litegrip-studio
-```
-
-`--collect-data litegrip` is required: the SDK finds its factory calibration and its two direction
-templates through `dirname(litegrip.__file__)`, which still holds under `sys._MEIPASS`, but without
-that flag the files never enter the artifact and the factory fallback dies with them. `--selftest`
-inside the built binary checks that the file is where the code reads it from.
-
-The version stamp is written into `_version.py` at build time and **removed from the source tree
-when the build ends** (it is git-ignored as well). Leaving it behind would make every later
-source run claim the number from the previous build, whose git hash may long since disagree with
-the working tree. The stamp only lives inside the artifact, so a source run always reports
-`+source`.
-
-The stamp starts from the nearest `v*` git tag, so an artifact built from `v0.8.2` calls itself
-`0.8.2.<commit count>+g<sha>.<date>` and can be matched to a release at a glance. A tree with no tag
-to ask — a shallow export, a source tarball — falls back to `BASE_VERSION` in `version.py`, which is
-`0.0.0`, so a source run reports `0.0.0+source`.
-
-Neither of those numbers is **the released version**. Releases are automated by semantic-release
-from the commit history, the git tag is the only source of truth, and `0.0.0-semantic-release` in
-`pyproject.toml` is a placeholder that must not be edited by hand.
+This repository follows the shared NEXFORM ROBOTICS standards: the agent operating rules in
+[AGENTS.md](AGENTS.md), Conventional Commits, and automated semantic-release versioning.
 
 ---
 
-## ⚠️ Known limitations
-
-- **电机标零 is refused by the simulated backend.** The refusal is deliberate, not an omission. The
-  plant's `q` is at once the mechanism's physics *and* the angle it reports, so a simulator that
-  shifted only the report would integrate against a state that no longer matches what it says —
-  disagreeing with the hardware in exactly the way this feature is about. In sim the button reports
-  本后端不支持标零; on the bench it works.
-- **The SDK's own `calibrate()` is not offered in this version.** It has no stdin
-  dependency, but it cannot be interrupted and drives the motors for about 24 seconds — better to
-  offer only the two wizards on the calibration page (自动标定 and the two-point manual one) than a
-  24-second window in which the emergency stop does nothing.
-- The factory calibration is the **default, not a measurement of your gripper**: used on another
-  unit it does not crash, it makes every millimetre wrong. Every machine has that file, because it
-  ships inside the vendored SDK. Nothing asks you to acknowledge it — the gate goes `READY` on it,
-  and the frame check is what stops a mismatch: the file's range belongs to the unit it was taken
-  on, so a different gripper's first reading lands outside it and the gate goes `BLOCKED`.
-  The page looks at the travel implied by the file's own scale, but only warns when it is wrong by
-  orders of magnitude (outside
-  `STROKE_MIN_MM` / `STROKE_MAX_MM`). That test **cannot** be tightened into a comparison with the
-  measured travel: files written by the SDK and by earlier versions of the console all carry
-  "configured stroke ÷ span" — the SDK's 120 mm nominal in files written before 2026-10-10, its
-  measured 85 mm default since, whatever the caller had set — and that is not a measurement of the
-  unit the file was recorded on, so a 60 mm gripper and an 85 mm gripper can write the same
-  number — tightening it would make every file, including this machine's own, warn, and an alarm
-  that is always on is no alarm at all.
-  Telling which gripper a file belongs to is the job of the measured-angle frame check
-  (`frame_mismatch`) and of a plausible range for the derived coefficient.
-- The force limit is the 40 N mechanical rating; the theoretical 100 N (10 Nm × 10) appears only as
-  a greyed-out, unselectable comment. Changing it means editing `constants.FORCE_MAX_N`, one place.
-- **The mm conversion is derived from the two angles and the measured travel, not read from the
-  file's `rad_to_mm`.** The SDK writes that field as "configured stroke ÷ span" — the 120 mm
-  nominal in files written before 2026-10-10, its measured 85 mm default since — so it reports the
-  stroke that was set rather than the unit the two angles came from. Loading such a file makes a
-  gripper read that stroke across its jaws, while the slider covers only part of it and neither end
-  is reachable, which is where "a slice taken out of the middle of 0–120" came from. The two angles
-  in the file are measurements and the
-  coefficient is derived, so `units.derive_scale()` computes it:
-  `(measured travel + SPAN_INSET_MM) / span`. On this machine that is
-  `(85 + 1) / 1.681925 = 51.13 mm/rad`, so the two recorded limits span 86.00 mm, the slider's
-  0…85 covers the whole travel, and the top of the range sits 1 mm inside the recorded open limit.
-- The travel (`constants.DEFAULT_TRAVEL_MM`, 85.0 mm) is the **measured value for this gripper** and
-  is a constant, not a setting. It decides two things: the mm coefficient and the slider's range, so
-  a console told the wrong one reports every millimetre wrong while looking healthy. It was editable
-  on the calibration page until 2026-09-28, when 10 mm was typed into it: that derives 8.0 mm/rad,
-  below `RAD_TO_MM_MIN`, so the plausibility check turned a good calibration into a problem and the
-  gate refused motion — a console that could not move and could not say why. There is no flag, no
-  setting and no widget for it now (`--travel-mm` is gone; the retired `calibration/travel_mm` is
-  deleted from an existing ini when the console opens), and moving this console to another unit means
-  editing the constant and re-probing. Saving a calibration writes **this derived coefficient** into the file (the
-  SDK writes the file from its own config, and the console pushes the limits into that config
-  before saving), which is the number the console actually moves with: reading it back is
-  self-consistent, and the cross-check (the coefficient the SDK applied equals the one in the file)
-  means something. The coefficient the probe computed itself stays in `raw` for display and
-  comparison; it describes "the stroke that was set at the time ÷ the span", not how wide this
-  gripper is.
-- **Why the top of the range is inset by 1 mm**: the probe pushes the open limit out under 40 N of
-  pressure and the linkage gives about 1 mm under that force, so the recorded open limit is slightly
-  past the mechanical end. Commanding the recorded limit directly presses the stop on every full
-  opening; 1 mm inside reaches the same physical position without the press. The closed end is not
-  inset: what the probe presses against there is the two fingers touching, which has no margin to
-  begin with, and 0 is the calibrated zero.
-
----
-
-## 📋 Repository standards
-
-This repository follows the shared NEXFORM ROBOTICS repository standards: the agent operating rules
-in [AGENTS.md](AGENTS.md), Conventional Commits, and automated semantic-release versioning on every
-merge to `main`.
-
----
-
-## 📄 License
+## License
 
 Licensed under the **Apache License 2.0** — see [LICENSE](LICENSE).
 
