@@ -104,6 +104,17 @@ class TestTheArguments:
         closed here rather than bounded."""
         assert "--travel-mm" not in cli.build_parser().format_help()
 
+    def test_the_calibration_help_names_the_bundled_file(self) -> None:
+        """``resolve_calibration_path`` hands the worker the remembered path and
+        then nothing, which ``load_calibration`` reads as the factory file inside
+        the SDK.  The help used to promise a default location under ``~/.litegrip``
+        instead, sending a reader to look for a file that is not there."""
+        text = cli.build_parser().format_help()
+
+        assert "记住的路径" in text
+        assert "出厂标定文件" in text
+        assert "~/.litegrip" not in text
+
 
 class TestBuildingTheBackend:
     def test_the_simulator_is_built_with_no_sdk(self, sim_backend) -> None:
