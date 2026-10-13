@@ -83,6 +83,7 @@ class FakeSignals(QObject):
     calib_progress = pyqtSignal(str, float, str)
     calib_ready_to_apply = pyqtSignal(object)
     calibration_applied = pyqtSignal(str)
+    calibration_loaded = pyqtSignal(str)
     log = pyqtSignal(str, str)
     alert = pyqtSignal(str, str)
     alert_cleared = pyqtSignal()
@@ -594,6 +595,49 @@ class TestWhatIsRemembered:
         window._heartbeat.stop()
 
         worker.calibration_applied.emit("/tmp/sim.json")
+
+        assert store.value("calibration/path") is None
+
+    def test_a_loaded_calibration_is_remembered_as_a_path(self, qapp, worker) -> None:
+        """载入文件… names the file this bench uses, not just for this run.
+
+        A load that is not remembered is a load that has to be repeated at every
+        launch — and the case that matters is the operator loading a file
+        *because* the remembered one has been deleted, which is exactly when the
+        forgetfulness puts the error back."""
+        store = _Store()
+        worker.backend.remember_calibration_path = True
+        window = MainWindow(worker, Settings(store))
+        window._heartbeat.stop()
+
+        worker.calibration_loaded.emit("/tmp/bench.json")
+
+        assert store.value("calibration/path") == "/tmp/bench.json"
+
+    def test_a_simulated_load_is_not_remembered(self, qapp, worker) -> None:
+        store = _Store()
+        worker.backend.remember_calibration_path = False
+        window = MainWindow(worker, Settings(store))
+        window._heartbeat.stop()
+
+        worker.calibration_loaded.emit("/tmp/sim.json")
+
+        assert store.value("calibration/path") is None
+
+    def test_loading_the_factory_file_forgets_the_path_instead(self, qapp, worker) -> None:
+        """Back to the factory numbers means back to *nothing named*.
+
+        Writing the factory path down would instead put the console on a file the
+        page would report as the operator's own, and one the backend refuses to
+        save over — the two things that separate a calibration somebody took from
+        the fallback that ships with the SDK."""
+        factory = calibration.factory_path()
+        store = _Store(**{"calibration/path": "/home/qaz/.litegrip/gone.json"})
+        worker.backend.remember_calibration_path = True
+        window = MainWindow(worker, Settings(store))
+        window._heartbeat.stop()
+
+        worker.calibration_loaded.emit(str(factory))
 
         assert store.value("calibration/path") is None
 

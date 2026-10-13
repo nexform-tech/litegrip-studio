@@ -406,7 +406,8 @@ presses of 记录 are the request to *measure*, not the request to *move by what
 
 应用标定 writes the result and has the backend read the file back; only then does the provenance
 become `user_file` and the gate `READY`. The path is then remembered in the settings file, so the
-next launch loads it explicitly rather than falling back to the factory numbers. 暂不 leaves the
+next launch loads it explicitly rather than falling back to the factory numbers. 载入文件… writes
+that same setting, which is what makes a loaded file outlive the run that loaded it. 暂不 leaves the
 result in memory: the gate stays shut, and the axis holds the angle the probe measured rather than
 snapping back. Both the real and the simulated backend read back what they write: a simulation
 that wrote without reading back would leave the operator with the gate shut after a successful
@@ -427,9 +428,12 @@ second button whose only job is to repeat the first one.
 The file in force is identified on the page, not just by its label. 载入文件… picks a file and
 actually reads it, and the page then shows which path the numbers came from — two different user
 files used to read identically in the always-on table, which is what made a successful load look
-like nothing had happened. 刷新显示 re-reads **the file in force**, and only that file: if it has
-gone, the page says so and keeps the previous result, because quietly falling back to the default
-source is the same ambiguity from the other side.
+like nothing had happened. The file you pick is also the file the next launch reads, so a load is
+not undone by a restart; picking the SDK's own `litegrip/factory_calibration.json` is how you go
+back to the default, and the console then forgets the remembered path rather than writing that
+file down as one you chose. 刷新显示 re-reads **the file in force**, and only that file: if it has
+gone, the page says so, keeps the previous result, and names the factory file to load instead,
+because quietly falling back to the default source is the same ambiguity from the other side.
 
 ### Enabling: read a position first, then hold it
 

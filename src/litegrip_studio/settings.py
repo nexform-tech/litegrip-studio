@@ -127,10 +127,12 @@ class Settings:
     def calibration_path(self) -> str | None:
         """The file the operator last loaded, or None to use the default.
 
-        Written when the operator applies a calibration, and read at startup by
+        Written when the operator loads a calibration file and when one is
+        applied, and read at startup by
         :func:`litegrip_studio.cli.resolve_calibration_path`: an explicit path,
         so a file that has since gone missing is reported instead of being
-        quietly replaced by the factory numbers.
+        quietly replaced by the factory numbers.  Undone by loading the factory
+        file, which is the same as naming nothing.
         """
         return self._text(KEY_CALIBRATION_PATH) or None
 
