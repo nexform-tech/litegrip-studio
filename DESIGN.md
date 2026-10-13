@@ -535,6 +535,69 @@ queueable — and the tick checks it before the state machine. There is also a G
 sends a heartbeat every 500 ms, and a worker that does not see one for 3.0 s treats the console as
 dead, zeroes the torque and disables the motor.
 
+## The CAN link
+
+Pressing 连接 looks at `can0` first and intervenes only when the interface really is wrong — down, or
+at the wrong bitrate — and only in that one place. Each of the following is a decision, not an
+implementation detail:
+
+- Privilege is escalated through `pkexec`, the desktop's own authorization dialog. **This process
+  never touches the password**, so it cannot write it into a log either.
+- An interface that is already configured: no privileged command runs and **no dialog appears**.
+  That is deliberate, so that bringing the interface up by hand does not make every connection
+  prompt you. "Configured" is judged on more than the up flag and the bitrate: the controller's
+  `can state` is checked too, because a **bus-off interface reports all of those fields as
+  perfectly normal** while being unable to send a single frame.
+- Configuration adds `restart-ms 100`: the controller reopens itself 100 ms after entering
+  bus-off. Without it — the kernel default is 0 — it stays down **forever**, every subsequent
+  frame send returns ENETDOWN, and `connect()` only opens a socket, so nothing is reported until
+  the first action that really sends a frame (enable). What you then see is a kernel message,
+  "Network is down, errno 100".
+- **Not every adapter implements `restart-ms`**, and the ones that do not say so: the gs_usb
+  clone on this bench (`1d50:606f`) answers "Device doesn't support restart from Bus Off." When
+  that specific refusal comes back, the console drops the option, configures without it, and
+  brings the interface up anyway — one authorization, and a log line saying the difference. On
+  such an adapter a bus-off controller does **not** recover by itself; the next Connect
+  reconfigures it.
+- **A USB-CAN adapter can lose its USB endpoint table**, and then no configuration command
+  raises it: `sudo ip link set can0 up` answers "RTNETLINK answers: No such file or directory"
+  (ENOENT) while `ip -details link show can0` reads perfectly normal. This is the kernel refusing
+  a transfer whose endpoint is no longer in the device's table; it is not about the bitrate, and
+  nothing userspace can set on the interface repairs it. Only a fresh probe of the device does,
+  which is why **unplugging the adapter and plugging it back in repairs it** — and so does
+  `sudo modprobe -r gs_usb && sudo modprobe gs_usb`, without touching the cable. The console does
+  the second one by itself when Connect hits this, then configures and raises the interface again.
+  That reload resets every `gs_usb` interface on the machine, including adapters this console is
+  not using — and it is attempted for `gs_usb` only, because unbinding an unknown driver is not
+  something to do on a guess. When it still does not come up, the message tells you to replug
+  rather than quoting an `ip link` command that cannot work.
+- A CAN FD interface is reported, never changed. The SDK detects FD from the interface MTU and
+  works with it, whereas changing the interface back to classic CAN would change every other node
+  on that bus too.
+- When ENETDOWN does happen, **it is treated as a link problem rather than a motor problem**: the
+  message names the interface and `ENETDOWN`, and asks you to check the adapter and wiring before
+  reconnecting. The kernel's errno and a driver fault code are entirely different things — the
+  driver's codes are only 0/1/9/0xA/0xB/0xC — and repeating one as the other only sends people
+  looking at the 24 V supply.
+- An authorization prompt that is dismissed, a `can0` that does not exist, an `ip` that fails:
+  **the connection attempt continues anyway**, and the log and the banner say what happened. This
+  step must never be the reason a connection fails, because something else may well own the
+  interface — only the connection itself can say whether the link works.
+
+## Themes
+
+The console opens dark, which is what a bench under a machine tends to be, and is what it opened
+in before there was a choice. The button beside the emergency stop switches it to light and back,
+and the choice is written to `~/.litegrip/litegrip_studio.ini` under `view/theme`.
+
+Nothing is written until you switch, so "nobody has chosen" stays distinguishable from a choice
+that happens to match the default.
+
+The palette is litearm-studio's in both themes: the same ink ramp, the same semantic fill/edge
+pairs, and the same type scale. What is this console's own is the meaning layer — blue for the
+position that was *commanded*, green for the one the jaws *measured* — and those two are the same
+colours on the slider, in the readout and in the plots.
+
 ## The SDK: vendored, not a dependency
 
 The SDK is **vendored, not a dependency**: `src/litegrip` holds litegrip-python at a pinned commit,
