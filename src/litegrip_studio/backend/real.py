@@ -10,6 +10,13 @@ it cannot be interrupted, which rules out ``open``, ``close``, ``grasp``,
 ``goto``, ``move_to`` and ``move_at_speed`` for a console whose E-stop has to
 work inside one tick.
 
+``write_zero`` is the single exception, and it is off the control path rather
+than on it: it is called once when an operator asks for it, drives nothing, and
+takes no target for the E-stop, the speed setting or the travel clamp to have an
+opinion about.  The reasoning is in
+:meth:`~litegrip_studio.backend.GripperBackend.write_zero`, next to the exclusion
+list it is an exception to.
+
 Two things this class is careful about, both about not lying:
 
 *No blocking getters.*  ``get_position``, ``get_torque``, ``get_error`` and
@@ -51,6 +58,7 @@ from . import (
     GripperBackend,
     LinkDown,
     NotReady,
+    ZeroResult,
 )
 
 log = logging.getLogger(__name__)
@@ -170,6 +178,53 @@ class RealBackend(GripperBackend):
             ) from exc
         if not cleared:
             raise FaultActive(self.read().error_code, "清除故障失败")
+
+    def write_zero(self) -> ZeroResult:
+        """Rewrite the encoder offset so the current angle reads as zero.
+
+        One SDK convenience method, and the only one, on grounds spelled out in
+        :meth:`~litegrip_studio.backend.GripperBackend.write_zero`: it drives
+        nothing, waits on nothing, and is not on the control path.
+
+        The refusals are made here rather than left to the SDK's own checks,
+        because this is the last place that can tell the operator *which*
+        precondition was missing.  ``Gripper.write_zero`` guards with
+        ``_check_enabled`` and raises ``NotInitializedError("未使能 — 请先调用
+        enable()")`` — advice about the SDK's API, from inside a console that has
+        its own button for it.  Being disabled is the case an operator actually
+        hits: pressing 标零 on a console that has connected but not enabled reads
+        as a broken button unless something says otherwise.
+        """
+        self._claim()
+        self._require_connected()
+        if not self._gripper.is_enabled:
+            raise NotReady("标零需要电机使能；DM 电机在失能状态下才会接受 0xFE")
+
+        try:
+            result = self._gripper.write_zero()
+        except LiteGripError as exc:
+            # Same order as ``_raise_enable``, and for the same reasons: an errno
+            # describes this attempt, while a fault code could only have come
+            # from a frame that arrived before the link went down.
+            link = link_failure(exc, self._gripper.channel)
+            if link is not None:
+                raise LinkDown(link) from exc
+            code = getattr(exc, "error_code", None)
+            if code is not None and code not in constants.OK_ERROR_CODES:
+                raise FaultActive(code, describe_error(code)) from exc
+            raise BackendError(f"标零失败: {exc}") from exc
+
+        # ``enabled`` is read, never assumed, and never fixed up here.  The SDK
+        # discards its own re-enable result (gripper.py:1431), so the motor can
+        # legitimately be left disabled with the offset already written — and
+        # calling ``enable`` again from here would swallow a failure the worker
+        # is the object that knows how to report.
+        return ZeroResult(
+            before_rad=float(result.before_rad),
+            after_rad=float(result.after_rad),
+            tolerance_rad=float(result.tolerance_rad),
+            enabled=bool(self._gripper.is_enabled),
+        )
 
     # ── control-rate primitives ─────────────────────────────────────────────
     def stream_frame(

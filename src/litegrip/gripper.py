@@ -24,6 +24,7 @@ Example::
 from __future__ import annotations
 
 import logging
+import math
 import os as _os
 import select as _select_mod
 import sys
@@ -41,6 +42,9 @@ from .actions import (
     MotionConfig,
     MoveProgress,
     MoveResult,
+    WriteZeroResult,
+    _check_calibrated,
+    clamp_to_travel,
 )
 from .teleop import (DEFAULT_ALIGN_SPEED_MM_S, DEFAULT_DQ_MAX, DEFAULT_GRIP_ID,
                      DEFAULT_GRIP_PORT, DEFAULT_LEAD_CAP_MM,
@@ -66,7 +70,10 @@ def _zenoh_transport(role: str, key: str, port: int, host: Optional[str],
                                 ready_key=ready_key)
 
 
-# Path to built-in factory calibration (ships with the package, read-only fallback).
+# The calibration the SDK ships for the unit it ships with.  This is the
+# *standard* value: a no-argument load_calibration() reads it and nothing else.
+# A calibration measured on the buyer's machine is never picked up by accident
+# — name it with ``path=``, ``template=`` or ``LITEGRIP_CALIB``.
 _FACTORY_CALIB = _os.path.join(_os.path.dirname(__file__), "factory_calibration.json")
 
 # Pre-made calibration templates shipped with the package.  Each is a pair of
@@ -88,17 +95,16 @@ CALIB_TEMPLATES = {
     "reverse": _os.path.join(_os.path.dirname(__file__), "calibration_reverse.json"),
 }
 
-# The pre-per-channel location, kept so a calibration saved by an older
-# version still loads.  DEFAULT_CALIB keeps its historical value (env override
-# included); it is now the *legacy* entry of the automatic load chain rather
-# than the primary one.
+# The pre-per-channel location.  A calibration saved by an older version is
+# still on disk and still loadable — but only by naming it, like any other
+# file on the machine.
 _LEGACY_CALIB_PATH = _os.path.join(
     _os.path.expanduser("~"), ".litegrip", "litegrip_calibration.json")
 
-# Default user calibration path — a stable absolute location so that a
-# calibration saved without an explicit path is picked up on the next load
-# without an explicit path, regardless of the process working directory.
-# Override with the LITEGRIP_CALIB env var if desired.
+# The historical default calibration path, kept exported so existing imports
+# keep working.  It is NOT read by load_calibration() any more: a no-argument
+# load reads the factory file alone, and everything on this machine has to be
+# asked for by name (``path=`` or ``LITEGRIP_CALIB``).
 DEFAULT_CALIB = _os.environ.get("LITEGRIP_CALIB", _LEGACY_CALIB_PATH)
 
 
@@ -110,6 +116,7 @@ from .models import (
     CalibrationData,
 )
 from .constants import (
+    GripperGeometry,
     GripperParams,
     UnitConversion,
     DefaultParams,
@@ -118,19 +125,47 @@ from .constants import (
 from .exceptions import (
     CommandError,
     ConnectError,
-    CommError,
     HardwareError,
     NotInitializedError,
 )
 
 
+def _scale_from_travel(config: GripperConfig, travel_rad: float) -> float:
+    """A probed travel in radians → millimetres per radian.
+
+    The numerator is ``max_stroke_mm + STOP_INSET_MM`` rather than
+    ``max_stroke_mm``: the probe presses *into* the open stop to find it, so the
+    two recorded extremes span about a millimetre more than the jaws can
+    actually travel.  See :class:`~litegrip.constants.GripperGeometry`.
+
+    Deriving the scale from the jaw travel alone is a 1.2% short scale — 1 mm
+    lost per full stroke — and it is what this used to do, on top of a nominal
+    stroke (120 mm) that belonged to no gripper in this family.
+
+    Raises:
+        RuntimeError: the two stops coincide, so no scale can be derived.  A
+            calibration that cannot produce a scale must not invent one.
+    """
+    if not travel_rad > 0:
+        raise RuntimeError(
+            f"标定失败：两端止点重合成 {travel_rad:.6f} rad 的行程，推不出 "
+            "mm/rad。确认夹爪真的走完了全程，再重新标定。")
+    return ((config.max_stroke_mm + GripperGeometry.STOP_INSET_MM)
+            / travel_rad)
+
+
 def default_calib_path(channel: str = DefaultParams.CAN_CHANNEL) -> str:
-    """Where a calibration for *channel* is saved and read back by default.
+    """Where a calibration for *channel* is saved, and how to name it back.
 
     One gripper per channel, one file per channel —
     ``~/.litegrip/<channel>_calibration.json``.  A single shared file let two
     grippers on one machine (``can0`` / ``can1``, both at CAN ID 0x08)
     overwrite each other's direction and travel.
+
+    This is :meth:`LiteGrip.save_calibration`'s destination.  It is *not* what
+    a no-argument :meth:`LiteGrip.load_calibration` reads: that reads the
+    factory file alone.  Feed the saved path back explicitly, or set
+    ``LITEGRIP_CALIB`` to it.
 
     ``LITEGRIP_CALIB``, when set, overrides this with one explicit path for
     every channel.  ``HOME`` and the env var are read per call, so a caller
@@ -171,6 +206,49 @@ def _dedupe(paths: List[str]) -> List[str]:
             seen.add(p)
             out.append(p)
     return out
+
+
+def _ignored_calib_files(channel: str) -> List[str]:
+    """Calibrations on this machine that a no-argument load does not read.
+
+    A file written by :meth:`LiteGrip.save_calibration`, or the pre-per-channel
+    ``litegrip_calibration.json``, sits in ``~/.litegrip`` and no longer takes
+    part in a no-argument load.  Reporting it is the point: a machine that
+    quietly keeps running the factory calibration with a measured one next to
+    it is the failure this whole change exists to stop.
+
+    Only names that could belong to *channel* are listed — ``<channel>_...json``
+    and the legacy name — so a second gripper's file does not show up in the
+    first one's log.  Anything else in that directory is not this SDK's to
+    judge (see the README for which names are recognized at all).
+    """
+    directory = _os.path.join(_os.path.expanduser("~"), ".litegrip")
+    if not _os.path.isdir(directory):
+        return []
+    ignored = []
+    for name in sorted(_os.listdir(directory)):
+        if not name.endswith(".json"):
+            continue
+        if name == _os.path.basename(_LEGACY_CALIB_PATH) or name.startswith(f"{channel}_"):
+            ignored.append(_os.path.join(directory, name))
+    return ignored
+
+
+def _warn_ignored_local_calibrations(channel: str) -> None:
+    """Name every machine calibration a no-argument load walked past.
+
+    Silent fallback is the bug this reports on: without it the gripper keeps
+    running one calibration while a freshly measured one sits unused on disk.
+    """
+    ignored = _ignored_calib_files(channel)
+    if not ignored:
+        return
+    log.warning(
+        "Local calibration not read: %s. A no-argument load_calibration() "
+        "reads the shipped factory calibration only, so this run does not use "
+        "them. To use one, name it: load_calibration(path=%r), or set "
+        "LITEGRIP_CALIB=%s.",
+        ", ".join(ignored), ignored[0], ignored[0])
 
 
 log = logging.getLogger("litegrip")
@@ -748,7 +826,7 @@ class LiteGrip:
                 "请重新标定。"
             )
 
-        rad_to_mm = self._config.max_stroke_mm / travel if travel > 0 else 105.26
+        rad_to_mm = _scale_from_travel(self._config, travel)
 
         result = CalibrationData(
             zero_position=round(close_rad, 6),      # closed → 0 mm
@@ -917,7 +995,7 @@ class LiteGrip:
         if travel <= 0:
             raise RuntimeError(f"行程异常: close={close_rad:.4f} == open={open_rad:.4f}")
 
-        rad_to_mm = self._config.max_stroke_mm / travel
+        rad_to_mm = _scale_from_travel(self._config, travel)
 
         result = CalibrationData(
             zero_position=round(close_rad, 6),
@@ -959,13 +1037,16 @@ class LiteGrip:
         Args:
             path: Destination file. When omitted, saves to this channel's own
                   path (:func:`default_calib_path`, i.e.
-                  ``~/.litegrip/<channel>_calibration.json``) — the file
-                  :meth:`load_calibration` reads by default, so a calibration
-                  saved here is picked up automatically next run.  One file
-                  per channel is what keeps two grippers on one machine from
+                  ``~/.litegrip/<channel>_calibration.json``).  One file per
+                  channel is what keeps two grippers on one machine from
                   overwriting each other.  The factory calibration shipped
                   with the SDK is never overwritten; back it up separately if
                   needed.
+
+        A no-argument :meth:`load_calibration` reads the factory calibration
+        only, so what this writes is *not* read back on its own: name it
+        (``load_calibration(path=<returned>)``) or point ``LITEGRIP_CALIB`` at
+        it.  A warning says so at save time.
 
         Returns:
             The absolute path the calibration was written to.
@@ -1003,6 +1084,10 @@ class LiteGrip:
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
         log.info("Calibration saved to %s", path)
+        log.warning(
+            "The factory calibration stays the standard value, so this file is "
+            "not read back on its own. To use it: load_calibration(path=%r), or "
+            "LITEGRIP_CALIB=%s.", path, path)
         return path
 
     def load_calibration(self, path: Optional[str] = None,
@@ -1020,11 +1105,18 @@ class LiteGrip:
         * ``path=...`` — an explicit file, which may be anywhere (including a
           template's path).  Falls back to the built-in factory calibration
           if it cannot be read.
-        * neither — this channel's own file (:func:`default_calib_path`),
-          then the legacy single-file location (:data:`DEFAULT_CALIB`), then
-          the factory one.  A candidate whose ``channel`` names a different
-          interface is *skipped*, so a ``can1`` unit with no calibration of
-          its own fails loudly rather than silently adopting ``can0``'s.
+        * neither — the factory calibration the SDK ships, and nothing else.
+          A calibration measured on this machine is never picked up by
+          accident: name it with ``path=``, or point ``LITEGRIP_CALIB`` at it
+          (the env var is read here, ahead of the factory file).
+
+          The factory file declares ``channel: can0``, so a ``can1`` unit gets
+          nothing from a no-argument load — it fails loudly rather than
+          silently adopting ``can0``'s direction.  Give it a calibration with
+          ``mount=``, ``path=`` or ``LITEGRIP_CALIB``.
+
+          Any file in ``~/.litegrip`` that this load passed over is named in a
+          warning, with the call that would use it.
 
         Call this after :meth:`connect` but before :meth:`enable`.
 
@@ -1055,15 +1147,20 @@ class LiteGrip:
             sources = [_resolve_template(template)]
             strict = True
             skip_other_channels = False
+            report_ignored_local = False
         elif path is not None:
             sources = [path, _FACTORY_CALIB]
             strict = False
             skip_other_channels = False
+            report_ignored_local = False
         else:
-            sources = _dedupe([default_calib_path(self._channel),
-                               DEFAULT_CALIB, _FACTORY_CALIB])
+            # 出厂标定是这台夹爪的标准值。本机文件一律要显式点名才读 ——
+            # 一个来路不明的遗留文件不该悄悄盖过它。
+            env = _os.environ.get("LITEGRIP_CALIB")
+            sources = _dedupe([p for p in (env, _FACTORY_CALIB) if p])
             strict = False
             skip_other_channels = True
+            report_ignored_local = env is None
 
         data = None
         loaded_from: str = ""
@@ -1082,6 +1179,9 @@ class LiteGrip:
             data = candidate
             loaded_from = src
             break
+
+        if report_ignored_local:
+            _warn_ignored_local_calibrations(self._channel)
 
         if data is None:
             if strict:
@@ -1166,11 +1266,18 @@ class LiteGrip:
     # Motion — high-level
     # ═══════════════════════════════════════════════════════════════════
 
-    def home(self) -> bool:
-        """Move to the closed (zero) position.
+    def home(self) -> MoveResult:
+        """Ramp to the closed (zero) position and stop there.
 
         Uses this instance's calibrated closed limit, so a reverse-mounted
-        gripper homes to the correct end.
+        gripper homes to the correct end.  The stop is the closed end of the
+        travel, not a squeeze: the ramp's command lead is capped at
+        :attr:`MotionConfig.max_lead_mm`, so the jaws arrive without pressing.
+
+        Raises:
+            CommandError: the configuration is uncalibrated — the "calibrated
+                closed limit" is a placeholder default in that state.  See
+                :meth:`goto_rad`.
         """
         self._check_connected()
         self._check_enabled()
@@ -1185,17 +1292,19 @@ class LiteGrip:
         """Open the gripper.
 
         By default a continuous ramp (velocity feed-forward, one frame per
-        :attr:`MotionConfig.frame_interval`) that drives *past* the calibrated
-        open limit and lets the mechanical stop end the move. The command lead
-        is narrowed to :attr:`MotionConfig.stop_lead_mm` inside
-        :attr:`MotionConfig.press_zone_mm` of the limit, so the pressing
-        torque stays around ``kp × stop_lead_mm``.
+        :attr:`MotionConfig.frame_interval`) toward the open end. The command
+        lead is narrowed to :attr:`MotionConfig.stop_lead_mm` inside
+        :attr:`MotionConfig.press_zone_mm` of the limit, and every emitted
+        command position is capped at the calibrated travel, so the jaw stops
+        on the calibrated open limit and is never driven past it. That cap is
+        what makes a stale calibration, or a mechanical stop that is not where
+        the calibration says, bound the travel instead of letting the jaw run
+        on. The move ends on stall detection.
 
         When the config carries a **work stroke** (:attr:`GripperConfig.work_stroke_mm`
         set and smaller than the mechanical travel) it stops there instead — a
-        plain move to that position that never presses the open stop, leaving a
-        margin at the open end.  ``MoveResult.ok`` is then ``reached and not
-        stalled``.
+        plain move to that position, leaving a margin at the open end.
+        ``MoveResult.ok`` is then ``reached and not stalled``.
 
         Args:
             speed_mm_s: Opening speed; ``None`` = ``MotionConfig.speed_mm_s``.
@@ -1204,10 +1313,10 @@ class LiteGrip:
 
         Returns:
             :class:`~litegrip.actions.MoveResult` — with no work stroke, truthy
-            when it pressed onto the stop (``stalled`` and parked within
-            :attr:`MotionConfig.stop_tol` of the limit); stalling far from the
-            limit means something blocked the travel, and is falsy.  With a work
-            stroke, truthy when it reached the work position.
+            when it stalled and parked within :attr:`MotionConfig.stop_tol` of
+            the calibrated limit; stalling far from the limit means something
+            blocked the travel, and is falsy.  With a work stroke, truthy when
+            it reached the work position.
         """
         self._check_connected()
         return self._actions.open(speed_mm_s, progress=progress)
@@ -1220,9 +1329,11 @@ class LiteGrip:
     ) -> MoveResult:
         """Close the gripper.
 
-        Same ramp as :meth:`open`, pressing onto the closed-side mechanical
-        stop.  Use :meth:`grasp` for a power grasp (closing onto an object and
-        squeezing) — that one stops on the object, not on the empty stop.
+        Same ramp as :meth:`open`, toward the closed side; the emitted command
+        is capped at the calibrated travel, so the jaw stops on the calibrated
+        closed limit and is never driven past it.  Use :meth:`grasp` for a power
+        grasp (closing onto an object and squeezing) — that one stops on the
+        object, not on the empty travel end.
 
         Args:
             speed_mm_s: Closing speed; ``None`` = ``MotionConfig.speed_mm_s``.
@@ -1278,6 +1389,52 @@ class LiteGrip:
         self._check_enabled()
         return self._actions.zero()
 
+    def write_zero(self) -> WriteZeroResult:
+        """Make the current encoder angle the motor's zero, in place (CMD 0xFE).
+
+        The jaws are left limp at whatever angle they are at, that angle is
+        declared zero, and the angle is read back to confirm (~0).  Unlike
+        :meth:`zero`, this does **not** probe the end stops or touch the
+        calibration file: it only rewrites the encoder offset, so the span
+        already measured stays valid.  ⚠ Irreversible — it writes the offset
+        into the motor's flash.
+
+        A Damiao motor ignores 0xFE while it is enabled, so the motor is
+        disabled first and re-enabled after (the order ``examples/zero_closed.py``
+        uses).
+
+        Returns:
+            :class:`~litegrip.actions.WriteZeroResult` — truthy when the
+            read-back came back ~0.
+        """
+        self._check_connected()
+        self._check_enabled()
+        if self._can is None:
+            raise HardwareError("未连接")
+
+        # 1. Limp at the current angle, so the jaws stay exactly where the
+        #    operator put them, then read the pose we are about to zero.
+        before = self._can.get_position()
+        self._can.control_mit_stream(q_target=before, kp=0.0, kd=0.0,
+                                     duration_s=0.3)
+        self._can.update_state(timeout_s=0.3)
+        before = self._can.get_position()
+
+        # 2. A DM motor ignores 0xFE while enabled — disable first.
+        self.disable()
+        time.sleep(0.02)
+        if not self._can.set_zero():
+            raise HardwareError("0xFE 未能发送（未连接或未注册）")
+        time.sleep(0.05)
+
+        # 3. Re-enable, force fresh frames, read the new zero back.
+        self.enable()
+        self._can.control_mit_stream(q_target=0.0, kp=0.0, kd=0.0,
+                                     duration_s=0.2)
+        self._can.update_state(timeout_s=0.3)
+        after = self._can.get_position()
+        return WriteZeroResult(before_rad=before, after_rad=after)
+
     # ═══════════════════════════════════════════════════════════════════
     # Motion — mid-level
     # ═══════════════════════════════════════════════════════════════════
@@ -1288,10 +1445,26 @@ class LiteGrip:
         kp: Optional[float] = None,
         kd: Optional[float] = None,
         duration: float = 0.5,
-    ) -> bool:
-        """Move to an absolute position in millimetres."""
+    ) -> MoveResult:
+        """Ramp to an absolute position in millimetres.
+
+        The target is one point on the closed-to-open travel; the move itself is
+        the bounded ramp described in :meth:`goto_rad`.
+
+        Raises:
+            CommandError: ``position_mm`` is not a finite number, or the
+                configuration is uncalibrated — see :meth:`goto_rad`.  A NaN has
+                no position on the travel; letting it through would press the
+                jaws onto one of the stops (the clamp below turns it into an end
+                of the calibrated range), which is a move nobody asked for.
+        """
         self._check_connected()
         self._check_enabled()
+        if not math.isfinite(position_mm):
+            raise CommandError(
+                f"目标位置不是有限数：position_mm={position_mm!r}。"
+                "拒绝下发：NaN 落在下面的限位 clamp 里会变成量程的一端，"
+                "也就是一个调用方没要过的真实位置。")
         # Opening may increase or decrease the motor rad count depending on the
         # mount; close_sign carries that, so this works for both.
         position_rad = (self._config.pos_closed_rad
@@ -1307,32 +1480,68 @@ class LiteGrip:
         dq_target: float = 0.0,
         tau_feedforward: float = 0.0,
         duration: float = 0.5,
-    ) -> bool:
-        """Move to an absolute position in radians (streams MIT frames)."""
-        self._check_connected()
-        self._check_enabled()
-        if self._can is None:
-            return False
+    ) -> MoveResult:
+        """Ramp to an absolute position in radians.
 
-        kp = kp if kp is not None else self._config.kp
-        kd = kd if kd is not None else self._config.kd
+        One linear ramp over ``duration`` seconds: the speed is the measured
+        distance divided by it, every frame carries the matching velocity
+        feed-forward, and each frame's command leads the measured position by at
+        most :attr:`MotionConfig.max_lead_mm`.  The first frame is one ramp step,
+        never a step command to the target — at the shipped ``kp`` of 100 Nm/rad
+        any error past ~0.1 rad saturates the DM4310's ±10 Nm frame range, and a
+        saturated frame overshoots the target instead of stopping on it.
 
-        # Clamp between the two calibrated limits, whichever is numerically
-        # larger (the ordering flips on a reverse mount).
-        lo = min(self._config.pos_closed_rad, self._config.pos_open_rad)
-        hi = max(self._config.pos_closed_rad, self._config.pos_open_rad)
-        position_rad = max(lo, min(hi, position_rad))
+        The target is clamped into the calibrated range.  Arrival is decided
+        after the ramp, while the jaws hold the target for
+        :attr:`MotionConfig.settle_s`, so a call takes about ``duration`` plus
+        that hold.
 
-        try:
-            return self._can.control_mit_stream(
-                q_target=position_rad,
-                kp=kp, kd=kd,
-                duration_s=duration,
-                dq_target=dq_target,
-                tau_feedforward=tau_feedforward,
-            )
-        except Exception as e:
-            raise CommError(f"位置控制失败: {e}")
+        Returns:
+            :class:`MoveResult`.  ``ok`` means the jaws arrived inside
+            :attr:`MotionConfig.reach_tol` without stalling.  A call whose frames
+            never went out, or that was blocked on the way, comes back ``False``:
+            running the command and moving +0.000 mm is not success, whatever the
+            screen said before (measured on 2026-10-12).
+
+        Raises:
+            CommandError: ``position_rad`` is not a finite number, ``duration``
+                is not a positive finite number, ``dq_target`` or
+                ``tau_feedforward`` is not 0, or the configuration is
+                uncalibrated.  The finiteness check is deliberately *above* the
+                clamp: ``min`` / ``max`` compare false against a NaN, so the
+                clamp would answer it with one of the calibrated limits — a real
+                position that was never asked for.
+
+                The calibration check is there because the clamp below is not a
+                safety net while ``pos_closed_rad`` / ``pos_open_rad`` are still
+                the placeholder defaults — it is arithmetic on numbers that
+                describe no real travel, and it produces a real target.  On the
+                defaults ``goto(40.0)`` lands at ``+0.61 rad``, past this unit's
+                closed stop at ``+0.05 rad``, so the jaws are driven into it and
+                press there.  Every other motion already refuses through
+                ``_check_calibrated``; this was the way around it.
+
+                ``dq_target`` / ``tau_feedforward`` are refused rather than
+                ignored: the ramp derives its velocity feed-forward from the
+                schedule, and silently dropping a value the caller passed is
+                worse than saying no.
+        """
+        if dq_target != 0.0:
+            raise CommandError(
+                f"goto_rad 不再接受 dq_target={dq_target!r}：定位走的是按帧排程"
+                "的斜坡，速度前馈由斜坡自己按「距离 ÷ 时长」给，再给一个会和它"
+                "打架。")
+        if tau_feedforward != 0.0:
+            raise CommandError(
+                f"goto_rad 不再接受 tau_feedforward={tau_feedforward!r}：斜坡"
+                "不带前馈力矩。要出力请用 grasp()。")
+        if not math.isfinite(duration) or duration <= 0.0:
+            raise CommandError(
+                f"duration 必须是正的有限数：{duration!r}。整段斜坡的时长就是"
+                "它，速度由实测距离除以它反推 —— 0 或负数没有对应的斜坡（旧实现"
+                "在这个时长里一帧都不发，却返回成功）。")
+        return self._ramp_to_rad(position_rad, duration_s=duration,
+                                 kp=kp, kd=kd)
 
     def move_to(
         self,
@@ -1341,49 +1550,56 @@ class LiteGrip:
         kd: Optional[float] = None,
         tau_feedforward: float = 0.0,
         duration: float = 1.0,
-    ) -> bool:
-        """Sustained move to a target position (longer default duration)."""
+    ) -> MoveResult:
+        """Ramp to a target position (longer default duration).
+
+        The same move as :meth:`goto_rad`; only the default duration differs.
+
+        Raises:
+            CommandError: the configuration is uncalibrated, or a field is
+                refused — see :meth:`goto_rad`.
+        """
         return self.goto_rad(target_rad, kp=kp, kd=kd,
                              tau_feedforward=tau_feedforward,
                              duration=duration)
 
-    def set_force(self, force_n: float, duration: float = 0.3) -> bool:
-        """Apply a gripping force at the current position.
+    def _ramp_to_rad(
+        self,
+        target_rad: float,
+        *,
+        speed_mm_s: float = 0.0,
+        duration_s: Optional[float] = None,
+        kp: Optional[float] = None,
+        kd: Optional[float] = None,
+    ) -> MoveResult:
+        """定位的共用入口：闸门 + clamp + 交给引擎。
 
-        The streamed frames carry the feed-forward torque alone
-        (``kp = kd = 0``), so the force does not depend on where the jaws are:
-        if the object yields under load, the jaws follow it and the grip force
-        stays at the setpoint.  A position or velocity gain would subtract from
-        the feed-forward as soon as the jaws moved — with the default
-        ``rad_to_mm``, a jaw creeping at 3 mm/s lost about 15 N of a 20 N
-        setting.
-
-        Args:
-            force_n: Target force in newtons.
-            duration: Hold time in seconds.
+        :meth:`goto` / :meth:`goto_rad` / :meth:`move_to` / :meth:`home` /
+        :meth:`move_at_speed` / :meth:`move_at_speed_rad` 六条路径都走这里。它们
+        本来就只差三件事：目标怎么给（mm 还是 rad）、给速度还是给时长、以及各自
+        的输入校验；运动本身必须是同一条，见
+        :meth:`GripperActions.ramp_to`。
         """
         self._check_connected()
         self._check_enabled()
+        _check_calibrated(self._config)
+        # 非有限值必须在 clamp 之前拦下：min/max 与 NaN 的比较全为假，clamp 会
+        # 把它折成量程的一端 —— 一个没人要过的真实位置。
+        if not math.isfinite(target_rad):
+            raise CommandError(
+                f"目标位置不是有限数：target_rad={target_rad!r}。"
+                "拒绝下发：NaN 落在下面的限位 clamp 里会变成量程的一端，"
+                "也就是一个调用方没要过的真实位置。")
         if self._can is None:
-            return False
-
-        # Squeezing may mean increasing or decreasing rad depending on the
-        # mount; close_sign carries that.
-        tau_nm = self._config.close_sign * force_n * UnitConversion.N_TO_NM
-        current_pos = self._can.get_position()
-
-        try:
-            return self._can.control_mit_stream(
-                q_target=current_pos,
-                kp=0.0, kd=0.0,
-                duration_s=duration,
-                tau_feedforward=tau_nm,
-            )
-        except Exception as e:
-            raise CommError(f"力控失败: {e}")
+            raise NotInitializedError("没有 CAN 通道 — 请先 connect()")
+        # clamp 的目标直接经 clamp_to_travel 夹进标定行程（两端谁大谁小由安装
+        # 方向决定，它用 min/max，不假设顺序）。
+        return self._actions.ramp_to(
+            clamp_to_travel(self._config, target_rad),
+            speed_mm_s, duration_s=duration_s, kp=kp, kd=kd)
 
     # ═══════════════════════════════════════════════════════════════════
-    # Velocity-controlled moves
+    # Moves specified by speed (the same ramp as the goto family)
     # ═══════════════════════════════════════════════════════════════════
 
     def move_at_speed(
@@ -1392,40 +1608,59 @@ class LiteGrip:
         speed_mm_s: float = 30.0,
         kp: Optional[float] = None,
         kd: Optional[float] = None,
-    ) -> bool:
-        """Move to a target position at a constant linear speed (mm/s).
+    ) -> MoveResult:
+        """Ramp to a target position at a constant linear speed (mm/s).
 
-        Uses MIT mode with velocity feedforward.  The trajectory is a
-        linear ramp from current position to *target_mm*.
+        The same bounded ramp as :meth:`goto_rad`; only the way the speed is
+        given differs — here it is mm/s, which fixes the ramp duration from the
+        measured distance.  There is no separate velocity-controlled
+        implementation any more: the old one stepped a fixed 200 Hz schedule
+        (ignoring :attr:`MotionConfig.frame_interval`), held the target for 20
+        frames regardless of where the jaws were, and dropped every frame's send
+        result.
 
         Args:
-            target_mm: Target position in mm (0=closed, 120=open).
+            target_mm: Target position in mm, measured from the closed stop
+                (``0`` = closed; ``config.max_stroke_mm``, 85 mm by default,
+                = fully open).
             speed_mm_s: Travel speed in mm/s (default 30).
             kp: Position stiffness (default from config).
             kd: Velocity damping.
 
         Returns:
-            True on success.
+            :class:`MoveResult` — the same arrival check as :meth:`goto_rad`,
+            which the old implementation had none of (it returned ``True`` after
+            sending, whatever the jaws did).
+
+        Raises:
+            CommandError: ``target_mm`` or ``speed_mm_s`` is not a finite
+                number, ``speed_mm_s`` is not positive, or the configuration is
+                uncalibrated — see :meth:`goto_rad`.  Both of the shortcuts this
+                method used to take compare false against a NaN, so it would slip
+                past them and reach the ramp arithmetic; and ``speed_mm_s <= 0``
+                used to return ``True`` — "move at 0 mm/s" reported as success.
         """
         self._check_connected()
         self._check_enabled()
+        # Before the shortcuts below: on a placeholder config even a "nothing to
+        # do" comparison is arithmetic on numbers that describe no real travel.
+        _check_calibrated(self._config)
+        for name, value in (("target_mm", target_mm),
+                            ("speed_mm_s", speed_mm_s)):
+            if not math.isfinite(value):
+                raise CommandError(
+                    f"{name} 不是有限数：{value!r}。拒绝下发。")
+        if speed_mm_s <= 0.0:
+            raise CommandError(
+                f"速度必须为正：speed_mm_s={speed_mm_s!r}。速度为 0 或负的"
+                "移动没有对应的斜坡（旧实现把它当成功返回 True）。")
 
-        current_mm = self.get_state().position_mm
-        distance_mm = abs(target_mm - current_mm)
-        if distance_mm < 0.01 or speed_mm_s <= 0:
-            return True
-
-        duration_s = distance_mm / speed_mm_s
-        # Convert to rad (close_sign handles the reverse mount)
-        s = self._config.close_sign
-        current_rad = (self._config.pos_closed_rad
-                       - s * current_mm / self._config.rad_to_mm)
+        # close_sign handles the reverse mount, as in ``goto``.
         target_rad = (self._config.pos_closed_rad
-                      - s * target_mm / self._config.rad_to_mm)
-        speed_rad_s = speed_mm_s / self._config.rad_to_mm
-
-        return self._move_at_speed_rad(
-            current_rad, target_rad, speed_rad_s, duration_s, kp, kd)
+                      - self._config.close_sign * target_mm
+                      / self._config.rad_to_mm)
+        return self._ramp_to_rad(target_rad, speed_mm_s=speed_mm_s,
+                                 kp=kp, kd=kd)
 
     def move_at_speed_rad(
         self,
@@ -1433,8 +1668,11 @@ class LiteGrip:
         speed_rad_s: float = 0.5,
         kp: Optional[float] = None,
         kd: Optional[float] = None,
-    ) -> bool:
-        """Move to a target position at a constant motor speed (rad/s).
+    ) -> MoveResult:
+        """Ramp to a target position at a constant motor speed (rad/s).
+
+        The rad/s spelling of :meth:`move_at_speed`; the ramp is the same one
+        (see :meth:`goto_rad`).
 
         Args:
             target_rad: Target position in rad.
@@ -1443,71 +1681,33 @@ class LiteGrip:
             kd: Velocity damping.
 
         Returns:
-            True on success.
+            :class:`MoveResult`.
+
+        Raises:
+            CommandError: ``target_rad`` or ``speed_rad_s`` is not a finite
+                number, ``speed_rad_s`` is not positive, or the configuration is
+                uncalibrated — see :meth:`goto_rad`.  The clamp would otherwise
+                answer a NaN target with a calibrated limit.
         """
         self._check_connected()
         self._check_enabled()
+        # Same as ``move_at_speed``: the check runs before the ramp arithmetic,
+        # where a NaN would quietly pick a real speed.
+        _check_calibrated(self._config)
+        for name, value in (("target_rad", target_rad),
+                            ("speed_rad_s", speed_rad_s)):
+            if not math.isfinite(value):
+                raise CommandError(
+                    f"{name} 不是有限数：{value!r}。拒绝下发。")
+        if speed_rad_s <= 0.0:
+            raise CommandError(
+                f"速度必须为正：speed_rad_s={speed_rad_s!r}。速度为 0 或负的"
+                "移动没有对应的斜坡（旧实现把它当成功返回 True）。")
 
-        current_rad = self.get_position_rad()
-        distance_rad = abs(target_rad - current_rad)
-        if distance_rad < 0.0001 or speed_rad_s <= 0:
-            return True
-
-        duration_s = distance_rad / speed_rad_s
-        return self._move_at_speed_rad(
-            current_rad, target_rad, speed_rad_s, duration_s, kp, kd)
-
-    def _move_at_speed_rad(
-        self,
-        start_rad: float,
-        target_rad: float,
-        speed_rad_s: float,
-        duration_s: float,
-        kp: Optional[float],
-        kd: Optional[float],
-    ) -> bool:
-        """Core: linear ramp from start to target at constant speed."""
-        if self._can is None:
-            return False
-
-        kp = kp if kp is not None else self._config.kp
-        kd = kd if kd is not None else self._config.kd
-
-        # Clamp target
-        lo = min(self._config.pos_closed_rad, self._config.pos_open_rad)
-        hi = max(self._config.pos_closed_rad, self._config.pos_open_rad)
-        target_rad = max(lo, min(hi, target_rad))
-
-        direction = 1.0 if target_rad > start_rad else -1.0
-
-        interval = 0.005  # 200 Hz
-        steps = max(1, int(duration_s / interval))
-        actual_interval = duration_s / steps
-
-        log.info("move_at_speed: %.4f → %.4f rad @ %.2f rad/s (%.2f s, %d steps)",
-                 start_rad, target_rad, speed_rad_s, duration_s, steps)
-
-        for i in range(steps + 1):
-            frac = i / steps
-            q = start_rad + (target_rad - start_rad) * frac
-            dq = direction * speed_rad_s if i < steps else 0.0
-
-            self._can.control_mit(
-                q_target=q, kp=kp, kd=kd,
-                dq_target=dq, tau_feedforward=0.0)
-
-            if i < steps:
-                self._can.poll(timeout_s=0.0)
-                time.sleep(actual_interval)
-
-        # Hold at target briefly
-        for _ in range(20):
-            self._can.control_mit(
-                q_target=target_rad, kp=kp, kd=kd,
-                dq_target=0.0, tau_feedforward=0.0)
-            time.sleep(0.005)
-
-        return True
+        return self._ramp_to_rad(
+            target_rad,
+            speed_mm_s=speed_rad_s * self._config.rad_to_mm,
+            kp=kp, kd=kd)
 
     # ═══════════════════════════════════════════════════════════════════
     # Calibration
@@ -1664,7 +1864,7 @@ class LiteGrip:
         # zero_pos = close limit, max_pos = open limit; which is numerically
         # larger depends on the mount, so take the magnitude.
         travel = abs(zero_pos - max_pos)
-        rad_to_mm = self._config.max_stroke_mm / travel if travel > 0 else 105.26
+        rad_to_mm = _scale_from_travel(self._config, travel)
 
         result = CalibrationData(
             zero_position=round(zero_pos, 6),      # closed → 0 mm
@@ -1685,7 +1885,8 @@ class LiteGrip:
 
         print(f"\n  标定结果:")
         print(f"    闭合(0mm): {result.zero_position:.6f} rad")
-        print(f"    张开(120mm): {result.max_position:.6f} rad")
+        print(f"    张开({self._config.max_stroke_mm:.0f}mm): "
+              f"{result.max_position:.6f} rad")
         print(f"    行程:     {result.travel_range:.6f} rad  "
               f"({result.travel_mm:.1f} mm)")
         print(f"    转换系数: {result.rad_to_mm:.1f} mm/rad")
@@ -1932,8 +2133,8 @@ class LiteGrip:
         self._check_enabled()
         if mode not in ("master", "slave"):
             raise ValueError(f"mode must be 'master' or 'slave', got {mode!r}")
-        # Before anything is enabled or driven: ``send_mit_frame`` and
-        # ``goto_rad`` do not check ``calibrated`` themselves.
+        # Before anything is enabled or driven: ``send_mit_frame`` does not
+        # check ``calibrated`` itself (``goto_rad`` now does).
         check_ready(self.config)
         if self._teleop is not None and self._teleop.is_running:
             raise TeleopBusyError("teleop is already running")

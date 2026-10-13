@@ -161,6 +161,14 @@ class StubGripper:
         # alone — the SDK's silent fallback, faithfully reproduced.
         self.ignore_calibration = False
 
+        # ``write_zero``: what the drive reads back afterwards, whether the
+        # re-enable took, and what to raise instead of doing any of it.  The
+        # SDK's own method discards its ``enable()`` result, so the stub models
+        # the motor rather than the return value.
+        self.zero_error: Exception | None = None
+        self.zero_after_rad = 0.0
+        self.zero_enabled = True
+
         # ``position_mm`` is a sentinel: the backend must not use it.
         self.state = SimpleNamespace(
             position_rad=self.config.pos_closed_rad,
@@ -216,6 +224,25 @@ class StubGripper:
 
     def stop(self) -> None:
         self.calls.append(("stop",))
+
+    # ── maintenance ─────────────────────────────────────────────────────────
+    def write_zero(self) -> litegrip.WriteZeroResult:
+        """The SDK's sequence, in the order that matters here: read, disable,
+        0xFE, re-enable — and then report the read-back without saying whether
+        the re-enable itself worked."""
+        self.calls.append(("write_zero",))
+        if self.zero_error is not None:
+            # ``Gripper.write_zero`` presses 失能 before it sends 0xFE, so a
+            # failure raised here has already left a dark motor behind.
+            self.is_enabled = False
+            raise self.zero_error
+        before = self.state.position_rad
+        self.is_enabled = False
+        self.state.position_rad = self.zero_after_rad
+        self.is_enabled = self.zero_enabled
+        return litegrip.WriteZeroResult(
+            before_rad=before, after_rad=self.zero_after_rad
+        )
 
     # ── calibration ─────────────────────────────────────────────────────────
     def load_calibration(self, path: str | None = None) -> bool:
@@ -333,6 +360,7 @@ class TestSdkSurface:
             "stop",
             "load_calibration",
             "save_calibration",
+            "write_zero",
         } <= attributes
 
     def test_only_public_sdk_names_are_imported(self, tree: ast.Module) -> None:
@@ -526,6 +554,82 @@ class TestPrimitives:
         assert backend.poll() is True
         backend.disconnect()
         assert backend.poll() is False
+
+
+# ── 标零 ────────────────────────────────────────────────────────────────────
+class TestTheZeroWrite:
+    """The one SDK convenience method this seam exposes, and the only reason it
+    is allowed to be one.
+
+    Everything else in ``real.py`` is a primitive because the console has to own
+    the timing, the speed and the E-stop.  ``write_zero`` is off the control
+    path entirely — one-shot, operator-initiated, nowhere near the tick — so the
+    SDK's own disable/re-enable sequence is used rather than reimplemented, and
+    what this class tests is the translation around it.
+    """
+
+    def test_the_write_reaches_the_sdk_and_the_result_is_ours(self, backend) -> None:
+        _stub(backend).state.position_rad = 1.234
+        _stub(backend).zero_after_rad = 0.0
+
+        result = backend.write_zero()
+
+        assert ("write_zero",) in _stub(backend).calls
+        assert result.before_rad == pytest.approx(1.234)
+        assert result.after_rad == pytest.approx(0.0)
+        assert result.tolerance_rad == pytest.approx(1e-3)
+        assert result.ok
+
+    def test_it_refuses_a_disabled_motor_before_touching_the_sdk(self, backend) -> None:
+        """A DM drive ignores 0xFE while it is disabled, so this is not a
+        shortcut: sending it anyway is a silent no-op the operator would read as
+        a zero that worked."""
+        backend.disable()
+
+        with pytest.raises(NotReady, match="标零需要电机使能"):
+            backend.write_zero()
+
+        assert ("write_zero",) not in _stub(backend).calls
+
+    def test_a_motor_left_disabled_by_the_write_is_reported_as_such(self, backend) -> None:
+        """The SDK re-enables around the 0xFE and throws that result away, so a
+        read-back of 0 is no promise that the motor came back.  The seam reports
+        the state rather than retrying: the alert and fault signals belong to the
+        worker, which is the object that owns them."""
+        _stub(backend).zero_enabled = False
+
+        result = backend.write_zero()
+
+        assert result.ok, "the drive accepted the frame"
+        assert result.enabled is False, "and the motor is nevertheless dark"
+
+    def test_a_dead_interface_is_a_link_problem_not_a_motor_one(self, backend) -> None:
+        _stub(backend).zero_error = _sdk_link_error()
+
+        with pytest.raises(LinkDown) as excinfo:
+            backend.write_zero()
+
+        assert "can0" in str(excinfo.value)
+
+    def test_a_latched_fault_surfaces_as_a_fault_not_a_failure(self, backend) -> None:
+        _stub(backend).zero_error = LiteGripError(
+            "driver refused", error_code=constants.ERROR_UV
+        )
+
+        with pytest.raises(FaultActive) as excinfo:
+            backend.write_zero()
+
+        assert excinfo.value.code == constants.ERROR_UV
+        assert "欠压" in str(excinfo.value)
+
+    def test_anything_else_is_reported_as_a_failed_write(self, backend) -> None:
+        """The operator's next move is the same on both — re-enable and
+        re-calibrate — but the log has to say what happened, and "未确认完成" is
+        not a diagnosis."""
+        _stub(backend).zero_error = LiteGripError("0xFE 未能发送")
+
+        with pytest.raises(BackendError, match="标零失败"):
+            backend.write_zero()
 
 
 class TestFrameRefusal:

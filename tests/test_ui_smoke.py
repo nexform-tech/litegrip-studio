@@ -87,6 +87,7 @@ class FakeSignals(QObject):
     alert = pyqtSignal(str, str)
     alert_cleared = pyqtSignal()
     busy = pyqtSignal(bool, str)
+    zero_notice = pyqtSignal(str, str)
 
 
 class FakeBackend:
@@ -357,6 +358,67 @@ class TestTheWiring:
         worker.motion_state.emit("SERVO")
 
         assert ("state", "运动状态：SERVO") in window.lines
+
+    def test_the_zero_notice_reaches_the_status_page(self, window, worker) -> None:
+        """It goes to the page's own banner rather than the window's, because it
+        is a standing caveat on the readings beside it — not an alert about an
+        event, and not something the next frame supersedes."""
+        worker.zero_notice.emit("电机已标零：标定需要重做", "请在重新标定之前不要按毫米运动")
+
+        severity, headline, detail = window.status_page.zero_alert
+
+        assert severity == "warn"
+        assert "标零" in headline
+        assert "重新标定" in detail
+        assert window.alert_banner.severity is None, "and not on the window banner"
+
+    def test_the_operator_can_take_the_zero_notice_down(self, window, worker) -> None:
+        worker.zero_notice.emit("电机已标零：标定需要重做", "请在重新标定之前不要按毫米运动")
+
+        worker.zero_notice.emit("", "")
+
+        assert window.status_page.zero_alert == (None, "", "")
+        assert not window.status_page.zero_alert[0]
+
+    def test_the_zero_button_waits_for_a_connection(self, window, worker) -> None:
+        """The worker checks the motor being enabled and answers with a reason;
+        the page only refuses what it can be sure of before asking.  A greyed-out
+        button that says nothing is how an operator concludes the console is
+        broken, so the third precondition is deliberately not tracked here."""
+        assert not window.status_page.zero_button.isEnabled()
+
+        worker.conn_state.emit(CONN_CONNECTED, "已连接")
+
+        assert window.status_page.zero_button.isEnabled()
+
+        worker.conn_state.emit(CONN_DISCONNECTED, "已断开")
+
+        assert not window.status_page.zero_button.isEnabled()
+
+    def test_the_zero_button_is_greyed_for_the_duration_of_the_write(
+        self, window, worker
+    ) -> None:
+        """The call takes the axis for up to a second and cannot be interrupted,
+        so a second press queued behind it would zero the axis twice — the second
+        time at whatever pose the jaws had drifted to."""
+        worker.conn_state.emit(CONN_CONNECTED, "已连接")
+
+        worker.busy.emit(True, "正在写入编码器零点（电机将短暂失能）…")
+
+        assert not window.status_page.zero_button.isEnabled()
+
+        worker.busy.emit(False, "")
+
+        assert window.status_page.zero_button.isEnabled(), "and back when it is done"
+
+    def test_the_dismiss_button_clears_the_notice_at_the_worker(self, window, worker) -> None:
+        """A page-local flag would come straight back the next time anything
+        re-rendered it, and no later frame contradicts the warning — the
+        calibration measured against the old offset does not become correct
+        again."""
+        window.status_page.zero_dismiss.click()
+
+        assert cmd.ClearZeroNotice() in worker.commands
 
 
 class TestTheLog:
@@ -701,6 +763,8 @@ class TestEveryHandlerReachesItsEnd:
         worker.log.emit("info", "已连接")
         worker.alert.emit("warn", "60 秒内多次欠压，已限速")
         worker.busy.emit(True, "正在使能（可能需要数秒）…")
+        worker.zero_notice.emit("电机已标零：标定需要重做", "请在重新标定之前不要按毫米运动")
+        worker.zero_notice.emit("", "")
 
         assert raised == []
 

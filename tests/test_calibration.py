@@ -64,6 +64,11 @@ from conftest import REPO_ROOT, shipped_factory_calibrations
 # ``work_stroke_mm`` is upstream's and reaches nothing in this console: the SDK
 # reads it only in ``Gripper.open``, which the console never calls.  It is here
 # because the guard compares the whole key set, and the key set is the file's.
+#
+# ``kp`` moved 5.0 → 100.0 upstream at ``5b7da89`` ("align the factory
+# calibration with the default stiffness").  It reaches no motion here — the
+# console streams its own MIT frames with its own gains — but the calibration
+# page prints the loaded value, and the SDK writes it back out on a save.
 FACTORY_RAW = {
     "channel": "can0",
     "can_id": 8,
@@ -75,7 +80,7 @@ FACTORY_RAW = {
     "rad_to_mm": 61.01229326764816,
     "work_stroke_mm": 80.0,
     "motor_type": "DM4310",
-    "kp": 5.0,
+    "kp": 100.0,
     "kd": 2.0,
     "grasp_torque_threshold": 0.5,
 }

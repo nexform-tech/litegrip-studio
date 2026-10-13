@@ -15,6 +15,7 @@ import pytest
 from litegrip_studio.core import commands
 from litegrip_studio.core.commands import (
     BackOff,
+    ClearZeroNotice,
     Close,
     ConfirmProbeLimit,
     Connect,
@@ -33,6 +34,7 @@ from litegrip_studio.core.commands import (
     StartGuidedCalibration,
     StartManualCalibration,
     Stop,
+    WriteZero,
 )
 
 
@@ -101,6 +103,8 @@ class TestDescribe:
             RecordCloseLimit(),
             Heartbeat(),
             Inject({"uv": True, "obj_mm": 40.0}),
+            WriteZero(),
+            ClearZeroNotice(),
         ],
     )
     def test_it_is_non_empty_and_is_not_the_class_name(self, cmd) -> None:
@@ -156,6 +160,49 @@ class TestDescribe:
     def test_the_injection_reports_its_values(self) -> None:
         text = Inject({"uv": True, "obj_mm": 40.0}).describe()
         assert "uv=True" in text and "obj_mm=40.0" in text
+
+
+class TestMaintenance:
+    """The two commands behind 电机标零 and its warning.
+
+    They are the console's only irreversible action and its only manually
+    cleared one, so the two properties that make that survivable — the write
+    carries no pose, and neither command is folded by the queue — are worth
+    asserting rather than assuming.
+    """
+
+    def test_the_zero_names_the_action_printed_on_the_button(self) -> None:
+        assert "标零" in WriteZero().describe()
+
+    def test_the_zero_line_says_what_it_does_to_the_angle(self) -> None:
+        """The log is the only record of an irreversible write, and "标零" alone
+        does not say which of the two frames moved."""
+        assert "零点" in WriteZero().describe()
+
+    def test_the_zero_carries_no_pose(self) -> None:
+        """A pose in the command would be a pose from before the confirmation
+        dialog, and the jaws can be pushed in the second between the two."""
+        assert dataclasses.fields(WriteZero()) == ()
+        assert dataclasses.fields(ClearZeroNotice()) == ()
+
+    def test_the_dismissal_is_distinguishable_from_the_write_in_the_log(self) -> None:
+        assert ClearZeroNotice().describe() != WriteZero().describe()
+        assert "标零" in ClearZeroNotice().describe()
+
+    def test_neither_is_coalescable(self) -> None:
+        """Two zero writes are two flash writes at two different poses; two
+        dismissals are an operator pressing a button twice.  Folding either
+        would drop something the operator asked for by name."""
+        assert WriteZero not in commands.COALESCABLE
+        assert ClearZeroNotice not in commands.COALESCABLE
+
+    def test_two_zero_writes_are_both_kept(self) -> None:
+        seq = [WriteZero(), WriteZero()]
+        assert commands.coalesce(seq) == seq
+
+    def test_a_dismissal_is_never_swallowed_by_the_write_before_it(self) -> None:
+        seq = [WriteZero(), ClearZeroNotice()]
+        assert commands.coalesce(seq) == seq
 
 
 class TestCoalesce:

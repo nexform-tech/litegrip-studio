@@ -26,12 +26,17 @@ unusable here for a concrete reason:
 ``calibrate_guided``/``calibrate_manual``
     Read stdin / rely on Ctrl+C and print to stdout — unreachable from a worker
     thread.  Reimplemented in :mod:`litegrip_studio.core.calibration_fsm`.
+
+One exception is named rather than left implicit: :meth:`GripperBackend.write_zero`.
+It is an SDK convenience method, and it is used — see its docstring for why this
+one does not belong in the list above.
 """
 
 from __future__ import annotations
 
 import threading
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any
 
 from ..calibration import CalibrationInfo
@@ -76,6 +81,40 @@ class NotReady(BackendError):
 
 class Unsupported(BackendError):
     """The operation does not apply to this backend."""
+
+
+@dataclass(frozen=True)
+class ZeroResult:
+    """What an encoder-offset write did, in the console's own terms.
+
+    The SDK's :class:`~litegrip.actions.WriteZeroResult` is not carried across
+    the seam: it is a frozen dataclass today, an SDK type tomorrow, and the
+    console would be importing it for no reason — the same argument that keeps
+    ``Telemetry`` ours rather than ``MotorState``.
+    """
+
+    #: The angle the encoder reported immediately before the offset was written.
+    before_rad: float
+    #: The angle read back after the motor was re-enabled.  Near zero when the
+    #: drive accepted the frame.
+    after_rad: float
+    tolerance_rad: float = 1e-3
+    #: Whether the motor is enabled *afterwards*, read from the drive rather
+    #: than assumed.  The SDK's own sequence disables and re-enables around the
+    #: frame, and discards the result of its re-enable (gripper.py:1431), so a
+    #: read-back of ~0 is no promise that the motor came back.
+    enabled: bool = True
+
+    @property
+    def ok(self) -> bool:
+        """Whether the read-back came back ~0, mirroring the SDK.
+
+        It means the 0xFE frame was sent and the drive took it — not that the
+        calibration on file still describes this gripper.  Every angle in it was
+        measured against the old offset, so a *successful* zero is exactly the
+        case the operator has to be warned about.
+        """
+        return abs(self.after_rad) <= self.tolerance_rad
 
 
 class GripperBackend(ABC):
@@ -246,6 +285,34 @@ class GripperBackend(ABC):
     def calibrate_auto(self, **kwargs: Any) -> Any:
         """Fully automatic stall-detecting calibration.  Optional."""
         raise Unsupported("this backend does not support automatic calibration")
+
+    def write_zero(self) -> ZeroResult:
+        """Declare the current encoder angle to be zero, in the drive's flash.
+
+        The one SDK convenience method this seam exposes, and the reasons the
+        others are excluded do not apply to it:
+
+        * it does not block on ``control_mit_stream`` — it drives nothing and
+          returns in a few hundred milliseconds, so the E-stop story is a
+          bounded pause rather than an uninterruptible move;
+        * it takes no target, so there is no speed setting for it to ignore and
+          no calibration-derived range for it to clamp into;
+        * it is not on the control path at all.  It runs once, when an operator
+          asks for it, and nothing the FSM does depends on its result.
+
+        Reimplementing the disable → 0xFE → re-enable sequence here would be a
+        second implementation of a fragile hardware ordering, and the one thing
+        a console must not do with a motor's flash is have its own opinion about
+        it.
+
+        Irreversible, and it changes the meaning of every angle the console
+        holds.  Optional, and refusing is a legitimate answer: the simulator
+        does, because ``Plant.q`` is at once its physics state and the angle it
+        reports (:mod:`litegrip_studio.backend.plant`), and shifting only the
+        reported frame would make the plant disagree with the hardware it is
+        supposed to stand in for.
+        """
+        raise Unsupported("this backend cannot write an encoder zero")
 
     def inject(self, **kwargs: Any) -> None:
         """Simulator only: inject faults or plant conditions."""
