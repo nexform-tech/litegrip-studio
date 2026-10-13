@@ -49,13 +49,16 @@ from conftest import REPO_ROOT, shipped_factory_calibrations
 #
 # ``FACTORY_RAW`` is this repository's ``factory_calibration.json``, verbatim,
 # key set included, and ``TestTheFixtureIsTheFileItClaims`` below compares the
-# two so a fixture that drifts from the file cannot pass quietly.  The file used
-# to be the C++ SDK's copy of it; upstream ``b9caae8`` re-measured the Python
-# SDK's shipped files for this unit, which is how the override went away.
+# two so a fixture that drifts from the file cannot pass quietly.  That file is
+# the vendored SDK's one declared local override (``VENDORED.md``): it carries
+# this bench's hand-recorded pair, taken 2026-10-13, where upstream carries the
+# geometry its motor-driven probe measured.  So the fixture is not merely a copy
+# of the SDK's file — it is a copy of a file this repository decided on, and a
+# dozen tests below stand on the numbers it carries.
 #
-# Its ``rad_to_mm`` is 61.01229326764816, which is also the scale the console
-# derives for itself: 1.409552 rad of span under ``DEFAULT_TRAVEL_MM`` plus
-# ``SPAN_INSET_MM`` is 86 / 1.409552, the same number.  The console derives
+# Its ``rad_to_mm`` is 73.45731105242119, which is also the scale the console
+# derives for itself: 1.170748 rad of span under ``DEFAULT_TRAVEL_MM`` plus
+# ``SPAN_INSET_MM`` is 86 / 1.170748, the same number.  The console derives
 # rather than trusts, and a file that disagreed would only warn — so the
 # agreement is not assumed anywhere, it is pinned in
 # ``TestTheFixtureIsTheFileItClaims`` as the thing that says these numbers
@@ -72,17 +75,18 @@ from conftest import REPO_ROOT, shipped_factory_calibrations
 FACTORY_RAW = {
     "channel": "can0",
     "can_id": 8,
-    "mst_id": 24,
     "canfd_mode": False,
-    "zero_position_rad": 0.052071,
-    "max_position_rad": -1.357481,
-    "travel_range_rad": 1.409552,
-    "rad_to_mm": 61.01229326764816,
+    "calibrated": True,
+    "zero_position_rad": 0.029564,
+    "max_position_rad": -1.141184,
+    "travel_range_rad": 1.170748,
+    "rad_to_mm": 73.45731105242119,
     "work_stroke_mm": 80.0,
     "motor_type": "DM4310",
     "kp": 100.0,
     "kd": 2.0,
     "grasp_torque_threshold": 0.5,
+    "mst_id": 24,
 }
 
 USER_RAW = {

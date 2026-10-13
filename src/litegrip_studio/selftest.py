@@ -44,10 +44,13 @@ from .units import Limits, frame_mismatch
 #: there, not the defect to catch, and ``agrees`` records which of the two a
 #: dataset is.
 #:
-#: The template is *not* the factory file, though the two now carry the same
-#: angles: the factory file is a different schema and is checked as a file, by
-#: :func:`check_the_fallback_calibration_is_usable`.  The reverse template carries
-#: these same numbers mirrored, so it is the same case again.
+#: The template is *not* the factory file, and since the factory file was
+#: overridden with this bench's hand-recorded pair the two no longer carry the
+#: same angles either: they are different schemas, read from different places,
+#: and the factory file is checked as a file by
+#: :func:`check_the_fallback_calibration_is_usable` rather than from this table.
+#: The reverse template carries the template's numbers mirrored, so it is the
+#: same case again.
 KNOWN_CALIBRATIONS = (
     (0.0, 1.14, 120.0 / 1.14, False, "旧 SDK 默认值（2026-10-10 换 85 mm 之前写出的文件）"),
     (
