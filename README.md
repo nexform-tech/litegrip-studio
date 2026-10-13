@@ -137,12 +137,14 @@ the machine down with it. The console does this by itself when 连接 hits it.
 
 ## 4. Calibrate before you move anything
 
-The console starts on the **factory calibration file bundled with the SDK**, which describes
-whichever unit it was taken on. On a different gripper, every millimetre and every force reading is
-wrong.
+The console starts on the **factory calibration file bundled with the SDK**, which was recorded on
+the unit it ships with. Another gripper of the same design is not a different machine: the readings
+are the right order of magnitude and the ends of the travel are roughly where you expect them. What
+differs between two units is their manufacturing tolerance — the jaws, the linkage, the encoder
+zero — so a reading can be a little off, and removing that is what a calibration is for.
 
-So on real hardware, run 自动标定 from the 标定 tab before touching the slider. Until there is a
-calibration that belongs to *your* gripper, treat every number on screen as approximate.
+So on real hardware, run 自动标定 from the 标定 tab before you rely on the numbers. Until a
+calibration belongs to *your* gripper, treat what is on screen as close rather than exact.
 
 If the calibration page shows 运动闸门：已阻断 (`BLOCKED`), nothing will move until you deal with it.
 That is the design: the console refuses motion rather than driving by numbers it cannot vouch for.
@@ -273,8 +275,8 @@ than upstream's probe-measured numbers; `src/litegrip/VENDORED.md` records the o
 included.
 
 A named file that is missing, or that exists but cannot be used, is reported as such and **stops
-there** — the console does not quietly fall back to the factory numbers, because millimetre readings
-that are systematically wrong with nothing on screen to show it is the worst available outcome.
+there** — the console does not quietly fall back to the factory numbers, because moving on numbers
+from a file you did not choose, with nothing on screen to say so, is the worst available outcome.
 
 ### The gate
 
@@ -411,10 +413,12 @@ The simulated backend refuses it outright, reporting 本后端不支持标零.
 - **The SDK's own `calibrate()` is not offered.** It cannot be interrupted and drives the motors for
   about 24 seconds — better to offer the two probes on the calibration page than a 24-second window
   in which the emergency stop does nothing.
-- **The factory calibration is the default, not a measurement of your gripper.** On another unit it
-  does not crash; it makes every millimetre wrong. The console catches that case: the file's range
-  belongs to the unit it was taken on, so a different gripper's first reading lands outside it and
-  the gate goes `BLOCKED` before a frame is sent.
+- **The factory calibration is the default, not a measurement of *your* gripper.** It was recorded
+  on the unit it ships with, so on another gripper of the same design the readings are close rather
+  than exact, off by that unit's manufacturing tolerance. The console does not try to judge that —
+  but it does catch a file recorded against a different encoder zero, a reassembled unit or a
+  different design, because such a file's travel does not contain the angle the jaws actually
+  report, and the gate goes `BLOCKED` before a frame is sent.
 - **The travel is a constant for this bench**, 85.0 mm in `constants.DEFAULT_TRAVEL_MM`. It decides
   both the millimetre conversion and the slider's range, so a console told the wrong one reports
   every millimetre wrong while looking healthy. Moving this console to another gripper means editing
