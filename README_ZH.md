@@ -664,6 +664,11 @@ tarball）退回 `version.py` 里的 `BASE_VERSION`，它的值是 `0.0.0`，于
 这两个号都**不是发布版本号**。发版由 semantic-release 按提交历史自动完成，git tag 是唯一
 的事实来源，`pyproject.toml` 里的 `0.0.0-semantic-release` 是占位符，不要手改。
 
+### 设计原理在哪
+
+上面这些「为什么」——架构为什么长这样、滑块背后到底在做什么、标定闸门为什么放在那个位置
+——都在 [`DESIGN.md`](DESIGN.md)（英文）。本文是使用手册。
+
 ---
 
 ## ⚠️ 已知限制

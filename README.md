@@ -817,6 +817,12 @@ Neither of those numbers is **the released version**. Releases are automated by 
 from the commit history, the git tag is the only source of truth, and `0.0.0-semantic-release` in
 `pyproject.toml` is a placeholder that must not be edited by hand.
 
+### Where the reasoning lives
+
+The design notes behind everything above — why the architecture is shaped this way, what the slider
+is actually doing, why the calibration gate sits where it does — are in
+[`DESIGN.md`](DESIGN.md). This file is the manual.
+
 ---
 
 ## ⚠️ Known limitations
