@@ -969,6 +969,31 @@ class TestPaths:
             Path(litegrip.__file__).resolve().parent / "factory_calibration.json"
         )
 
+    def test_the_fallback_file_is_recognised_as_the_fallbacks(self, env) -> None:
+        """The window asks this before writing the path the next launch reads.
+
+        Naming the factory file and naming nothing mean the same thing here, so
+        loading it has to be answered by forgetting the remembered path rather
+        than by writing this one down — otherwise the console reports its own
+        default as a file somebody took."""
+        assert calibration.is_factory_file(calibration.factory_path())
+        assert calibration.is_factory_file(env.factory)
+
+    def test_a_file_the_operator_saved_is_not_the_fallbacks(self, env) -> None:
+        assert not calibration.is_factory_file(env.user)
+        assert not calibration.is_factory_file("/tmp/litegrip_calibration.json")
+
+    def test_nothing_named_is_not_a_factory_file(self) -> None:
+        assert not calibration.is_factory_file(None)
+        assert not calibration.is_factory_file("")
+
+    def test_spelling_does_not_hide_it(self, env) -> None:
+        """The two sides arrive from opposite directions — one from a file
+        dialog, one built from the package location — so a text comparison would
+        miss ``..``, ``~`` and a symlinked package directory."""
+        roundabout = env.factory.parent / ".." / env.factory.parent.name / env.factory.name
+        assert calibration.is_factory_file(roundabout)
+
     def test_the_vendored_factory_file_is_usable(self, monkeypatch) -> None:
         """The fallback is only a fallback if it is valid — otherwise the console
         would refuse to start on a machine that has no problem.

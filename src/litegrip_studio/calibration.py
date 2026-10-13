@@ -154,6 +154,37 @@ def factory_path() -> Path:
     return candidates[0]
 
 
+def is_factory_file(path: str | os.PathLike[str] | None) -> bool:
+    """Whether ``path`` is one of the files the console ships as its fallback.
+
+    The caller needs this to decide what to *remember*.  Naming one of these is
+    not a choice worth writing down: the factory file is what is in effect when
+    nothing is named, so a load of it is answered by forgetting the remembered
+    path rather than by recording this one.  Writing it down instead would put
+    the console on a file whose provenance reads as the operator's own, which is
+    the distinction the whole module is built to keep — and which its "never a
+    save target" rule depends on.
+
+    Resolved rather than compared as text, for the same reason
+    ``backend.real._same_file`` resolves: the two sides arrive from opposite
+    directions, one from whatever the operator clicked in a file dialog and one
+    built from the package's own location.
+    """
+    if not path:
+        return False
+    try:
+        named = Path(path).expanduser().resolve()
+    except OSError:  # pragma: no cover - unresolvable path
+        return False
+    for candidate in factory_candidates():
+        try:
+            if named == candidate.expanduser().resolve():
+                return True
+        except OSError:  # pragma: no cover - unresolvable candidate
+            continue
+    return False
+
+
 def sdk_root() -> Path | None:
     """Where the ``litegrip`` package was imported from, one level up."""
     try:

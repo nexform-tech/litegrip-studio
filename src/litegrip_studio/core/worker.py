@@ -1010,7 +1010,9 @@ class WorkerLoop:
 
         # ── calibration ─────────────────────────────────────────────────────
         elif isinstance(command, cmd.LoadCalibration):
-            self._load_calibration(command.path)
+            # The one load an operator asked for, and the one whose file the next
+            # launch should read.
+            self._load_calibration(command.path, remember=True)
         elif isinstance(command, cmd.SaveCalibration):
             self._save_calibration(command.path)
         elif isinstance(command, cmd.RefreshCalibration):
@@ -1270,7 +1272,23 @@ class WorkerLoop:
     # ── parameters ──────────────────────────────────────────────────────────
 
     # ── calibration ─────────────────────────────────────────────────────────
-    def _load_calibration(self, path: str | None) -> None:
+    def _load_calibration(self, path: str | None, *, remember: bool = False) -> None:
+        """Put a calibration in force, and say what came of it.
+
+        ``remember`` names the one caller the operator drives — 载入文件… — and it
+        is what makes 载入文件… mean "this is the file this bench uses from now
+        on" rather than for the rest of the session.  The other two callers must
+        not set it: :meth:`_connect` loads whatever the backend was handed at
+        launch, whose usual answer is the factory file, and remembering that
+        would write the console's own default down as a file somebody chose;
+        :meth:`_refresh_display` only ever re-reads the path already in force.
+
+        A load the backend rejected is not remembered either, whichever caller
+        asked for it.  The GUI decides what to do with the path — see
+        :meth:`MainWindow._on_calibration_loaded` — because only it holds the
+        settings, and the backend's ``remember_calibration_path`` is what keeps a
+        simulator's file from becoming this bench's own.
+        """
         ok = bool(self.backend.load_calibration(path))
         self._refresh_calibration()
         info = self._info
@@ -1284,6 +1302,8 @@ class WorkerLoop:
             self._log("info", info.describe())
             if info.warnings:
                 self._alert("warn", "；".join(info.warnings))
+            if remember and info.path:
+                self._signals.calibration_loaded.emit(str(info.path))
         else:
             reason = "；".join(info.problems) if info is not None else "未知原因"
             self._alert("error", f"标定不可用：{reason}")
@@ -2105,6 +2125,12 @@ class GripperWorker(QThread):
     calib_ready_to_apply = pyqtSignal(object)
     #: Where an accepted calibration was written, so the GUI can remember it.
     calibration_applied = pyqtSignal(str)
+    #: The path of a file the *operator* named and the console loaded, so the GUI
+    #: can remember it.  Distinct from :attr:`calibration_applied`, which is a
+    #: file this console wrote: a path that arrived from the file dialog is the
+    #: next launch's calibration, and one that was merely resolved at connect is
+    #: not.  Only emitted for a load that worked.
+    calibration_loaded = pyqtSignal(str)
     #: (level, text)
     log = pyqtSignal(str, str)
     #: (level, text) — something the operator must see without opening the log.

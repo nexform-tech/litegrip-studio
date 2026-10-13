@@ -62,7 +62,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from .. import constants
+from .. import calibration, constants
 from ..core import commands as cmd
 from ..core.worker import GateState
 from ..settings import Settings
@@ -300,6 +300,7 @@ class MainWindow(QMainWindow):
             self.calibration_page.set_ready_to_apply
         )
         worker.calibration_applied.connect(self._on_calibration_applied)
+        worker.calibration_loaded.connect(self._on_calibration_loaded)
         worker.log.connect(self._on_log)
         worker.alert.connect(self._on_alert)
         worker.alert_cleared.connect(self._on_alert_cleared)
@@ -455,10 +456,34 @@ class MainWindow(QMainWindow):
         the path it was told, and a file nobody named is not the file in effect —
         so the operator would apply a calibration, restart, and find the factory
         numbers back.
+        """
+        self._remember_calibration_path(path)
 
-        The simulator is excluded by the backend, not by this method: its file
-        describes a plant, and a later real run that loaded it would measure the
-        bench with a simulation's numbers.
+    def _on_calibration_loaded(self, path: str) -> None:
+        """Remember the file the operator loaded, so the next launch reads it.
+
+        A load used to last exactly as long as the run: the console read the file,
+        ran on it, and the next start went back to whatever path the settings
+        file held.  When that path is the reason the operator is loading a file
+        at all, the error they just cleared comes back on every launch.
+
+        The factory file is the exception, and it is not written down.  It is what
+        is in effect when nothing is named, so loading it is answered by
+        forgetting the path instead — which is what "back to the factory
+        calibration" should mean.  Recording it would leave the page labelling
+        the console's own default as the operator's file, and the backend would
+        then refuse to save over it for good reason.
+        """
+        self._remember_calibration_path(
+            None if calibration.is_factory_file(path) else path
+        )
+
+    def _remember_calibration_path(self, path: str | None) -> None:
+        """Write the path the next launch will load; clear it when given None.
+
+        The simulator is excluded by the backend's own flag rather than by this
+        method: its file describes a plant, and a later real run that loaded it
+        would measure the bench with a simulation's numbers.
         """
         if self._settings is None:
             return

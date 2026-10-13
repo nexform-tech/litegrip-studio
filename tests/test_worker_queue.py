@@ -2351,6 +2351,65 @@ class TestRefreshingTheDisplay:
         assert bench.loop.info.provenance == calibration.PROVENANCE_MEMORY
 
 
+class TestTheLoadedFileIsNamedForTheGui:
+    """载入文件… is what tells the GUI which file the next launch should read.
+
+    The worker only reports the path; the settings belong to the window.  What
+    matters here is *which* loads report one: the operator's, and only when it
+    worked.  A load the console resolved on its own — at connect — usually lands
+    on the factory file, and writing that down would turn the console's own
+    default into a file somebody chose.
+    """
+
+    def _user_file(self, tmp_path) -> tuple[object, str]:
+        target = tmp_path / "bench.json"
+        target.write_text("{}", encoding="utf-8")
+        info = calibration.CalibrationInfo(
+            provenance=calibration.PROVENANCE_USER, limits=LIMITS, path=str(target)
+        )
+        return info, str(target)
+
+    def test_the_file_the_operator_chose_is_reported(self, tmp_path) -> None:
+        info, target = self._user_file(tmp_path)
+        bench = Bench(RecordingBackend(info=info))
+        bench.bring_up()
+        bench.signals.calls.clear()
+
+        bench.send(cmd.LoadCalibration(target))
+
+        assert bench.signals.first("calibration_loaded") == (target,)
+
+    def test_a_load_the_backend_rejected_is_not_reported(self, tmp_path) -> None:
+        """Remembering a file that would not load is how the next launch starts
+        on the error the operator just watched being refused."""
+        info = calibration.CalibrationInfo(
+            provenance=calibration.PROVENANCE_INVALID,
+            limits=None,
+            path="/tmp/broken.json",
+            problems=("超出合理范围",),
+        )
+        bench = Bench(RecordingBackend(info=info))
+        bench.bring_up()
+
+        bench.send(cmd.LoadCalibration("/tmp/broken.json"))
+
+        assert bench.loop.info.provenance == calibration.PROVENANCE_INVALID
+        assert not bench.signals.has("calibration_loaded")
+
+    def test_neither_connecting_nor_refreshing_names_a_file(self, tmp_path) -> None:
+        info, _target = self._user_file(tmp_path)
+        bench = Bench(RecordingBackend(info=info))
+
+        bench.bring_up()
+        assert not bench.signals.has("calibration_loaded"), "connect named a file"
+
+        bench.signals.calls.clear()
+        bench.send(cmd.RefreshCalibration())
+
+        assert bench.loop.info.provenance == calibration.PROVENANCE_USER
+        assert not bench.signals.has("calibration_loaded"), "refresh named a file"
+
+
 class TestTheAxisIsHandedBackAfterAProbe:
     """An enabled motor must keep being told what to do, and a probe is where
     it is easiest to stop telling it.
