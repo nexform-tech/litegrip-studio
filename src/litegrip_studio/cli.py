@@ -63,7 +63,7 @@ def build_parser(release: str | None = None) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--calibration", default=None,
-        help="标定文件路径；缺省用上次记住的路径，再回退到 ~/.litegrip 下的默认位置",
+        help="标定文件路径；缺省用设置里记住的路径（仅真机后端），再回退到 SDK 包里带的出厂标定文件",
     )
     parser.add_argument(
         "--log-level", default="INFO",
