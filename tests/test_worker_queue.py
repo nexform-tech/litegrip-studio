@@ -2334,7 +2334,13 @@ class TestRefreshingTheDisplay:
         bench.send(cmd.RefreshCalibration())
 
         assert "load_calibration" not in bench.backend.names()
-        assert str(gone) in bench.signals.alerts()[-1]
+        said = bench.signals.alerts()[-1]
+        assert str(gone) in said
+        # The advice has to be something the console can do.  It used to end at
+        # "clear the calibration path in the settings", which named a screen that
+        # does not exist anywhere in this program.
+        assert calibration.friendly_path(calibration.factory_path()) in said
+        assert "设置" not in said
         assert bench.loop.info.provenance == calibration.PROVENANCE_USER
 
     def test_a_probe_result_in_memory_is_republished_and_nothing_is_read(self) -> None:

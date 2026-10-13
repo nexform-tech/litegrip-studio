@@ -574,7 +574,7 @@ def resolve(
             path=str(named),
             problems=(
                 f"指定的标定文件不存在：{named}",
-                "请重新载入标定文件，或清掉设置里的标定路径以改用出厂标定",
+                f"要改用出厂标定，可载入 SDK 包内的 {friendly_path(factory_path())}",
             ),
             max_stroke_mm=max_stroke_mm,
         )

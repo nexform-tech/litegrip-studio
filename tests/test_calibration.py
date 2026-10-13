@@ -311,7 +311,12 @@ class TestProvenance:
         assert info.provenance == PROVENANCE_MISSING
         assert not info.usable
         assert info.path == str(env.user), "the file the console was told to read"
-        assert "不存在" in " ".join(info.problems)
+        said = " ".join(info.problems)
+        assert "不存在" in said
+        # The way out has to be one the console can take.  This used to read
+        # "clear the calibration path in the settings" and named no such screen.
+        assert calibration.friendly_path(env.factory) in said
+        assert "设置" not in said
 
     def test_nothing_anywhere_is_missing_and_blocks(self, env, monkeypatch) -> None:
         only_the_factory(monkeypatch)

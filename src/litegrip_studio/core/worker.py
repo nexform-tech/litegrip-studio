@@ -79,6 +79,8 @@ from ..calibration import (
     PROVENANCE_MEMORY,
     PROVENANCE_USER,
     CalibrationInfo,
+    factory_path,
+    friendly_path,
 )
 from ..telemetry import Telemetry, TelemetryFrame
 from ..units import frame_mismatch, rad_per_s_to_mm
@@ -1329,10 +1331,16 @@ class WorkerLoop:
             self._log("info", "标定结果在内存中，已重新显示；它尚未保存到文件")
             return
         if not Path(info.path).is_file():
+            # The advice has to name something the console can actually do.  It
+            # used to end at "clear the calibration path in the settings", which
+            # names a screen that does not exist — so it names the file instead,
+            # and one the operator can reach with 载入文件…, which is also the
+            # button that makes the choice stick for the next launch.
             self._alert(
                 "warn",
                 f"标定文件已不存在：{info.path}。仍显示上次读到的结果；"
-                "换成别的文件请按「载入文件…」，改用出厂标定请在设置里清掉标定路径",
+                "换成别的文件请按「载入文件…」，改用出厂标定请载入 SDK 包内的 "
+                f"{friendly_path(factory_path())}",
             )
             return
         self._load_calibration(info.path)
