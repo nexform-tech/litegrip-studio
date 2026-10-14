@@ -89,6 +89,7 @@ from .actions import (
 
 # ── Data models ─────────────────────────────────────────────────────────
 from .models import (
+    STALE_AFTER_S,
     GripperState,
     GripperConfig,
     GripperInfo,
@@ -220,6 +221,7 @@ __all__ = [
     "clamp_to_travel",
     "force_approach_terms",
     # Models
+    "STALE_AFTER_S",
     "GripperState",
     "GripperConfig",
     "GripperInfo",

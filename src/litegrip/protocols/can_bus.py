@@ -54,6 +54,8 @@ class LiteGripCAN:
         self._motor: Optional[MotorState] = None
         self._connected = False
         self._initialized = False
+        # 上一次 MIT 下发为什么没出去 —— 见 last_send_error。
+        self._last_send_error: Optional[Exception] = None
 
     # ═══════════════════════════════════════════════════════════════════
     # Connection
@@ -366,26 +368,30 @@ class LiteGripCAN:
 
         Returns:
             True if the frame was sent, False when there is no connection or the
-                send failed.  A failed send leaves a warning naming the reason —
-                ``False`` alone cannot tell "not enabled" from "the buffer was
-                full for 100 ms", and those need different fixes.
+                send failed.  ``False`` alone cannot tell "not enabled" from
+                "the buffer was full for 100 ms", and those need different
+                fixes, so the reason is kept for :attr:`last_send_error` and
+                logged rather than raised.
 
         Raises:
             CommandError: a field is NaN/infinite, or the torque exceeds the
                 frame's range.  Those are caller bugs rather than transport
-                conditions, so they keep a diagnosable reason instead of being
-                folded into the ``False`` return.
+                conditions, so they are raised instead of being folded into the
+                ``False`` return.
         """
         self._check_motion_command(q_target, kp, kd, dq_target,
                                    tau_feedforward)
         if self._controller is None or self._motor is None:
+            self._last_send_error = NotInitializedError("未连接或未注册")
             return False
         try:
             self._controller.control_mit(
                 self._motor, kp=kp, kd=kd,
                 q=q_target, dq=dq_target, tau=tau_feedforward)
+            self._last_send_error = None
             return True
         except Exception as e:
+            self._last_send_error = e
             log.warning("MIT 帧下发失败（%s）：%r", self._channel, e)
             return False
 
@@ -449,6 +455,7 @@ class LiteGripCAN:
         if interval_s < 0.0:
             raise CommandError(f"interval_s 不能为负：{interval_s!r}。")
         if self._controller is None or self._motor is None:
+            self._last_send_error = NotInitializedError("未连接或未注册")
             return False
 
         ctrl = self._controller
@@ -471,6 +478,9 @@ class LiteGripCAN:
             time.sleep(interval_s)
 
         failed = attempts - sent
+        # 与 control_mit 同一口径：整段没发出去是失败，部分丢帧也是失败，
+        # 两种情况都把原因留给 last_send_error；全部发出去就清空。
+        self._last_send_error = last_error if failed else None
         if failed:
             log.warning("%s：%d 帧里 %d 帧没发出去（最后一次：%r）",
                         self._channel, attempts, failed, last_error)
@@ -485,11 +495,80 @@ class LiteGripCAN:
     # Status
     # ═══════════════════════════════════════════════════════════════════
 
+    @property
+    def last_send_error(self) -> Optional[Exception]:
+        """Why the last :meth:`control_mit` / :meth:`control_mit_stream` did not
+        send, or ``None`` if it sent.
+
+        The ``False`` return carries no reason, and the warning that does is
+        only as visible as the caller's logging setup.  This keeps the exception
+        itself — type and all — so a layer above can report *why*, and can tell
+        "not registered" from "the write failed" without guessing.
+        """
+        return self._last_send_error
+
+    @property
+    def last_update(self) -> Optional[float]:
+        """Monotonic time of the newest status frame, or ``None`` if none ever
+        arrived since the motor was registered.
+
+        The readings :meth:`get_position` and friends return are a cache, and
+        the cache is only as good as this stamp.  Subtract from
+        ``time.monotonic()`` for an age; do not treat the value as a wall-clock
+        time (see :attr:`last_frame_time` for that one).
+        """
+        return self._motor_stamp("last_update")
+
+    @property
+    def last_frame_time(self) -> Optional[float]:
+        """Wall-clock time of the newest status frame, or ``None``.
+
+        The stamp to put on a snapshot a human reads.
+        """
+        return self._motor_stamp("last_frame_time")
+
+    def _motor_stamp(self, name: str) -> Optional[float]:
+        """Read one of the motor's frame stamps, mapping "never" to ``None``.
+
+        ``0.0`` is what an un-updated :class:`MotorState` holds, and it is not a
+        time — a caller comparing it against a clock would get a nonsense age
+        rather than "no frame yet".
+        """
+        motor = self._motor
+        if motor is None:
+            return None
+        stamp = getattr(motor, name, 0.0)
+        return stamp if stamp else None
+
     def update_state(self, timeout_s: float = 0.05) -> bool:
         """Poll until at least one new status frame arrives."""
         if self._controller is None or self._motor is None:
             return False
         return self._controller.poll_until(self._motor, timeout_s=timeout_s)
+
+    def refresh_status(self) -> bool:
+        """Ask the motor for a status frame (0xCC).
+
+        A DM motor answers a control frame with a status frame, so a gripper
+        that is being driven reports on its own.  One that is idle — holding a
+        pose, sitting disabled — sends nothing, and then
+        :meth:`update_state` has nothing to hear and the readings stay cached
+        however long the caller waits.  This is the request that gives it
+        something to answer, and it does not change the motor's output.
+
+        Returns:
+            True if the request went out, False when nothing is registered or
+            the write failed (the same ``False``-with-a-warning shape as
+            :meth:`enable` — this is a request, not a motion command).
+        """
+        if self._controller is None or self._motor is None:
+            return False
+        try:
+            self._controller.refresh_status(self._motor)
+            return True
+        except Exception as e:
+            log.warning("状态帧请求下发失败（%s）：%r", self._channel, e)
+            return False
 
     def get_position(self) -> float:
         """Current position in rad."""

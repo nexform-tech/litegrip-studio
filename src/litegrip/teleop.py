@@ -1362,13 +1362,21 @@ class GripperTeleop:
         ``send_mit_frame`` returns ``False`` when the motor is not enabled or the
         CAN write fails — it does not raise, so ignoring the result means
         believing we are driving a gripper that is not moving.
+
+        The first failure of a session is logged with the reason the send
+        recorded (``last_send_error``), not with both possibilities: a slave loop
+        must not abort on one lost frame, so the log line is the only report the
+        operator gets, and it should not make them check the 24 V supply when the
+        interface went down.
         """
         if not self._g.send_mit_frame(q=q, kp=kp, kd=kd, dq=dq):
             self._send_failed += 1
             if self._send_failed == 1 and not quiet:
-                log.warning("[%s] send_mit_frame returned False — the motor is "
-                            "not enabled or the CAN write failed; the gripper may "
-                            "not be moving at all", self._mode)
+                error = getattr(self._g, "last_send_error", None)
+                reason = "no reason recorded" if error is None else repr(error)
+                log.warning("[%s] send_mit_frame returned False (%s) — the "
+                            "gripper may not be moving at all",
+                            self._mode, reason)
 
     def _note_grip_fault(self, state: Any) -> None:
         """Consume the gripper's own ``error_code`` (§8 rule 10).

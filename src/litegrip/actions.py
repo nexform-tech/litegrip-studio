@@ -69,7 +69,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Optional, Tuple
 
 from .constants import UnitConversion
-from .exceptions import CommandError, LiteGripError
+from .exceptions import (
+    CommandError,
+    CommError,
+    LiteGripError,
+    NotInitializedError,
+)
 from .models import CalibrationData, GripperConfig, GripperState
 
 if TYPE_CHECKING:                                    # 避免运行时循环 import
@@ -606,6 +611,27 @@ def _toward(value: float, target: float, step: float) -> float:
     return max(value - step, target)
 
 
+def _raise_send_failure(g: "LiteGrip") -> None:
+    """抛出一个带原因的异常，说明为什么 ``send_mit_frame`` 回了 ``False``。
+
+    原因在 :attr:`LiteGrip.last_send_error` 里，三种情况分开报：
+
+    - 没连上 / 没使能 —— 下层记的就是 ``NotInitializedError``，原样抛回去：
+      它的消息说的是该补哪一步，重新包一层只会把那个结论弄丢。
+    - 总线写失败 —— 下层记的是它自己那条异常（``OSError`` 等）。这一层看不到
+      总线，只能照搬，按 README 的错误表归到 ``CommError``，并把原异常挂在
+      ``__cause__`` 上。
+    - 什么都没记 —— 替身只回 ``False``，或者失败在别处。照实说「原因未记录」，
+      不替下层猜一个「未连接或未使能」：猜错了，诊断就去错了地方。
+    """
+    error = getattr(g, "last_send_error", None)
+    if isinstance(error, NotInitializedError):
+        raise error
+    if error is None:
+        raise CommError("MIT 帧下发失败（原因未记录）")
+    raise CommError(f"MIT 帧下发失败：{error!r}") from error
+
+
 class GripperActions:
     """夹爪的七个动作：``open`` / ``close`` / ``grasp`` / ``ramp_to`` /
     ``zero`` / ``enable`` / ``disable``。
@@ -942,6 +968,14 @@ class GripperActions:
             真正下发的那个 ``q``（夹过之后的值）—— 调用方拿它填
             ``MoveResult.final_cmd_rad`` / ``MoveProgress.cmd_rad``，报的是发出去
             的指令，不是算出来又没发的。
+
+        Raises:
+            NotInitializedError: 夹爪没连上，或者没使能 —— 原样抛出
+                :attr:`LiteGrip.last_send_error` 里记的那一条，它说的是该补哪
+                一步（``connect()`` / ``enable()``）。
+            CommError: 帧没发出去，而下层给的原因是传输层失败（如
+                ``OSError``），或者什么都没给。消息里带原样的原因 —— 这一层
+                看不到总线，替下层猜一个「未连接或未使能」就是谎报。
         """
         cfg = self.config
         g = self._g
@@ -954,7 +988,7 @@ class GripperActions:
             tau=tau,
         )
         if not sent:
-            raise CommandError("MIT 帧下发失败（未连接或未使能）")
+            _raise_send_failure(g)
         cfg.sleep_fn(cfg.frame_interval)
         return q
 

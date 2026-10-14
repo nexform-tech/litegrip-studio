@@ -924,10 +924,17 @@ class TrajectoryPlayer:
         Shared by the replay loop (``dq = 0``) and the align ramp, which feeds
         its travel speed forward as ``dq``.  A failed send aborts: dropping
         frames silently would leave the jaws somewhere the status does not show.
+
+        The abort keeps the type it always had — this is a replay that stopped,
+        not a transport error — but it now carries the send's own reason in the
+        message instead of asking "not connected or not enabled?" and leaving
+        the answer in a log the caller may never read.
         """
         if not self._g.send_mit_frame(q=q, kp=self._kp, kd=self._kd, dq=dq):
+            error = getattr(self._g, "last_send_error", None)
+            reason = "原因未记录" if error is None else repr(error)
             raise TrajectoryError(
-                "MIT 帧下发失败 (未连接或未使能?) —— 回放中止, 不静默丢帧")
+                f"MIT 帧下发失败（{reason}）—— 回放中止, 不静默丢帧") from error
         self._frames += 1
 
     def stop(self, timeout: float = 2.0) -> None:

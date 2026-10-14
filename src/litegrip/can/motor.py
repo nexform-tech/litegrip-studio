@@ -7,6 +7,7 @@ arrive on the motor's mst_id.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from enum import IntEnum
 
@@ -62,6 +63,7 @@ class MotorState:
         "_t_coil",
         "rx_count",
         "_last_update",
+        "_last_frame_time",
     )
 
     def __init__(self, params: MotorParams):
@@ -74,6 +76,7 @@ class MotorState:
         self._t_coil: int = 0
         self.rx_count: int = 0
         self._last_update: float = 0.0
+        self._last_frame_time: float = 0.0
 
     # ── properties ──────────────────────────────────────────────────────
 
@@ -131,7 +134,21 @@ class MotorState:
 
     @property
     def last_update(self) -> float:
+        """Monotonic time of the newest status frame; ``0.0`` if none ever came.
+
+        Monotonic because that is the clock the receive path stamps frames with
+        (``CanFrame.timestamp``) — subtract from ``time.monotonic()`` for an age.
+        """
         return self._last_update
+
+    @property
+    def last_frame_time(self) -> float:
+        """Wall-clock time of the newest status frame; ``0.0`` if none ever came.
+
+        The human-readable counterpart of :attr:`last_update`.  The two clocks
+        are not interchangeable: this one cannot be subtracted from.
+        """
+        return self._last_frame_time
 
     # ── control mode management ─────────────────────────────────────────
 
@@ -157,6 +174,11 @@ class MotorState:
         self._t_mos = t_mos
         self._t_coil = t_coil
         self._last_update = timestamp
+        # Same instant, other clock: ``timestamp`` is the monotonic stamp the
+        # transport put on the frame, and a snapshot that reports "when" to a
+        # human needs the wall clock.  Sampling it here keeps the two within a
+        # few microseconds of the frame that produced them.
+        self._last_frame_time = time.time()
         self.rx_count += 1
 
     def __repr__(self) -> str:

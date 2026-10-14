@@ -12,7 +12,7 @@ that has nothing but this repository.
 | | |
 | --- | --- |
 | Upstream | <https://github.com/nexform-tech/litegrip-python> |
-| Commit | `9180117f29e226f7492f3a63a7d2a20d1cf4e5dc` (2026-10-14) |
+| Commit | `cacf392b61d669ae811c1dc9bf4ef519b7a9003b` (2026-10-14) |
 | License | Apache-2.0 — `LICENSE` is that commit's file, copied verbatim |
 
 `src/litegrip/` holds the modules, the `can/` and `protocols/` subpackages, `py.typed`, and the
@@ -30,6 +30,35 @@ drift cannot go unnoticed.
 Every file here is that commit's byte for byte, with no exception left: the factory calibration this
 repository used to override went upstream, so the tree hash below covers the whole tree. **Local
 override** records that file and where it went.
+
+## What the `9180117` → `cacf392` move changed
+
+Two upstream commits, the fixes for the two defects found on this bench on 2026-10-14. Both reach
+this console, and neither touches a calibration file.
+
+- **`ffc1ee5` ("fix: report a failed send with its cause and its type") changes what a failed send
+  raises.** `GripperActions._emit` used to raise `CommandError` for every failure — a type the
+  README's error table does not name, carrying none of the reason. It now raises what fits:
+  `NotInitializedError` when the bus was never connected or the motor never registered, `CommError`
+  otherwise, with the transport's own exception on `__cause__` and the reason on `last_send_error`.
+  The console is unaffected, and both halves of that were checked rather than assumed: every send it
+  makes goes through `LiteGrip.send_mit_frame`, which still reports with a `bool` (it gained only the
+  recorded `last_send_error`), and every console clause that names an SDK exception names
+  `LiteGripError`, the base class both new types share. **Do not** write `except CommandError` around
+  a console motion call: that is no longer what a failed send raises.
+- **`cacf392` ("feat: report a stale status read, and let the caller refresh it") tells a cached
+  reading from a measured one.** `GripperState` gained `fresh`, `data_age_s`, `is_stale()` and the
+  module-level `STALE_AFTER_S = 0.5`; `LiteGrip.refresh_status()` sends the `0xCC` request that makes
+  an idle motor speak; `LiteGripCAN` gained `last_update` (monotonic) and `last_frame_time` (wall
+  clock). The console reads none of that — it takes `get_state(wait=False)` for the readings and
+  never asks whether a frame arrived — so no file under `src/litegrip_studio/` changes for this
+  commit. `GripperState.timestamp` did change meaning, from the time of the call that returned the
+  snapshot to the arrival time of the frame behind it, `0.0` when no frame has ever arrived. **Do
+  not** time anything with it or read it as a heartbeat; it now describes the frame, and the console
+  keeps its own clock.
+
+Step 5 of the recipe below is a no-op for this move: neither commit changes a shipped calibration
+file, so the angles and scales this repository repeats by hand did not move.
 
 ## What the `5b7da89` → `9180117` move changed
 
@@ -95,7 +124,7 @@ any file the SDK ships moves it.
 ## Tree hash
 
 ```text
-0cec1217168e7f773e98392601ad3a03791b8e6c75c7fced5d3691956b7df00a
+a4e978ec444e940eba99c0d5a7de722c36f14e4292348861bc3b9d26ff44f7c9
 ```
 
 The recipe, so it can be recomputed without reading the test: take every file under `src/litegrip/`
