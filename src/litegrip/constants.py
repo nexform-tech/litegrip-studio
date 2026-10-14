@@ -70,9 +70,9 @@ class GripperGeometry:
     millimetres-per-radian scale is that span over the measured travel in
     radians (``rad_to_mm``); deriving it from the 85 mm jaw travel instead
     would leave every mm-based move 1.2% short — 1 mm lost per full stroke.
-    The factory calibration's own numbers show the pair: 1.409552 rad of
-    travel is 86 mm at ``61.01229326764816`` mm/rad, and 85 mm at
-    ``60.303``.
+    The factory calibration's own numbers show the pair: 1.170748 rad of
+    travel is 86 mm at ``73.45731105242119`` mm/rad, and 85 mm at
+    ``72.604``.
 
     ``work_stroke_mm`` is measured from the closed zero like
     :attr:`JAW_TRAVEL_MM`, so a full-stroke ``work_stroke_mm`` is 85 mm, not

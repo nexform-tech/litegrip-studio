@@ -47,14 +47,15 @@ from conftest import REPO_ROOT, shipped_factory_calibrations
 # The three real datasets, copied from the SDK tree rather than invented, so a
 # change in the SDK's shipped numbers shows up as a test failure here.
 #
-# ``FACTORY_RAW`` is this repository's ``factory_calibration.json``, verbatim,
+# ``FACTORY_RAW`` is the vendored SDK's ``factory_calibration.json``, verbatim,
 # key set included, and ``TestTheFixtureIsTheFileItClaims`` below compares the
 # two so a fixture that drifts from the file cannot pass quietly.  That file is
-# the vendored SDK's one declared local override (``VENDORED.md``): it carries
-# this bench's hand-recorded pair, taken 2026-10-13, where upstream carries the
-# geometry its motor-driven probe measured.  So the fixture is not merely a copy
-# of the SDK's file — it is a copy of a file this repository decided on, and a
-# dozen tests below stand on the numbers it carries.
+# upstream's at the vendored commit: it carries this bench's hand-recorded pair,
+# taken 2026-10-13, which upstream adopted in ``c187b78`` after measuring this
+# unit with its own probe.  Up to that commit the file was this repository's
+# declared local override (``VENDORED.md``), so this fixture was written against
+# a file this repository decided on; now it is upstream's file, and a dozen tests
+# below stand on the numbers either way.
 #
 # Its ``rad_to_mm`` is 73.45731105242119, which is also the scale the console
 # derives for itself: 1.170748 rad of span under ``DEFAULT_TRAVEL_MM`` plus

@@ -31,13 +31,6 @@ PROVENANCE = VENDORED_SDK / "VENDORED.md"
 
 UPSTREAM = "https://github.com/nexform-tech/litegrip-python"
 
-#: The one vendored file this repository overrides, declared with its own hash
-#: in ``VENDORED.md``.  It is excluded from the tree hash — the tree hash keeps
-#: meaning "upstream's files, byte for byte", and this file is pinned by the
-#: hash in the note instead — so the two checks together cover the whole tree
-#: without either of them covering the same bytes twice.
-LOCAL_OVERRIDE = "factory_calibration.json"
-
 
 def clean_env(**overrides: str) -> dict[str, str]:
     """The environment of a machine that has this checkout and nothing else.
@@ -69,15 +62,13 @@ def tree_hash(root: Path) -> str:
     can be recomputed by someone who has only the note, so the note documents the
     recipe rather than pointing at this function.
 
-    ``VENDORED.md`` and the declared local override are both left out, by the
-    note's recipe: each holds bytes this repository decided on, and each is
-    checked against a hash of its own rather than against upstream's.
+    ``VENDORED.md`` is left out, by the note's recipe: it holds the hash, so it
+    cannot be part of it.  Nothing else is — every other file here is upstream's,
+    which is the claim the hash makes.
     """
     digest = hashlib.sha256()
     for path in sorted(root.rglob("*")):
-        if not path.is_file() or "__pycache__" in path.parts:
-            continue
-        if path.name == "VENDORED.md" or path.relative_to(root).as_posix() == LOCAL_OVERRIDE:
+        if not path.is_file() or "__pycache__" in path.parts or path.name == "VENDORED.md":
             continue
         digest.update((path.relative_to(root).as_posix() + "\n").encode())
         digest.update(path.read_bytes())
@@ -200,18 +191,18 @@ class TestItStaysWhatItSaysItIs:
         assert re.search(r"\b[0-9a-f]{40}\b", text), "no commit sha in the note"
 
     def test_the_tree_still_matches_the_recorded_hash(self) -> None:
-        """Every file but the declared override is upstream's byte for byte.
+        """Every file here is upstream's, byte for byte, and the hash says so.
 
-        The override is left out of the recipe for exactly that reason: its bytes
-        are this repository's, and the note pins them with a hash of their own in
-        the section the next test reads.  Between the two, the whole tree is
-        covered and no file is covered twice.
+        ``VENDORED.md`` is left out of the recipe because it holds the hash, so
+        the note has to say that where a reader can recompute the digest from the
+        note alone — which is what the assertion about the section checks before
+        it checks the digest itself.
         """
         section = note_section("Tree hash")
         recorded = re.search(r"^([0-9a-f]{64})$", section, re.MULTILINE)
 
         assert recorded, "the note records no tree hash"
-        assert LOCAL_OVERRIDE in section, (
+        assert "VENDORED.md" in section, (
             "VENDORED.md 的树哈希一节没有写明 recipe 排除了哪个文件——排除哪些文件"
             "必须写在读者能照着重算的地方"
         )
@@ -220,31 +211,22 @@ class TestItStaysWhatItSaysItIs:
             "要么改回去，要么按 VENDORED.md 的步骤重新 vendor 并更新哈希"
         )
 
-    def test_the_note_declares_the_override_it_carries(self) -> None:
-        """``factory_calibration.json`` is not upstream's, and this is what says so.
+    def test_the_note_declares_no_local_fork(self) -> None:
+        """No file here is this repository's own, and the note has to say so.
 
-        The tree hash cannot speak for this file, so nothing else would notice it
-        being edited in place, or quietly restored by a re-vendor that copies
-        upstream's whole tree over this one.  Recording its hash in the note makes
-        both a failure: the bytes move, this fails, and the fallback cannot change
-        behind a green suite.
-
-        An earlier version of this note declared no override at all — the factory
-        calibration was taken from litegrip-cpp, and upstream's `b9caae8` brought
-        the two repositories onto the same numbers so it could be dropped.  The
-        override here is a different claim about the same file (this bench's
-        hand-recorded pair against upstream's probe-measured one), which is why
-        the section names the file rather than counting hashes.
+        ``factory_calibration.json`` used to be a declared local override, pinned
+        by a hash in the note because the tree hash excluded it — the note records
+        what it carried and how upstream ``c187b78`` came to carry the same
+        numbers.  It is inside the tree hash now, which is what actually catches a
+        divergence; what this checks is that the note does not still claim one.
+        A section left in the old state would send the next re-vendor looking for
+        a divergence that is not there.
         """
         section = note_section("Local override")
-        digest = hashlib.sha256((VENDORED_SDK / LOCAL_OVERRIDE).read_bytes()).hexdigest()
 
-        assert LOCAL_OVERRIDE in section, (
-            f"VENDORED.md 没有把 {LOCAL_OVERRIDE} 记为本地分叉"
-        )
-        assert digest in section, (
-            "VENDORED.md 里记的分叉哈希与文件的当前内容对不上：要么文件被改过而这一节"
-            "没跟着改，要么这一节记的根本不是这个文件"
+        assert "There is none" in section, (
+            "VENDORED.md 的 Local override 一节仍在声明本地分叉——确实分叉了就按"
+            "   那一节写的方式把哈希补上，没有就让这一节说明当前没有分叉"
         )
 
     def test_the_data_files_it_resolves_by_name_travel_with_it(self) -> None:

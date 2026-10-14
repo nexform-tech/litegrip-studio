@@ -273,9 +273,9 @@ There are two sources, and the console resolves which one applies itself:
 2. **The calibration file bundled inside the SDK** (`litegrip/factory_calibration.json`), which is
    what the console runs on when you have named nothing.
 
-This repository ships that bundled file **overridden with this bench's hand-recorded values** rather
-than upstream's probe-measured numbers; `src/litegrip/VENDORED.md` records the override, its hash
-included.
+That bundled file carries **this bench's hand-recorded values**, which upstream adopted into its own
+copy; this repository overrides nothing, and `src/litegrip/VENDORED.md` records where the file comes
+from.
 
 A named file that is missing, or that exists but cannot be used, is reported as such and **stops
 there** — the console does not quietly fall back to the factory numbers, because moving on numbers

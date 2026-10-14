@@ -37,13 +37,14 @@ from litegrip_studio.units import (
 # its factory file, which is what it was labelled as until the two were
 # compared.  Its numbers used to be another unit's — 1.651026 rad of span at its
 # own 52.69 mm/rad is 87 mm, where this console derives 52.0888 — and upstream
-# re-measured the shipped files for this unit in ``b9caae8``, so what it carries
-# now is this bench's geometry: 61.01229326764816 is exactly what the derivation
-# gives over its span.  ``TestStroke`` pins that, and the fixture is compared
-# against the file in ``TestTheFixturesAreTheFilesTheyClaim`` below, so a
-# re-vendor that moves the numbers cannot leave it behind.
+# re-measured the shipped files for this unit in ``b9caae8`` and again in
+# ``c187b78``, so what it carries now is this bench's geometry: 73.45731105242119
+# is exactly what the derivation gives over its span.  ``TestStroke`` pins that,
+# and the fixture is compared against the file in
+# ``TestTheFixturesAreTheFilesTheyClaim`` below, so a re-vendor that moves the
+# numbers cannot leave it behind.
 REVERSED = Limits(0.0, 1.14, 104.6)  # GripperConfig defaults
-TEMPLATE = Limits(0.052071, -1.357481, 61.01229326764816)  # the SDK's calibration_normal.json
+TEMPLATE = Limits(0.029564, -1.141184, 73.45731105242119)  # the SDK's calibration_normal.json
 BENCH = Limits(1.775959, -0.064279, 65.21)  # example user calibration
 
 #: What the real bench's encoder reports, closed and fully open — the two
@@ -83,14 +84,15 @@ class TestRoundTrip:
 
 class TestStroke:
     def test_the_template_stroke_is_the_bench_travel_plus_the_inset(self) -> None:
-        """1.409552 rad of span at the file's own 61.01229326764816 mm/rad is 86.00 mm.
+        """1.170748 rad of span at the file's own 73.45731105242119 mm/rad is 86.00 mm.
 
         Which is ``DEFAULT_TRAVEL_MM`` plus ``SPAN_INSET_MM``, so the template's
         mm/rad is the scale this console derives for this bench rather than a
         nominal for another unit: upstream re-measured the shipped files for this
-        unit in ``b9caae8``.  The numbers before that belonged to a different
-        gripper — 1.651026 rad at 52.69 is 86.99 mm — which is the kind of
-        reading ``TestStroke`` can tell apart from a derivation.
+        unit in ``b9caae8`` and again in ``c187b78``.  The numbers before those
+        belonged to a different gripper — 1.651026 rad at 52.69 is 86.99 mm —
+        which is the kind of reading ``TestStroke`` can tell apart from a
+        derivation.
         """
         assert TEMPLATE.stroke_mm == pytest.approx(
             constants.DEFAULT_TRAVEL_MM + constants.SPAN_INSET_MM, abs=0.01

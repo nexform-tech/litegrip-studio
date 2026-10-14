@@ -38,12 +38,13 @@ from litegrip_studio.units import Limits
 
 USER_LIMITS = Limits(1.775959, -0.064279, 65.21, 120.0)
 #: The factory file this console falls back to, as the console reads it.  It is
-#: this repository's declared override of the vendored SDK's file (``VENDORED.md``)
-#: and carries this bench's hand-recorded pair.  Its own 73.45731105242119 mm/rad
-#: is what the console derives over the recorded 1.170748 rad span under
-#: ``DEFAULT_TRAVEL_MM`` plus ``SPAN_INSET_MM`` — ``derive_scale(1.170748, 85.0)``
-#: — so the two agree exactly, and the scale here is the one the file carries
-#: *and* the one the console moves by.
+#: the vendored SDK's own file (``VENDORED.md``), which carries this bench's
+#: hand-recorded pair since upstream ``c187b78`` adopted it; this repository
+#: overrides nothing.  Its own 73.45731105242119 mm/rad is what the console
+#: derives over the recorded 1.170748 rad span under ``DEFAULT_TRAVEL_MM`` plus
+#: ``SPAN_INSET_MM`` — ``derive_scale(1.170748, 85.0)`` — so the two agree
+#: exactly, and the scale here is the one the file carries *and* the one the
+#: console moves by.
 FACTORY_LIMITS = Limits(0.029564, -1.141184, 73.45731105242119, 85.0)
 
 #: A stand-in for where the SDK was checked out.  The shortened form of a

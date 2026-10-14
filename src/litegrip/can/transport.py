@@ -41,13 +41,22 @@ CANFD_MTU = 72
 
 _SIOCGIFMTU = 0x8921
 
+# sizeof(struct ifreq) — 40 bytes on 64-bit Linux, 32 on 32-bit.  SIOCGIFMTU
+# writes back the whole struct, not just ifr_name plus ifr_mtu.
+_IFREQ_SIZE = 40
+
 
 def _iface_mtu(sock: socket.socket, iface: str) -> Optional[int]:
     """Read interface MTU (16=classic CAN, 72=CAN FD). Returns None on failure."""
     try:
         ifr = struct.pack("16sH", iface.encode("utf-8")[:15], 0)
+        # Hand over a whole struct ifreq: the kernel writes all of it back, and
+        # since 3.14 fcntl.ioctl() raises SystemError (not OSError) when
+        # anything lands past the end of the argument.  The reply is exactly as
+        # long as the argument, so slice the mtu back out of the front.
+        ifr = ifr.ljust(_IFREQ_SIZE, b"\x00")
         res = fcntl.ioctl(sock.fileno(), _SIOCGIFMTU, ifr)
-        return struct.unpack("16sH", res)[1]
+        return struct.unpack("16sH", res[:18])[1]
     except OSError:
         return None
 
