@@ -153,12 +153,14 @@ class ControlPage(QWidget):
         speed_layout.addWidget(self._speed_value)
         speed_layout.addStretch(1)
 
-        self._force.setRange(0.0, constants.FORCE_MAX_N)
+        self._force.setRange(constants.FORCE_MIN_N, constants.FORCE_MAX_N)
         self._force.setSingleStep(0.5)
         self._force.setDecimals(1)
         self._force.setSuffix(" N")
         self._force.setToolTip(
-            f"夹持力上限 {constants.FORCE_MAX_N:.0f} N（机械额定）；"
+            f"夹持力 {constants.FORCE_MIN_N:.0f}–{constants.FORCE_MAX_N:.0f} N"
+            f"（{constants.FORCE_MIN_N:.0f} N 是能推动夹爪的下限，"
+            f"{constants.FORCE_MAX_N:.0f} N 是机械额定）；"
             f"超过 {constants.FORCE_SOFT_WARN_N:.0f} N 会持续告警"
         )
         force_box = QGroupBox("夹持力")

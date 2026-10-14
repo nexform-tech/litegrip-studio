@@ -18,6 +18,7 @@ from litegrip_studio import constants
 from litegrip_studio.units import (
     Limits,
     clamp_force,
+    clamp_force_setpoint,
     clamp_force_torque,
     force_from_torque,
     frame_mismatch,
@@ -281,6 +282,42 @@ class TestForceScaling:
         assert clamp_force_torque(constants.FORCE_THEORETICAL_MAX_N) < (
             constants.FORCE_THEORETICAL_MAX_N * constants.N_TO_NM
         )
+
+
+class TestTheSetpointFloor:
+    """The other end of the same clamp, and the one an operator meets on the
+    bench: a setpoint whose whole budget is smaller than what the mechanism
+    spends getting its jaws moving is a grip that cannot travel.
+
+    ``clamp_force`` leaves zero alone — it is the mode a plain move carries, not
+    a small press — so the floor is its own function rather than a new lower
+    bound inside it.
+    """
+
+    def test_a_setpoint_below_the_floor_comes_back_as_the_floor(self) -> None:
+        assert clamp_force_setpoint(1.0) == constants.FORCE_MIN_N
+        assert clamp_force_setpoint(5.99) == constants.FORCE_MIN_N
+
+    def test_the_floor_itself_is_left_alone(self) -> None:
+        assert clamp_force_setpoint(constants.FORCE_MIN_N) == constants.FORCE_MIN_N
+
+    def test_a_setpoint_above_it_is_untouched(self) -> None:
+        for f in (6.1, 12.0, 25.0, constants.FORCE_MAX_N):
+            assert clamp_force_setpoint(f) == pytest.approx(f)
+
+    def test_the_rating_still_bounds_the_top(self) -> None:
+        assert clamp_force_setpoint(1e9) == constants.FORCE_MAX_N
+
+    def test_zero_stays_zero(self) -> None:
+        """Not served as the floor: zero is how a plain move says "no force
+        limit", and raising it would put every move into force mode."""
+        assert clamp_force_setpoint(0.0) == 0.0
+        assert clamp_force_setpoint(-5.0) == 0.0
+        assert clamp_force_setpoint(math.nan) == 0.0
+
+    def test_the_floor_is_below_the_default_and_the_warning(self) -> None:
+        assert constants.FORCE_MIN_N < constants.FORCE_DEFAULT_N
+        assert constants.FORCE_MIN_N < constants.FORCE_SOFT_WARN_N
 
 
 class TestErrorText:

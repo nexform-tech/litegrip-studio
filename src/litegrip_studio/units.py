@@ -243,6 +243,25 @@ def clamp_force(force_n: float) -> float:
     return min(max(force_n, 0.0), constants.FORCE_MAX_N)
 
 
+def clamp_force_setpoint(force_n: float) -> float:
+    """A requested grip force as the console will actually serve it, N.
+
+    Two numbers travel under the name "force" and only one of them is floored:
+    zero is a *mode*, not a small press — it is what a plain move carries to say
+    "no force limit" — while a positive value is a setpoint the operator asked
+    for and is held to :data:`constants.FORCE_MIN_N`.  A setpoint under the floor
+    comes back as the floor rather than being served as asked, because the
+    approach's whole press capability is its own setpoint's torque: 1 N would be
+    a grip that cannot break away, whose stalling jaws are read as an obstruction
+    (see ``FORCE_MIN_N``).  Substituting is safe because this is the same number
+    the window shows and the same one the log carries; the window goes further
+    and does not let such a setpoint be entered at all.
+    """
+    if math.isnan(force_n) or force_n <= 0.0:
+        return 0.0
+    return min(max(force_n, constants.FORCE_MIN_N), constants.FORCE_MAX_N)
+
+
 def clamp_force_torque(force_n: float) -> float:
     """Force setpoint → torque feed-forward, capped at the mechanical rating."""
     return torque_from_force(clamp_force(force_n))

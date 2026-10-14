@@ -94,6 +94,19 @@ NM_TO_N = 10.0
 N_TO_NM = 1.0 / NM_TO_N
 
 FORCE_MAX_N = 40.0  # mechanical rating — hard UI cap
+# The smallest setpoint the console will serve.  A force-carrying approach
+# presses, at most, its own setpoint's torque (``motion._press_budget_nm``), and
+# the mechanism spends about 0.6 N·m of that merely getting its jaws moving —
+# so below roughly 6 N the whole budget is gone before the approach has travelled
+# anywhere, and the shortfall is what the contact detectors read: the jaws are
+# dragged far below the reference, ``_jaws_have_stopped`` calls that "stopped",
+# and the lost-motion gap is taken for an obstruction.  The grip is then declared
+# at millimetres of travel and 放开 opens from that pose, which is the low-force
+# defect the operator reported happening *fast* and *far* rather than not at all.
+# A setpoint under the floor is served as the floor rather than as asked, and the
+# window does not offer one; either way the number on screen is the number
+# pressed.  Raising this is the one lever if a floor still false-triggers.
+FORCE_MIN_N = 6.0
 FORCE_SOFT_WARN_N = 35.0
 FORCE_DEFAULT_N = 12.0
 # tau_max 10 Nm × NM_TO_N.  Display only, as a grey unselectable annotation —
