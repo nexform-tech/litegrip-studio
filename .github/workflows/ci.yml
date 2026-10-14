@@ -14,6 +14,22 @@
 # skipped for want of an SDK — which is also what keeps the vendored copy honest:
 # a drift between it and the surface the console calls fails in this job.
 #
+# The suite runs twice, on 3.10 and on 3.14. One interpreter is one set of blind
+# spots, and the vendored SDK proved it: fcntl.ioctl() grew a guard byte in 3.14
+# and rejected the short buffer the SDK's _iface_mtu() handed it, so the console
+# could not connect to a real gripper there (nexform-tech/litegrip-python#63).
+# The suite was green on 3.10 throughout, because the simulated backend never
+# calls that helper. This job cannot catch that defect either — it has no CAN
+# interface — but it does hold the console itself to running on 3.14, which is
+# the claim the second interpreter is here for.
+#
+# The second interpreter is a step in the same job, not a matrix. A matrix names
+# its checks `test (3.10)` / `test (3.14)`, so enabling "require the `test` check"
+# on main here later would block every merge on a check that never reports. That
+# is not hypothetical: litegrip-python's main requires the check named `test`,
+# and its first attempt at a second interpreter used a matrix and left every
+# merge blocked until the shape was changed back.
+#
 # AGENTS.md is deliberately not linted: it is canonical content synced from
 # repo-template and must not be edited here.
 name: CI
@@ -56,7 +72,7 @@ jobs:
           python3 -c "import json; json.load(open('.markdownlint.json'))"
           echo "repository standards OK"
 
-      - name: Setup Python
+      - name: Setup Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
@@ -81,5 +97,24 @@ jobs:
           sed -i 's/^version = "0\.0\.0-semantic-release"$/version = "0.0.0"/' pyproject.toml
           python -m pip install -e ".[dev]"
 
-      - name: Run the test suite
-        run: python -m pytest -q
+      - name: Run the test suite on 3.10
+        run: |
+          python -VV
+          python -m pytest -q
+
+      - name: Setup Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install the studio on 3.14
+        run: |
+          # No `sed` here: pyproject.toml still carries the valid `0.0.0` the
+          # step above substituted, and the placeholder was left in the
+          # repository rather than in this workspace.
+          python -m pip install -e ".[dev]"
+
+      - name: Run the test suite on 3.14
+        run: |
+          python -VV
+          python -m pytest -q
