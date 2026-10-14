@@ -203,17 +203,28 @@ mechanism that had not broken away from rest yet being read as an obstruction, a
 mode drives the jaws the rest of the way at the ramp rather than the slider. The channel is what
 tells those apart after the run, and the log is the only place that survives it.
 
-Do not lower `SPEED_MIN_MM_S` to chase a very small setpoint. The one speed a setpoint still
-decides is the speed whose tick's own step `kp·v·dt` would spend the whole budget: a setpoint that
-cannot cover it at the speed asked for has the approach slowed until it can
-(`MotionFSM._tick_press_cap_mm_s`), which on this bench is 36.8 mm/s for a 1 N grasp and 736 mm/s
-at 20 N. Those are the same order as the speeds the slider offers, so at the setpoints the bench
-uses the floor never binds; it binds only under 0.14 N, where the setpoint's own speed drops below
-it — a 0.1 N grasp asks for 3.7 mm/s and runs at 5. Measured on the plant, that 0.1 N grasp at the
-maximum slider speed never leaves the open stop at all — the jaws sit there, and the stillness
-channel reads that rest as contact, handing over to force mode without having travelled. The floor's
-job is to keep the approach a speed that moves, and a setpoint below it cannot fix that by being
-smaller.
+Do not lower `FORCE_MIN_N` or `SPEED_MIN_MM_S` to chase a very small setpoint. `FORCE_MIN_N` is the
+one that decides what the console serves: `clamp_force_setpoint` turns a setpoint under it into the
+floor rather than serving it as asked, and the spinbox does not offer one at all, so the number on
+the screen is the number pressed either way. The floor is there because the approach's entire press
+budget *is* its own setpoint's torque, this mechanism spends about 0.6 N·m of that getting its jaws
+moving, and a budget under that presses with less than the friction it has to overcome. The jaws then
+never leave the open stop and the stillness channel reads that rest as contact. Measured on the plant
+at the maximum slider speed, with no floor: a 0.1 N grasp handed over at 85.01 mm — the open stop,
+without having travelled — and a 1 N one at 84.90 mm, 44.9 mm short of an object at 40 mm, after
+which force mode drew the jaws the rest of the way and **Let go**, which measures from the pose the
+grip was made at, opened 45 mm further than it promises.
+
+`SPEED_MIN_MM_S` is the other half of the same rule: the slowest speed that breaks the jaws away from
+rest, and lowering it trades the one case it covers for a stall that every contact detector reads as
+an obstruction. The speed a setpoint still decides is the one whose tick's own step `kp·v·dt` would
+spend the whole budget — one term of the press is not the console's to withhold, since the command
+leads the measurement by the tick's own travel whatever damping or lead it carries — so a setpoint
+whose budget cannot cover that step at the speed asked for has the approach slowed until it can
+(`MotionFSM._tick_press_cap_mm_s`). With the floor in place that lever no longer bites anywhere the
+slider reaches: the cap at 6 N is 317 mm/s at the bench file's 73.46 mm/rad, and 202 mm/s on the
+simulated unit's 46.73, against a slider that stops at 150. A gripper with more millimetres per rad,
+or a lowered floor, puts it back in play.
 
 ### The ends of the range and Let go
 
@@ -489,8 +500,10 @@ across its jaws, while the slider covers only part of it and neither end is reac
 where "a slice taken out of the middle of 0–120" came from. The two angles in the file are
 measurements and the coefficient is derived, so `units.derive_scale()` computes it:
 `(measured travel + SPAN_INSET_MM) / span`. On this machine that is
-`(85 + 1) / 1.681925 = 51.13 mm/rad`, so the two recorded limits span 86.00 mm, the slider's
-0…85 covers the whole travel, and the top of the range sits 1 mm inside the recorded open limit.
+`(85 + 1) / 1.170748 = 73.46 mm/rad` — the span the file in force records, 1.170748 rad — so the two
+recorded limits span 86.00 mm, the slider's 0…85 covers the whole travel, and the top of the range
+sits 1 mm inside the recorded open limit. The file's own `rad_to_mm` says the same 73.46, because
+this console wrote it; the sentence above is why that is a coincidence rather than a lookup.
 
 The travel (`constants.DEFAULT_TRAVEL_MM`, 85.0 mm) is the **measured value for this gripper** and
 is a constant, not a setting. It decides two things: the mm coefficient and the slider's range, so

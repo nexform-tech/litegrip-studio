@@ -86,7 +86,12 @@ from dataclasses import dataclass
 from enum import Enum
 
 from .. import constants
-from ..units import Limits, clamp_force, clamp_force_torque, mm_to_rad_per_s
+from ..units import (
+    Limits,
+    clamp_force_setpoint,
+    clamp_force_torque,
+    mm_to_rad_per_s,
+)
 from .profile import SpeedProfile
 
 
@@ -218,9 +223,8 @@ class MotionFSM:
         self.params.speed_mm_s = self.limits.clamp_speed(speed_mm_s)
 
     def set_force(self, force_n: float) -> None:
-        from ..units import clamp_force
-
-        self.params.force_n = clamp_force(force_n)
+        """The setpoint a bare :meth:`grasp` falls back to, clamped like one."""
+        self.params.force_n = clamp_force_setpoint(force_n)
 
     # ── commands ────────────────────────────────────────────────────────────
     def move_to_mm(self, target_mm: float, source: str, force_n: float | None = None) -> None:
@@ -241,7 +245,9 @@ class MotionFSM:
         # independently further down, but ``force_setpoint()`` is published to
         # the UI, and a state machine that reports a 999 N grip is lying about
         # the one number an operator reads to decide whether to stand clear.
-        self._force_n = 0.0 if force_n is None else clamp_force(force_n)
+        # Both ends, because this is also the lower one: a setpoint too small to
+        # move the jaws is not served (``clamp_force_setpoint``, ``FORCE_MIN_N``).
+        self._force_n = 0.0 if force_n is None else clamp_force_setpoint(force_n)
         self._tau_cmd = None
         self._settle_ticks = 0
         self._elapsed = 0.0
@@ -328,7 +334,10 @@ class MotionFSM:
         """Freeze at the current position and apply a grip force there."""
         self.state = MotionState.HOLD_FORCE
         self.profile = None
-        self._force_n = clamp_force(force_n)
+        # Floored like the approach's setpoint, and for the same reason: a force
+        # this mechanism cannot serve is refused wherever it is asked for, not
+        # only at the door the operator usually comes through.
+        self._force_n = clamp_force_setpoint(force_n)
         self._tau_cmd = None
         self._frozen_mm = self.limits.clamp_mm(measured_mm)
         self._grip_channel = channel
@@ -628,7 +637,14 @@ class MotionFSM:
 
     # ── contact corroboration ───────────────────────────────────────────────
     def _press_budget_nm(self) -> float:
-        """The torque a force-carrying approach may press with, N·m."""
+        """The torque a force-carrying approach may press with, N·m.
+
+        Derived from ``_force_n``, which is already at or above
+        :data:`constants.FORCE_MIN_N` — the floor is applied where a setpoint
+        enters (:meth:`move_to_mm`, :meth:`hold_force`, :meth:`set_force`) so
+        that every reader of it, this budget included, sees the same number the
+        operator does.
+        """
         return clamp_force_torque(self._force_n) * constants.PRESS_CAP_SAFETY
 
     def _tick_press_cap_mm_s(self) -> float:

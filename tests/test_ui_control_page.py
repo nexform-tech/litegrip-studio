@@ -461,6 +461,19 @@ class TestSpeedAndForce:
 
         assert page.speed_mm_s == pytest.approx(constants.SPEED_MAX_MM_S)
 
+    def test_the_force_cannot_be_set_below_what_the_gripper_can_push(self, page) -> None:
+        """The window must not offer a setpoint the console will not serve as asked.
+
+        A setpoint under the floor is a grip whose whole press budget goes on
+        getting the jaws moving, so the contact detectors read the shortfall as
+        an obstruction; the spinbox stops at the floor rather than letting an
+        operator pick one and be told later (see ``FORCE_MIN_N``).
+        """
+        page._force.setValue(0.5)
+
+        assert page.force_n == pytest.approx(constants.FORCE_MIN_N)
+        assert page._force.minimum() == pytest.approx(constants.FORCE_MIN_N)
+
 
 class TestLiveFollowing:
     """The switch is the slider's to honour; these tests drive real gestures
@@ -542,6 +555,21 @@ class TestRemembering:
         page._speed.setValue(66)
         page._speed.sliderReleased.emit()
         assert store.value(KEY_SPEED) == 66
+
+    def test_a_remembered_force_below_the_floor_comes_back_at_the_floor(self, qapp) -> None:
+        """A console that has been running since before the floor existed has a
+        small number in its settings file.  The window shows what it will serve
+        rather than what the file says, and the next save makes the file agree.
+        """
+        from litegrip_studio.settings import KEY_FORCE
+
+        store = _Store(**{KEY_FORCE: "2"})
+        page = ControlPage(Recorder(), Settings(store))
+
+        assert page.force_n == pytest.approx(constants.FORCE_MIN_N)
+
+        page._force.editingFinished.emit()
+        assert store.value(KEY_FORCE) == pytest.approx(constants.FORCE_MIN_N)
 
     def test_a_drag_does_not_write_the_file_on_every_step(self, qapp) -> None:
         """A drag is a hundred values; a hundred fsyncs is a lot of disk for one
