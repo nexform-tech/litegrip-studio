@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import IntEnum, IntFlag
-import time
 from typing import Optional
 
 from .constants import GripperGeometry, UnitConversion
@@ -28,11 +27,21 @@ class GripperStatus(IntFlag):
     ERROR = 0x10
 
 
+#: Age past which a :class:`GripperState` counts as stale, in seconds.  The same
+#: threshold the C++ SDK uses, so a guard reads the same on either side.
+STALE_AFTER_S = 0.5
+
+
 @dataclass
 class GripperState:
-    """Live gripper state snapshot.
+    """Gripper state snapshot, and how fresh it is.
 
-    All fields are updated on each :meth:`LiteGrip.get_state` call.
+    The readings are a cache, updated only by a status frame.  Whether such a
+    frame arrived is what :attr:`fresh`, :attr:`data_age_s` and
+    :meth:`is_stale` report — a snapshot from a bus that said nothing is not a
+    measurement, and it must not look like one.  Check them before trusting the
+    numbers; :meth:`LiteGrip.refresh_status` elicits a frame when the bus is
+    idle.
     """
 
     position_rad: float = 0.0
@@ -41,11 +50,34 @@ class GripperState:
     temperature_mos: int = 0
     temperature_coil: int = 0
     error_code: int = 0
-    timestamp: float = field(default_factory=time.time)
+    #: Wall-clock time the frame behind this snapshot arrived — not the time of
+    #: the call that returned it.  ``0.0`` means no frame has ever arrived, so
+    #: every reading above is still a constructor default.
+    timestamp: float = 0.0
 
     # Convenience — computed from raw values with unit conversion
     position_mm: float = 0.0
     force_n: float = 0.0
+
+    #: Whether a status frame answered *this* read.  False means the readings
+    #: are the ones from the previous frame, however old that is.
+    fresh: bool = False
+    #: Seconds since the frame behind this snapshot arrived, or ``None`` when
+    #: there is no such frame at all.
+    data_age_s: Optional[float] = None
+
+    def is_stale(self, stale_after_s: float = STALE_AFTER_S) -> bool:
+        """True when the newest frame is older than *stale_after_s*, or absent.
+
+        This is about the snapshot's age, not about the read that produced it:
+        a read no frame answered has ``fresh=False`` while the snapshot may
+        still be younger than the threshold.  Ask both questions when the
+        difference matters — "how old is this" and "did anyone answer just now".
+
+        ``stale_after_s`` defaults to :data:`STALE_AFTER_S`, the same threshold
+        the C++ SDK uses.
+        """
+        return self.data_age_s is None or self.data_age_s > stale_after_s
 
     @property
     def is_enabled(self) -> bool:

@@ -319,6 +319,7 @@ class LiteGrip:
         self._can: Optional[LiteGripCAN] = None
         self._enabled = False
         self._connected = False
+        self._last_send_error: Optional[Exception] = None
         self._status_flags = GripperStatus.NONE
         self._actions = GripperActions(self, motion_config)
 
@@ -604,13 +605,34 @@ class LiteGrip:
             tau: Feed-forward torque in Nm.
 
         Returns:
-            True if the frame was sent.
+            True if the frame was sent.  A ``False`` return leaves the reason in
+            :attr:`last_send_error`.
         """
-        if self._can is None or not self._enabled:
+        if self._can is None:
+            self._last_send_error = self._not_connected_error()
+            return False
+        if not self._enabled:
+            self._last_send_error = self._not_enabled_error()
             return False
         with self._io_lock:
-            return self._can.control_mit(
+            sent = self._can.control_mit(
                 q_target=q, kp=kp, kd=kd, dq_target=dq, tau_feedforward=tau)
+            # 鸭子类型的替身可能没有这一项；真 CAN 层永远有。取不到就是
+            # 「原因没记录」，上层据此照实报，而不是编一个。
+            self._last_send_error = (
+                None if sent else getattr(self._can, "last_send_error", None))
+            return sent
+
+    @property
+    def last_send_error(self) -> Optional[Exception]:
+        """Why the last :meth:`send_mit_frame` did not send, or ``None``.
+
+        The exception the send itself reported — a ``CommError``-family cause
+        from the transport, or the ``NotInitializedError`` naming the step that
+        was skipped.  The engine reads it to raise the right type instead of one
+        fixed message that guesses.
+        """
+        return self._last_send_error
 
     def poll(self, timeout_s: float = 0.0) -> bool:
         """Poll for one CAN frame and update cached motor state.
@@ -1898,12 +1920,20 @@ class LiteGrip:
     # ═══════════════════════════════════════════════════════════════════
 
     def get_state(self, wait: bool = True) -> GripperState:
-        """Return the current gripper state.
+        """Return the current gripper state, saying how fresh it is.
 
         Args:
-            wait: If True (default), waits up to 50 ms for a fresh status
-                  frame.  If False, returns immediately with the last cached
-                  state (suitable for high-frequency control loops).
+            wait: If True (default), waits up to 50 ms for a status frame.
+                  If False, returns immediately with the last cached state
+                  (suitable for high-frequency control loops).
+
+        ``wait=True`` asks for a frame; it does not guarantee one.  A motor
+        answers a *control* frame, so an idle bus — one holding a pose, or
+        disabled — says nothing, and the wait ends on the cached readings.  The
+        returned snapshot says which happened: ``fresh`` is False when no frame
+        arrived, ``data_age_s`` is the age of the frame the readings did come
+        from, and ``timestamp`` is that frame's arrival time, not this call's.
+        Call :meth:`refresh_status` first when the bus has been idle.
 
         Returns:
             GripperState snapshot.
@@ -1914,15 +1944,25 @@ class LiteGrip:
 
         with self._io_lock:
             if wait:
-                self._can.update_state(timeout_s=0.05)
+                answered = self._can.update_state(timeout_s=0.05)
             else:
-                self._can.poll(timeout_s=0.0)
+                answered = self._can.poll(timeout_s=0.0)
 
             position_rad = self._can.get_position()
             velocity_rad_s = self._can.get_velocity()
             torque_nm = self._can.get_torque()
             error_code = self._can.get_error()
             t_mos, t_coil = self._can.get_temperature()
+
+            # Both stamps come from the frame, not from this call. A duck-typed
+            # transport need not carry them, and then there is nothing to say:
+            # None age means "no frame to date the readings by".
+            last_update = getattr(self._can, "last_update", None)
+            frame_time = getattr(self._can, "last_frame_time", None)
+            # last_update is the monotonic stamp the receive path put on the
+            # frame, so the age has to be measured on that clock.
+            data_age_s = (None if last_update is None
+                          else time.monotonic() - last_update)
 
             # pos_closed_rad = closed (0 mm), pos_open_rad = open (max mm).
             # Which way the rad count runs depends on the mount, so close_sign
@@ -1941,10 +1981,31 @@ class LiteGrip:
                 temperature_mos=t_mos,
                 temperature_coil=t_coil,
                 error_code=error_code,
-                timestamp=time.time(),
+                # 0.0 = no frame ever arrived (see GripperState.timestamp).
+                timestamp=0.0 if frame_time is None else frame_time,
                 position_mm=position_mm,
                 force_n=force_n,
+                fresh=bool(answered),
+                data_age_s=data_age_s,
             )
+
+    def refresh_status(self) -> bool:
+        """Ask the motor for a status frame (0xCC). Does not move the jaws.
+
+        Use it before :meth:`get_state` on an idle bus.  A motor answers the
+        control frames it receives, so a gripper holding a pose sends nothing on
+        its own and the status link goes quiet; this request makes it speak.
+
+        Returns:
+            True if the request went out.  False when there is no connection or
+            the write failed — the same reporting as ``enable()``, since this
+            asks rather than commands.
+        """
+        self._check_connected()
+        if self._can is None:
+            return False
+        with self._io_lock:
+            return self._can.refresh_status()
 
     def get_position(self) -> float:
         """Current position in mm."""
@@ -2552,13 +2613,20 @@ class LiteGrip:
     # Internal
     # ═══════════════════════════════════════════════════════════════════
 
+    def _not_connected_error(self) -> NotInitializedError:
+        return NotInitializedError(
+            "未连接 — 请先调用 connect() 或使用 with 上下文")
+
+    def _not_enabled_error(self) -> NotInitializedError:
+        return NotInitializedError("未使能 — 请先调用 enable()")
+
     def _check_connected(self) -> None:
         if not self._connected:
-            raise NotInitializedError("未连接 — 请先调用 connect() 或使用 with 上下文")
+            raise self._not_connected_error()
 
     def _check_enabled(self) -> None:
         if not self._enabled:
-            raise NotInitializedError("未使能 — 请先调用 enable()")
+            raise self._not_enabled_error()
 
     def _claim_session(self, owner: str, error: type) -> None:
         """Take the single long-running session slot, or raise *error*.
