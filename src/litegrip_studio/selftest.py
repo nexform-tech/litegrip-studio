@@ -39,24 +39,26 @@ from .units import Limits, frame_mismatch
 #: are the witnesses of it: put the file's number back and the travel check
 #: fails.  The second is the SDK's shipped template
 #: (``calibration_normal.json``), and there the two are the *same* number, because
-#: upstream re-measured the shipped files for this unit in ``b9caae8``: 61.012293
-#: is what the derivation gives over its span.  Equality is the fact to pin
-#: there, not the defect to catch, and ``agrees`` records which of the two a
-#: dataset is.
+#: upstream re-measured the shipped files for this unit in ``b9caae8`` and again
+#: in ``c187b78``: 73.457311 is what the derivation gives over its span.
+#: Equality is the fact to pin there, not the defect to catch, and ``agrees``
+#: records which of the two a dataset is.
 #:
-#: The template is *not* the factory file, and since the factory file was
-#: overridden with this bench's hand-recorded pair the two no longer carry the
-#: same angles either: they are different schemas, read from different places,
-#: and the factory file is checked as a file by
+#: The template is *not* the factory file: they are different schemas, read from
+#: different places, and the factory file is checked as a file by
 #: :func:`check_the_fallback_calibration_is_usable` rather than from this table.
+#: Since ``c187b78`` the two do carry the same pair of angles, because upstream
+#: took the numbers this repository had been carrying as a local override — but
+#: nothing here reads the factory file into this table, so that fact is a comment
+#: rather than an assumption.
 #: The reverse template carries the template's numbers mirrored, so it is the
 #: same case again.
 KNOWN_CALIBRATIONS = (
     (0.0, 1.14, 120.0 / 1.14, False, "旧 SDK 默认值（2026-10-10 换 85 mm 之前写出的文件）"),
     (
-        0.052071,
-        -1.357481,
-        61.01229326764816,
+        0.029564,
+        -1.141184,
+        73.45731105242119,
         True,
         "SDK 模板（calibration_normal.json，上游已按本机重新实测）",
     ),

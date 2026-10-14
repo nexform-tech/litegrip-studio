@@ -1,9 +1,9 @@
 {
   "calibrated": true,
-  "zero_position_rad": -1.357481,
-  "max_position_rad": 0.052071,
-  "travel_range_rad": 1.409552,
-  "rad_to_mm": 61.01229326764816,
+  "zero_position_rad": -1.141184,
+  "max_position_rad": 0.029564,
+  "travel_range_rad": 1.170748,
+  "rad_to_mm": 73.45731105242119,
   "work_stroke_mm": 80.0,
   "motor_type": "DM4310"
 }

@@ -12,7 +12,7 @@ that has nothing but this repository.
 | | |
 | --- | --- |
 | Upstream | <https://github.com/nexform-tech/litegrip-python> |
-| Commit | `5b7da892e34b1fb8a405cc6db9b924c656daf802` (2026-10-13) |
+| Commit | `9180117f29e226f7492f3a63a7d2a20d1cf4e5dc` (2026-10-14) |
 | License | Apache-2.0 — `LICENSE` is that commit's file, copied verbatim |
 
 `src/litegrip/` holds the modules, the `can/` and `protocols/` subpackages, `py.typed`, and the
@@ -27,9 +27,38 @@ suite about upstream's internals; the console pins the part of the SDK surface i
 (`tests/test_vendored_sdk.py`, `tests/test_real_backend_api.py`) and records the tree hash below so
 drift cannot go unnoticed.
 
-Every file here is that commit's byte for byte, with one declared exception: this bench's
-`factory_calibration.json`, re-recorded by hand. The tree hash below covers every *other* file, and
-**Local override** records the exception with a hash of its own.
+Every file here is that commit's byte for byte, with no exception left: the factory calibration this
+repository used to override went upstream, so the tree hash below covers the whole tree. **Local
+override** records that file and where it went.
+
+## What the `5b7da89` → `9180117` move changed
+
+Three upstream commits. `351f80d` ("docs: note the empty-grasp runaway trip and how to get out of
+it") touches no file under `src/litegrip/`; the other two do, and both reach this console.
+
+- **`_iface_mtu()` hands the kernel a whole `struct ifreq`** (`9180117`, "size the SIOCGIFMTU buffer
+  for a whole struct ifreq"). `SIOCGIFMTU` writes back all 40 bytes of the struct, and since Python
+  3.14 `fcntl.ioctl()` raises `SystemError: buffer overflow` when anything lands past the end of its
+  argument (`cpython c2eaeee3`) — a `SystemError`, not the `OSError` that helper catches. The
+  18-byte buffer it was passing therefore killed `connect()` on 3.14 against every real gripper,
+  while the simulated backends, which never call `_iface_mtu()`, and every interpreter up to 3.13
+  stayed green. **This is what this re-vendor is for**: the console carries this code rather than
+  depending on an installed SDK, so the fix reaches it only by copying the tree.
+- **`factory_calibration.json` carries this bench's geometry** (`c187b78`, "replace the factory
+  calibration with the re-measured geometry"): `0.029564 / -1.141184 / 1.170748 /
+  73.45731105242119` where it carried `0.052071 / -1.357481 / 1.409552 / 61.01229326764816`. The
+  file also gained `"calibrated": true` and moved `mst_id` to the end. These are the numbers this
+  repository was carrying as its **local override**, and upstream adopted them, so the override is
+  gone and the file is upstream's again — see **Local override**.
+- The two `calibration_*.json` templates moved to that same geometry, so all three shipped files
+  still describe one unit, and `GripperGeometry`'s docstring in `constants.py` now derives its
+  span-versus-travel example from the new numbers. Nothing in the console repeats that docstring, but
+  the numbers it *does* repeat by hand — `KNOWN_CALIBRATIONS` in `src/litegrip_studio/selftest.py`
+  and `TEMPLATE` in `tests/test_units.py` — moved with them (re-vendor step 5).
+
+`rad_to_mm` rises by a factor of 1.204, so the two factory calibrations are not interchangeable: each
+spans the same 86 mm and each is internally consistent, and only the absolute angles separate them.
+Anything pinned to the old numbers had to move, and did.
 
 ## What the `b9caae8` → `5b7da89` move changed
 
@@ -45,7 +74,7 @@ trajectory and force-hold engine and the readme. Three parts of it reach this co
   convenience method that would read the config's. It does travel further than that, though — the
   SDK's `save_calibration` writes `config.kp` back out, so a calibration the console saves after
   this re-vendor carries `100.0` where one saved before carried `5.0`. The two shipped
-  `calibration_*.json` templates were *not* touched upstream and still say `5.0`.
+  `calibration_*.json` templates were *not* touched by that commit and carry no `kp` key at all.
 - **The range ends in `feat!: remove set_force from the public API`** — a breaking change for
   upstream's own callers, and inert here. The console's `SetForce` command and
   `MotionFSM.set_force` are its own, and no module under `src/litegrip_studio/` calls the SDK's.
@@ -60,32 +89,27 @@ upstream and re-vendor, or — when a local divergence is genuinely unavoidable 
 this file with the reason, so the person re-vendoring sees it.
 
 The tree hash below is what makes a silent edit visible: `tests/test_vendored_sdk.py` recomputes it
-and fails when it no longer matches. It covers every file except the one **Local override** declares,
-so an edit to any other file moves it, and an edit to the overridden file is caught by that file's
-own hash instead.
+and fails when it no longer matches. It covers every file in the tree except this note, so an edit to
+any file the SDK ships moves it.
 
 ## Tree hash
 
 ```text
-696c22bd33727a5732e643e7dfcfffe46f93b9a6aa2f96c79af2a1deb97ef0b3
+0cec1217168e7f773e98392601ad3a03791b8e6c75c7fced5d3691956b7df00a
 ```
 
 The recipe, so it can be recomputed without reading the test: take every file under `src/litegrip/`
-except `VENDORED.md` (this file holds the hash, so it cannot be part of it), `__pycache__`, and the
-overridden `factory_calibration.json` (whose content is pinned by its own hash in **Local override**
-instead), ordered by its POSIX path relative to `src/litegrip/`; feed each path, a newline, then the
-file's bytes into one SHA-256 stream; read the hex digest.
+except `VENDORED.md` (this file holds the hash, so it cannot be part of it) and `__pycache__`,
+ordered by its POSIX path relative to `src/litegrip/`; feed each path, a newline, then the file's
+bytes into one SHA-256 stream; read the hex digest.
 
 ```bash
 python3 - <<'PY'
 import hashlib, pathlib
 root = pathlib.Path("src/litegrip")
-overridden = "factory_calibration.json"
 h = hashlib.sha256()
 for p in sorted(root.rglob("*")):
     if not p.is_file() or "__pycache__" in p.parts or p.name == "VENDORED.md":
-        continue
-    if p.relative_to(root).as_posix() == overridden:
         continue
     h.update((p.relative_to(root).as_posix() + "\n").encode())
     h.update(p.read_bytes())
@@ -93,11 +117,15 @@ print(h.hexdigest())
 PY
 ```
 
+If a re-vendor ever has to leave a local divergence in place, declare it here by name and exclude it
+from the recipe above, pinning it with a hash of its own — the recipe and the exclusions have to be
+written where a reader can recompute the hash from this file alone.
+
 ## Local override
 
-One file here is not upstream's, and it is the only one. `tests/test_vendored_sdk.py` hashes it on
-its own and fails when it stops matching what this section records, so a re-vendor that copies
-upstream's file back over it is a loud failure rather than a quiet change of millimetres.
+There is none today: every file under `src/litegrip/` is upstream's at the commit above, byte for
+byte, and the tree hash covers all of them. This section records the one that was here and where it
+went, so the next re-vendor does not have to rediscover it.
 
 ### The factory calibration, re-recorded by hand
 
@@ -109,11 +137,16 @@ recorded on 2026-10-13 is `0.029564 / -1.141184`, a 1.170748 rad span, with `rad
 `SPAN_INSET_MM` (`86 / 1.170748`), so the fallback carries the scale the console moves by and not
 one that merely looks plausible.
 
-The override is data only. No file of code under `src/litegrip/` is edited: the one place in the SDK
+The override was data only. No file of code under `src/litegrip/` was edited: the one place in the SDK
 that illustrates the span-versus-travel derivation with the shipped numbers — `GripperGeometry` in
-`constants.py` — still shows upstream's.
+`constants.py` — showed upstream's until this re-vendor, which moved both to the same re-measured
+pair.
 
-Its hash, so a re-vendor can tell this file from upstream's:
+Upstream `c187b78` ("fix: replace the factory calibration with the re-measured geometry") then wrote
+exactly those numbers into upstream's own `factory_calibration.json`. So the override was dropped
+rather than kept: it no longer said anything upstream disagreed with, it *was* upstream's file. Its
+hash, which is what upstream's file hashes to since `c187b78`, and which `tests/test_vendored_sdk.py`
+pinned while the override existed so that a re-vendor could not revert it quietly:
 
 ```text
 8f891b1022d35d13f27eb029ada0e6d8f94d45ad70ee69ee84eeac4154174b15
@@ -128,14 +161,15 @@ repositories disagreed about those numbers, and this repository took the C++ one
 `0.0 / -1.651026 / 1.651026 / 52.69`, a span implying 86.99 mm where this bench travels 85 mm.
 
 Upstream's `b9caae8` ("fix: ship the factory geometry in the calibration files") closed the gap. All
-three of upstream's shipped calibration files carry `0.052071 / -1.357481 / 1.409552 /
-61.01229326764816` since then, which is the unit on this bench, and the same numbers that override
+three of upstream's shipped calibration files carried `0.052071 / -1.357481 / 1.409552 /
+61.01229326764816` from then on, which is the unit on this bench, and the same numbers that override
 was carrying. Taking upstream's file back was therefore not a change of numbers, and that override
-is gone rather than moved.
+is gone rather than moved. (`c187b78` moved all three files once more, to the pair recorded above.)
 
-The override above is a different claim about the same file, not a revival of this one: it is this
-bench's hand-recorded pair against upstream's probe-measured one, rather than a choice between the
-two upstream repositories.
+The override that replaced it was a different claim about the same file, not a revival of this one:
+this bench's hand-recorded pair against upstream's probe-measured one, rather than a choice between
+the two upstream repositories. Upstream then measured this unit again and got the same answer, so
+that claim is upstream's too now.
 
 One key still differs from the C++ copy: upstream's file carries `work_stroke_mm: 80.0` and the C++
 one has no such key at all. Upstream's commit says why it kept it — dropping it "would let open() run
@@ -182,11 +216,13 @@ Then, in one commit:
 
 1. Update the commit and date in the table above.
 2. Settle the local override, then recompute the tree hash with the recipe above and replace it. The
-   copy above brings upstream's `factory_calibration.json` back with it, which silently reverts the
-   fallback — the override hash test is what catches that. If upstream now carries this bench's
-   hand-recorded pair, delete the override from **Local override** and take the file as it comes;
-   if it does not, restore the file (`git show HEAD:src/litegrip/factory_calibration.json >
-   src/litegrip/factory_calibration.json`) and leave that section as it is.
+   copy above brings upstream's `factory_calibration.json` with it, and if this repository has
+   diverged from that file, the copy silently reverts the divergence — the hash tests are what catch
+   that. There is no override in place today: take the file as it comes, unless this bench's hand
+   recording has moved away from upstream's again. In that case save upstream's copy first
+   (`git show HEAD:src/litegrip/factory_calibration.json > /tmp/upstream-factory.json`), put the hand
+   recording back, and redeclare it in **Local override** — its hash, and its exclusion from the
+   recipe above — so the next re-vendor sees the divergence rather than overwriting it.
 3. Run the suite: `env -u LITEGRIP_SDK_PATH python3 -m pytest -q`. The SDK-surface tests are the
    contract — if upstream changed a signature the console calls, they fail here rather than on the
    bench.
@@ -194,8 +230,11 @@ Then, in one commit:
    behaviour change the console does not test for will not announce itself.
 5. Move the calibration numbers this repository repeats by hand. `src/litegrip_studio/selftest.py`
    carries the shipped files' angles and scales as literals (`KNOWN_CALIBRATIONS`) and asserts how
-   each stands to the console's own derivation; a re-vendor that changes them does not move that
-   table, and the assertions about the difference are exactly what fails when the two drift apart.
+   each stands to the console's own derivation; `tests/test_units.py` carries the `normal` template's
+   three numbers as `TEMPLATE`, and `tests/test_calibration.py` and
+   `tests/test_ui_calibration_page.py` carry the factory file's. A re-vendor that changes them does
+   not move any of those, and the assertions about the difference are exactly what fails when the two
+   drift apart.
 
 ## Known divergence: the reported version
 
