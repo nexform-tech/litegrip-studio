@@ -500,8 +500,10 @@ across its jaws, while the slider covers only part of it and neither end is reac
 where "a slice taken out of the middle of 0–120" came from. The two angles in the file are
 measurements and the coefficient is derived, so `units.derive_scale()` computes it:
 `(measured travel + SPAN_INSET_MM) / span`. On this machine that is
-`(85 + 1) / 1.681925 = 51.13 mm/rad`, so the two recorded limits span 86.00 mm, the slider's
-0…85 covers the whole travel, and the top of the range sits 1 mm inside the recorded open limit.
+`(85 + 1) / 1.170748 = 73.46 mm/rad` — the span the file in force records, 1.170748 rad — so the two
+recorded limits span 86.00 mm, the slider's 0…85 covers the whole travel, and the top of the range
+sits 1 mm inside the recorded open limit. The file's own `rad_to_mm` says the same 73.46, because
+this console wrote it; the sentence above is why that is a coincidence rather than a lookup.
 
 The travel (`constants.DEFAULT_TRAVEL_MM`, 85.0 mm) is the **measured value for this gripper** and
 is a constant, not a setting. It decides two things: the mm coefficient and the slider's range, so
