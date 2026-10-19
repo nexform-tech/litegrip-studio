@@ -21,6 +21,7 @@ instead of sleeping.
 
 from __future__ import annotations
 
+import math
 import random
 import time
 from pathlib import Path
@@ -165,6 +166,15 @@ class SimBackend(GripperBackend):
         if not self._connected or not self._enabled:
             return False
         if self.tx_fail:
+            return False
+        # The same sanity check the real backend makes, for the same reason the
+        # real one makes it: a non-finite frame is a bug upstream, and executing
+        # it would poison the plant's whole state (every comparison against NaN
+        # is false, so the drive would look inert while its integrators are
+        # NaN).  Refusing keeps the two backends answering alike.
+        if not all(math.isfinite(v) for v in (q_rad, kp, kd, dq_rad_s, tau_nm)):
+            return False
+        if kp < 0.0 or kd < 0.0:
             return False
         self.plant.stream(q_rad, kp, kd, dq_rad_s, tau_nm)
         return True

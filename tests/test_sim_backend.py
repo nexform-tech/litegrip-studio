@@ -13,6 +13,7 @@ produces the same numbers on every machine.
 from __future__ import annotations
 
 import json
+import math
 
 import pytest
 
@@ -135,6 +136,37 @@ class TestDisableUnloadsThePlant:
         bench.sim.disable()
 
         assert not bench.sim.stream_frame(0.0, constants.KP_MOVE, constants.KD_DEFAULT)
+
+
+class TestItRefusesWhatTheRealBackendRefuses:
+    """A frame the real backend would not send must not move the plant either.
+
+    The two backends have to answer alike, or a console that behaves in the
+    simulator misbehaves on the bench.  Non-finite values are the worst case to
+    differ on: NaN poisons the plant's state, and every comparison against NaN is
+    false, so the drive would look inert rather than broken.
+    """
+
+    def test_a_non_finite_frame_is_refused(self) -> None:
+        bench = Bench()
+        q_rad = bench.sim.plant.q
+
+        assert (
+            bench.sim.stream_frame(math.nan, constants.KP_MOVE, constants.KD_DEFAULT)
+            is False
+        )
+        assert bench.sim.stream_frame(math.inf, 0.0, 0.0) is False
+        assert bench.sim.stream_frame(0.0, math.nan, 0.0) is False
+
+        bench.run(0.2)
+
+        assert bench.sim.plant.q == q_rad, "the refused frames moved nothing"
+        assert math.isfinite(bench.sim.plant.q)
+
+    def test_a_negative_gain_is_refused(self) -> None:
+        bench = Bench()
+        assert bench.sim.stream_frame(0.0, -1.0, constants.KD_DEFAULT) is False
+        assert bench.sim.stream_frame(0.0, constants.KP_MOVE, -1.0) is False
 
 
 class TestItsOwnCalibration:

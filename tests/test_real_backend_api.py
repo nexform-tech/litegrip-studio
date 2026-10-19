@@ -532,12 +532,17 @@ class TestPrimitives:
         assert limits.rad_to_mm != pytest.approx(USER_RAW["rad_to_mm"])
         assert tele.position_mm != pytest.approx(by_the_file)
 
-    def test_position_mm_is_zero_with_no_calibration(self, backend) -> None:
+    def test_position_mm_is_nan_with_no_calibration(self, backend) -> None:
         """Millimetres are undefined until the travel is known, and the SDK's
-        fallback number would come from the reversed default config."""
+        fallback number would come from the reversed default config.
+
+        NaN rather than 0.0, because 0 mm is a *place*: the closed stop.  A
+        console that read it as a position would hold the jaws shut on the
+        strength of a measurement nobody made.
+        """
         backend._info = None
         _stub(backend).state.position_rad = 1.5
-        assert backend.read().position_mm == 0.0
+        assert math.isnan(backend.read().position_mm)
 
     def test_force_is_reported_even_uncalibrated(self, backend) -> None:
         """It is a torque times a constant — and the probe needs it before any

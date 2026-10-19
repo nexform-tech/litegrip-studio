@@ -241,9 +241,9 @@ class RealBackend(GripperBackend):
 
         The last line of defence before hardware, and the only one that is not
         in :mod:`litegrip_studio.core`: the FSM already clamps every command to
-        the validated travel and the units layer already replaces non-finite
-        values, so a command arriving here out of range means a bug in one of
-        them.  Sending it anyway is how a motor gets a garbage frame; refusing
+        the validated travel and refuses to build one from a position that is
+        not a number, so a command arriving here out of range or non-finite
+        means a bug in one of them.  Sending it anyway is how a motor gets a garbage frame; refusing
         turns the bug into a stopped gripper.  The clamp uses *our* limits, not
         the SDK config's, because a clamp derived from a config that may be
         reversed converts a wrong command into a wrong command that looks
@@ -336,12 +336,15 @@ class RealBackend(GripperBackend):
             temperature_mos=int(state.temperature_mos),
             temperature_coil=int(state.temperature_coil),
             error_code=int(state.error_code),
-            # Zero rather than the SDK's own conversion when there is no usable
+            # NaN rather than the SDK's own conversion when there is no usable
             # calibration: millimetres are undefined until the travel is known,
-            # and a number derived from a possibly-reversed config is worse than
-            # no number.  Anything that needs the position while uncalibrated —
-            # the probe — works in rad, which is always meaningful.
-            position_mm=limits.to_mm(state.position_rad) if limits is not None else 0.0,
+            # and the SDK's number would be derived from a possibly-reversed
+            # config.  It is emphatically not 0.0 either — 0 mm is the closed
+            # stop, and a console that read it as a position would hold the jaws
+            # shut on the strength of a place nobody measured.  Anything that
+            # needs the position while uncalibrated — the probe — works in rad,
+            # which is always meaningful.
+            position_mm=limits.to_mm(state.position_rad) if limits is not None else math.nan,
             # Well-defined without a calibration: it is a torque scaled by a
             # constant, and the operator needs it most during the probe.
             force_n=force_from_torque(state.torque_nm),

@@ -323,6 +323,79 @@ class TestGate:
         assert all(o.q_cmd_mm is None for o in outs), "nothing in millimetres"
 
 
+class TestAnUnknownPosition:
+    """A NaN is not a place, and the machine must not pick one.
+
+    The clamp used to answer it with 0 mm — the closed stop — and the next hold
+    then commanded exactly that.  The worker now refuses a gated command before
+    it reaches here; these tests pin the state machine's own half of the rule,
+    for every caller that is not the worker.
+    """
+
+    @staticmethod
+    def unknown() -> Telemetry:
+        return Telemetry(position_mm=math.nan, position_rad=math.nan)
+
+    def test_a_move_with_no_reading_sends_nothing(self) -> None:
+        fsm, backend = servo(start_mm=0.0)
+        fsm.move_to_mm(60.0, "slider")
+
+        out = fsm.tick(backend, self.unknown(), DT, allow_motion=True)
+
+        assert out.sent is False
+        assert backend.frames == [], "an unknown position is not a target"
+        assert fsm.state is MotionState.BLOCKED
+        assert "尚未读到位置" in out.note
+
+    def test_it_keeps_sending_nothing_while_the_reading_stays_unknown(self) -> None:
+        fsm, backend = servo(start_mm=0.0)
+        fsm.move_to_mm(60.0, "slider")
+        fsm.tick(backend, self.unknown(), DT, allow_motion=True)
+
+        outs = run_ticks(fsm, backend, 50, telemetry=self.unknown)
+
+        assert all(not o.sent for o in outs)
+        assert backend.frames == []
+
+    def test_a_reading_that_comes_back_re_enables_the_hold(self) -> None:
+        fsm, backend = servo(start_mm=60.0)
+        fsm.move_to_mm(120.0, "slider")
+        fsm.tick(backend, self.unknown(), DT, allow_motion=True)
+
+        out = fsm.tick(backend, backend.telemetry(), DT, allow_motion=True)
+
+        assert out.sent is True
+        assert fsm.state is MotionState.HOLD
+        assert out.q_cmd_mm == pytest.approx(60.0)
+
+    def test_a_free_state_still_reaches_the_motor_with_no_reading(self) -> None:
+        """零重力 must work on exactly the console that cannot name a
+        millimetre — that is the one whose operator needs the jaws in hand to
+        re-calibrate.  The position field is inert under zero gains, so it is
+        filled with a finite placeholder rather than left NaN, which the
+        backends refuse."""
+        for enter in (lambda f: f.release(), lambda f: f.zero_gravity(True)):
+            fsm, backend = servo(start_mm=60.0)
+            enter(fsm)
+
+            outs = run_ticks(fsm, backend, 3, telemetry=self.unknown)
+
+            assert all(o.sent for o in outs)
+            backend.assert_finite()
+            assert all(f.kp == 0.0 and f.kd == 0.0 for f in backend.frames)
+
+    def test_a_nan_target_is_refused_rather_than_clamped(self) -> None:
+        """The UI and the CLI both parse floats, and ``float("nan")`` is one.
+        Clamping it used to mean driving to the closed stop."""
+        fsm, backend = servo(start_mm=60.0)
+
+        with pytest.raises(ValueError, match="有限数"):
+            fsm.move_to_mm(math.nan, "cli")
+
+        assert fsm.state is MotionState.IDLE
+        assert backend.frames == []
+
+
 class TestFreeStates:
     @pytest.mark.parametrize(
         "enter", [lambda f: f.release(), lambda f: f.zero_gravity(True, 60.0)]

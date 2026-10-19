@@ -198,10 +198,16 @@ class TestClamping:
         assert BENCH.clamp_rad(1e6) == BENCH.rad_high
         assert BENCH.clamp_rad(-1e6) == BENCH.rad_low
 
-    def test_nan_does_not_propagate_into_a_command(self) -> None:
-        """A NaN that reaches a frame is a runaway motor, so it is caught here."""
-        assert BENCH.clamp_mm(math.nan) == 0.0
-        assert not math.isnan(BENCH.clamp_rad(math.nan))
+    def test_nan_is_not_turned_into_a_position(self) -> None:
+        """A NaN is a reading nobody took, not a place.
+
+        Answering it with 0 mm — the closed stop — invents a position, and the
+        next hold commands the jaws there.  That is how a console that had not
+        measured the jaws drove them shut, so the clamp passes it through and
+        every caller has to treat it as no reading.
+        """
+        assert math.isnan(BENCH.clamp_mm(math.nan))
+        assert math.isnan(BENCH.clamp_rad(math.nan))
 
     def test_speed_is_clamped_to_the_configured_band(self) -> None:
         assert BENCH.clamp_speed(0.0) == constants.SPEED_MIN_MM_S

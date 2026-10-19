@@ -113,8 +113,16 @@ class Limits:
 
     # ── clamping ────────────────────────────────────────────────────────────
     def clamp_mm(self, mm: float) -> float:
+        """Clamp to the commanded stroke, but never invent a position.
+
+        The clamp bounds a *known* number.  A NaN is not 0 mm: it is a console
+        that does not know where the jaws are, and answering it with the closed
+        stop turns an unknown reading into a command to shut the jaws.  So the
+        NaN is passed through, and every caller treats it as no reading at all
+        (see :meth:`~litegrip_studio.core.worker.WorkerLoop._measured_mm`).
+        """
         if math.isnan(mm):
-            return 0.0
+            return mm
         return min(max(mm, 0.0), self.max_stroke_mm)
 
     def clamp_rad(self, rad: float) -> float:
@@ -124,9 +132,12 @@ class Limits:
         than delegating to ``goto_rad``, which trusts whatever config the SDK
         holds — and the SDK's own clamp collapses to a constant instead of
         refusing when the two angles are ordered the other way round.
+
+        A NaN is passed through for the same reason as in :meth:`clamp_mm`: the
+        closed angle is a place, and a reading nobody took is not.
         """
         if math.isnan(rad):
-            return self.closed_rad
+            return rad
         return min(max(rad, self.rad_low), self.rad_high)
 
     def clamp_speed(self, speed_mm_s: float) -> float:
