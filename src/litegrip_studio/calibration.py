@@ -2,9 +2,9 @@
 
 Why this module exists
 ----------------------
-The SDK's ``load_calibration(path)`` reads ``[path, factory_calibration.json]``
-in order and returns ``True`` for BOTH, distinguishing them only with a
-``log.info`` call (gripper.py:726-749).  A factory file belongs to a nominal
+The SDK's ``LiteGrip.load_calibration(path)`` reads
+``[path, factory_calibration.json]`` in order and returns ``True`` for BOTH,
+distinguishing them only by the path in a ``log.info`` call.  A factory file belongs to a nominal
 unit, not necessarily to the gripper on the bench, so silently loading it makes
 every mm and force reading wrong with nothing on screen to show it.  Worse,
 calling nothing at all leaves ``GripperConfig``'s defaults in place —
@@ -72,13 +72,14 @@ PROVENANCE_LABELS = {
     PROVENANCE_MEMORY: "内存标定（未保存）",
 }
 
-# The three keys the SDK requires; it indexes them unguarded (gripper.py:745),
-# so a file missing one raises KeyError from inside the SDK rather than a
-# diagnosable error.  We validate before it ever gets there.
+# The three keys the SDK's ``load_calibration`` indexes unguarded, so a file
+# missing one raises KeyError from inside the SDK rather than a diagnosable
+# error.  We validate before it ever gets there.
 REQUIRED_KEYS = ("zero_position_rad", "max_position_rad", "rad_to_mm")
 
-# Keys the SDK's save_calibration() writes.  We mirror the full set so a file we
-# produce is loadable by the SDK unchanged.
+# The keys this console writes.  The SDK's ``save_calibration`` also writes
+# ``calibrated``, ``work_stroke_mm`` and (when known) ``mst_id``; every one of
+# those is optional on load, so a file produced here is loadable unchanged.
 _SAVED_KEYS = (
     "channel",
     "can_id",
@@ -96,7 +97,13 @@ _SAVED_KEYS = (
 
 
 def default_user_path() -> Path:
-    """Mirrors the SDK's ``DEFAULT_CALIB`` (gripper.py:39)."""
+    """``$LITEGRIP_CALIB``, or the SDK's legacy ``DEFAULT_CALIB`` location.
+
+    The variable is read per call rather than once at import, which is what lets
+    a test (or a launcher) redirect it.  The per-channel
+    ``LiteGrip.default_calib_path`` is deliberately not mirrored: the console
+    always names the file it loads and saves explicitly.
+    """
     env = os.environ.get("LITEGRIP_CALIB")
     if env:
         return Path(env).expanduser()
@@ -104,7 +111,7 @@ def default_user_path() -> Path:
 
 
 def _sdk_factory_path() -> Path:
-    """The SDK's own factory calibration (gripper.py:33).
+    """The SDK's own factory calibration (``litegrip.gripper._FACTORY_CALIB``).
 
     Resolved through ``litegrip.__file__`` so it is correct inside a PyInstaller
     bundle (``sys._MEIPASS``), which is why the build must pass

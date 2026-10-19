@@ -203,9 +203,9 @@ class TestSchemaValidation:
 
     @pytest.mark.parametrize("missing", calibration.REQUIRED_KEYS)
     def test_a_missing_required_key_is_named_not_raised(self, missing: str) -> None:
-        """The SDK indexes these three unguarded (gripper.py:745), so a file
-        missing one raises ``KeyError`` from inside the SDK — with no way to
-        tell which file, or why."""
+        """The SDK indexes these three unguarded in ``load_calibration``, so a
+        file missing one raises ``KeyError`` from inside the SDK — with no way
+        to tell which file, or why."""
         data = dict(USER_RAW)
         del data[missing]
         raw, problems = calibration.parse_calibration_json(json.dumps(data))
@@ -1024,8 +1024,8 @@ class TestPaths:
         assert calibration.default_user_path() == tmp_path / "x.json"
 
     def test_the_user_path_defaults_to_the_sdk_location(self, monkeypatch) -> None:
-        """Mirrors ``DEFAULT_CALIB`` (gripper.py:39) — if these diverge, the file
-        the console validates is not the file the SDK loads."""
+        """Mirrors ``DEFAULT_CALIB`` — if these diverge, the file the console
+        validates is not the file the SDK loads."""
         monkeypatch.delenv("LITEGRIP_CALIB", raising=False)
         assert calibration.default_user_path() == (
             Path.home() / ".litegrip" / "litegrip_calibration.json"

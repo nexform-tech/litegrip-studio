@@ -4,18 +4,17 @@ No Qt, no SDK, no I/O — everything here is a function of its arguments, so the
 whole module is unit-testable and can be reasoned about by hand.
 
 The conversion formulas are the SDK's (not invented), because getting them
-subtly wrong is how a gripper drives into a hard stop:
+subtly wrong is how a gripper drives into a hard stop.  The SDK applies the
+mounting direction through ``GripperConfig.close_sign``:
 
-    mm  = (pos_closed_rad - position_rad) * rad_to_mm      gripper.py:1281
-    rad = pos_closed_rad - position_mm / rad_to_mm         gripper.py:925
+    mm  = (pos_closed_rad - position_rad) * close_sign * rad_to_mm
+    rad = pos_closed_rad - close_sign * position_mm / rad_to_mm
 
-Both of those hardcode the sign of the mapping, and the SDK has no other form: as
-written it can only describe a gripper whose encoder angle *shrinks* as the jaws
-open, which is how the units it was written for are assembled.  The console does
-not take that on trust either: it reads the sign out of the two recorded angles,
-:attr:`Limits.direction`, so a file whose angles came out the other way round is
-converted by what it says rather than by what the SDK expects.  The two formulas
-above are the case of it where the closed stop is the larger angle.
+The console does not take that sign on trust: it reads the direction out of the
+two recorded angles itself, :attr:`Limits.direction`, so a file whose angles
+came out the other way round is converted by what it says rather than by what
+the SDK's config was told.  The two formulas above are the case of it where the
+closed stop is the larger angle.
 
 The other thing the SDK's formulas are fed is ``rad_to_mm``, and that one is not
 taken from a file at all.  It is derived from the calibration's angles and the

@@ -661,8 +661,12 @@ class MotionFSM:
         is the *limits* that are in doubt, and ``q_cmd`` is derived from them.
         Under a reversed calibration every millimetre reading maps to an angle
         that drives the wrong way, so "hold still" can be a command to close hard.
-        The worker zero-torques alongside this, so the motor is not left acting on
-        whatever frame it last received.
+        When the gate is what closed, the worker also zero-torques once on that
+        edge (``_evaluate_gate``), so the last frame is withdrawn rather than
+        left running.  A refusal that leaves the gate open — an unreadable
+        frame, which the gate skips rather than judges — sends nothing at all;
+        a substitute pose would be a guess, and zeroing the motor is the
+        worker's decision to make, not this method's.
         """
         if reason:
             self._note = reason

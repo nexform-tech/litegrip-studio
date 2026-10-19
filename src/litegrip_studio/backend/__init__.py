@@ -10,19 +10,16 @@ The SDK's own high-level motion methods are deliberately absent.  Each is
 unusable here for a concrete reason:
 
 ``move_at_speed``
-    Ends every call with a fixed 20-frame (~100 ms) hold
-    (gripper.py:1117-1121), so slicing it for live feedback stutters.
-``goto``/``move_to``/``goto_rad``
-    ``duration`` is a settle time, not a speed, so the speed setting cannot be
-    honoured.  Also clamps to a config-derived range that is inverted while
-    uncalibrated (gripper.py:947).
+    Owns a blocking ramp loop with no abort hook.  It is the closest of the
+    SDK's methods to what this console does, which is exactly the temptation:
+    an E-stop cannot reach inside it.
+``goto``/``move_to``/``goto_rad``/``home``
+    The same blocking ramp, entered through a duration rather than a speed, and
+    with no abort hook.  ``home`` is ``move_to(pos_closed_rad, duration=1.0)``.
 ``open``/``close``/``grasp``
-    All funnel into ``control_mit_stream``, which has no abort hook
-    (can_bus.py:342), so an E-stop could not interrupt them.
-``home``
-    Uses the hardcoded ``GripperParams.POS_CLOSED_RAD`` rather than
-    ``config.pos_closed_rad`` (gripper.py:781), so it is wrong after
-    calibration.
+    Run the SDK's motion engine (``GripperActions``): a blocking frame loop
+    with no abort hook, so an E-stop could not interrupt it — least of all a
+    ``grasp``'s hold phase, which can last as long as the caller asked.
 ``calibrate_guided``/``calibrate_manual``
     Read stdin / rely on Ctrl+C and print to stdout — unreachable from a worker
     thread.  Reimplemented in :mod:`litegrip_studio.core.calibration_fsm`.
@@ -101,8 +98,8 @@ class ZeroResult:
     tolerance_rad: float = 1e-3
     #: Whether the motor is enabled *afterwards*, read from the drive rather
     #: than assumed.  The SDK's own sequence disables and re-enables around the
-    #: frame, and discards the result of its re-enable (gripper.py:1431), so a
-    #: read-back of ~0 is no promise that the motor came back.
+    #: frame, and discards the result of its re-enable (``LiteGrip.write_zero``),
+    #: so a read-back of ~0 is no promise that the motor came back.
     enabled: bool = True
 
     @property

@@ -2816,7 +2816,7 @@ class TestTheZeroWrite:
     def test_a_re_enable_that_did_not_take_is_not_reported_as_a_finished_zero(self) -> None:
         """``WriteZeroResult.ok`` means the drive accepted the frame, which is
         not the same as the motor having come back — the SDK re-enables around
-        the write and drops that result (gripper.py:1431)."""
+        the write and drops that result (``LiteGrip.write_zero``)."""
         backend = RecordingBackend()
         backend.zero_enabled = False
         bench = Bench(backend)

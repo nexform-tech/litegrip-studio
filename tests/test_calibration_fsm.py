@@ -811,8 +811,8 @@ class TestTheTwoPointProbe:
         assert fsm.open_rad == pytest.approx(0.6)
 
     def test_an_out_of_range_reading_is_never_recorded(self) -> None:
-        """The SDK's own guard (gripper.py:427), which is the one it applies to
-        the samples its zero-gravity mode collects."""
+        """The console's runaway bound (``MANUAL_POS_GUARD_RAD``), applied to
+        every sample the manual probe collects."""
         fsm = TwoPointCalibFSM()
         fsm.start(1.0)
         fsm.record_open()

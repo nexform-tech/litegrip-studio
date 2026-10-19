@@ -5,7 +5,7 @@ Only public SDK methods are used, and only four of them are on the control path
 convenience method is deliberately unused, and the reasons are structural rather
 than stylistic (they are listed at length in
 :mod:`litegrip_studio.backend`).  The one that matters most here:
-``control_mit_stream`` has no abort hook (can_bus.py:342), so anything built on
+``control_mit_stream`` has no abort hook, so anything built on
 it cannot be interrupted, which rules out ``open``, ``close``, ``grasp``,
 ``goto``, ``move_to`` and ``move_at_speed`` for a console whose E-stop has to
 work inside one tick.
@@ -105,8 +105,9 @@ class RealBackend(GripperBackend):
 
         # Built through ``config`` rather than positional arguments: the SDK's
         # constructor substitutes ``config`` values for any argument left at its
-        # default (gripper.py:101), so passing both means the config silently
-        # wins for exactly the arguments that are hardest to notice.
+        # default (the constructor substitutes ``config`` for them), so passing
+        # both means the config silently wins for exactly the arguments that
+        # are hardest to notice.
         cfg = GripperConfig()
         cfg.can_channel = channel
         cfg.max_stroke_mm = float(max_stroke_mm)
@@ -229,10 +230,10 @@ class RealBackend(GripperBackend):
             raise BackendError(f"标零失败: {exc}") from exc
 
         # ``enabled`` is read, never assumed, and never fixed up here.  The SDK
-        # discards its own re-enable result (gripper.py:1431), so the motor can
-        # legitimately be left disabled with the offset already written — and
-        # calling ``enable`` again from here would swallow a failure the worker
-        # is the object that knows how to report.
+        # discards its own re-enable result (``LiteGrip.write_zero``), so the
+        # motor can legitimately be left disabled with the offset already
+        # written — and calling ``enable`` again from here would swallow a
+        # failure the worker is the object that knows how to report.
         return ZeroResult(
             before_rad=float(result.before_rad),
             after_rad=float(result.after_rad),
@@ -427,8 +428,8 @@ class RealBackend(GripperBackend):
 
         # The one check that observes the outcome instead of constraining the
         # input.  ``load_calibration`` also overwrites kp, kd, can_id, mst_id,
-        # channel and canfd_mode from the file (gripper.py:752-767), so a file
-        # that disagrees with the running link shows up here too.
+        # channel and canfd_mode from the file, so a file that disagrees with
+        # the running link shows up here too.
         applied = Limits.from_config(self._gripper.config)
         mismatch = calibration.cross_check(info, applied)
         if mismatch:

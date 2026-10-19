@@ -1835,7 +1835,8 @@ class WorkerLoop:
         small next to ``CALIB_MISMATCH_RAD``, the gate will not notice.  The
         second exists because ``WriteZeroResult.ok`` means the drive *accepted
         the frame*, which is not the same as the motor having come back: the SDK
-        re-enables around the write and drops that result (gripper.py:1431).
+        re-enables around the write and drops that result
+        (``LiteGrip.write_zero``).
         """
         detail = (
             "当前标定文件中的角度是在旧零点下测得的，"

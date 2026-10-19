@@ -298,9 +298,9 @@ class StartGuidedCalibration(Command):
 class ConfirmProbeLimit(Command):
     """The operator says the jaws have reached the limit.
 
-    Replaces the SDK's "press Enter" (gripper.py:582), which needs stdin to be a
-    terminal and therefore cannot be reached from a worker thread — let alone
-    from a GUI.
+    Replaces the SDK's "press Enter" in ``LiteGrip.calibrate_guided``, which
+    needs stdin to be a terminal and therefore cannot be reached from a worker
+    thread — let alone from a GUI.
     """
 
     source: str = "confirm"
