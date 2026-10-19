@@ -1,6 +1,6 @@
 # LiteGrip Studio
 
-**English** | [简体中文](README_ZH.md)
+**English** | [简体中文](README.zh-CN.md)
 
 **LiteGrip Studio** is the operator console for the LiteGrip adaptive two-finger gripper. You drag
 a slider to move the jaws, press a button to open or close them, grasp with a force limit you set,
