@@ -817,7 +817,10 @@ def build_save_dict(
         "kd": kd,
         "grasp_torque_threshold": grasp_torque_threshold,
     }
-    assert set(data) == set(_SAVED_KEYS), "save schema drifted from the SDK's"
+    # An explicit raise rather than ``assert``: ``python -O`` strips asserts,
+    # and this one guards a schema the operator's file is written in.
+    if set(data) != set(_SAVED_KEYS):
+        raise AssertionError("save schema drifted from ``_SAVED_KEYS``")
     return data
 
 

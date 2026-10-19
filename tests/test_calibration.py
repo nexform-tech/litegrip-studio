@@ -832,6 +832,17 @@ class TestRoundTrip:
         _, problems = calibration.parse_calibration_json(json.dumps(data))
         assert problems == []
 
+    def test_the_schema_guard_is_a_raise_not_an_assert(self, monkeypatch) -> None:
+        """``python -O`` strips ``assert`` statements, and this one guards the
+        schema every calibration file is written in.  Defeated by declaring a
+        key the builder does not write."""
+        monkeypatch.setattr(
+            calibration, "_SAVED_KEYS", calibration._SAVED_KEYS + ("calibrated",)
+        )
+
+        with pytest.raises(AssertionError, match="schema drifted"):
+            calibration.build_save_dict(Limits(1.775959, -0.064279, 65.21))
+
     def test_a_saved_file_reloads_to_the_same_limits(self, env) -> None:
         original = calibration.resolve(_write(env.dir / "a.json", USER_RAW))
         target = env.dir / "nested" / "b.json"
