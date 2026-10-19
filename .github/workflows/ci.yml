@@ -60,7 +60,7 @@ jobs:
           node-version: 22
 
       - name: Lint Markdown
-        run: npx --yes markdownlint-cli2@0.23.3 "README.md" "README_ZH.md" "src/litegrip/VENDORED.md"
+        run: npx --yes markdownlint-cli2@0.23.3 "README.md" "README.zh-CN.md" "src/litegrip/VENDORED.md"
 
       - name: Validate repository standards
         run: |
