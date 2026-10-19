@@ -859,6 +859,64 @@ class TestRoundTrip:
         assert calibration.limits_from_raw(USER_RAW, 200.0).max_stroke_mm == 200.0
 
 
+class TestTheWriteIsAtomic:
+    """A save that fails must leave the previous calibration, not half of one.
+
+    The file is what the motion gate is opened from, so a truncated write is
+    the one failure that turns a working console into a refused one at the next
+    launch — and the truncated file is the *only* evidence of what happened.
+    """
+
+    def test_a_writer_that_dies_leaves_the_previous_file_alone(self, env) -> None:
+        target = env.dir / "cal.json"
+        target.write_text('{"keep": true}', encoding="utf-8")
+
+        def half_written(temp: Path) -> None:
+            temp.write_text("{ truncated", encoding="utf-8")
+            raise RuntimeError("disk full")
+
+        with pytest.raises(RuntimeError, match="disk full"):
+            calibration.atomic_write(target, half_written)
+
+        assert json.loads(target.read_text(encoding="utf-8")) == {"keep": True}
+
+    def test_a_failed_write_leaves_no_temporary_behind(self, env) -> None:
+        """A ``.cal.json.XXXX.tmp`` in the directory would be invisible to every
+        reader of the calibration and permanent, so the cleanup is not optional.
+        """
+        target = env.dir / "cal.json"
+        target.write_text("{}", encoding="utf-8")
+
+        with pytest.raises(OSError):
+            calibration.atomic_write(
+                target, lambda temp: (_ for _ in ()).throw(OSError("no space"))
+            )
+
+        assert [p.name for p in env.dir.iterdir()] == ["cal.json"]
+
+    def test_a_successful_write_leaves_no_temporary_behind(self, env) -> None:
+        target = env.dir / "cal.json"
+
+        calibration.write_calibration(target, {"zero_position_rad": 1.0})
+
+        assert [p.name for p in env.dir.iterdir()] == ["cal.json"]
+        assert json.loads(target.read_text(encoding="utf-8")) == {
+            "zero_position_rad": 1.0
+        }
+
+    def test_the_replaced_file_keeps_its_permissions(self, env) -> None:
+        """``mkstemp`` opens at 0600 whatever the file it replaces was, so the
+        replacement has to carry the old mode across or a calibration saved to
+        a group-readable path silently becomes private on the next save."""
+        target = env.dir / "cal.json"
+        target.write_text("{}", encoding="utf-8")
+        target.chmod(0o640)
+
+        calibration.write_calibration(target, {"zero_position_rad": 1.0})
+
+        assert target.stat().st_mode & 0o777 == 0o640
+
+
 # ── presentation ────────────────────────────────────────────────────────────
 class TestPresentation:
     @pytest.mark.parametrize(

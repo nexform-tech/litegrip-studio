@@ -472,9 +472,14 @@ class RealBackend(GripperBackend):
 
         # The SDK writes the file from its own config, so the config has to
         # carry our numbers first or we would save whatever was there before.
+        # It writes to a temporary and we rename it, so an SDK that fails
+        # halfway leaves the previous calibration in place instead of a
+        # truncated file the next launch would refuse.
         self._apply_to_config(info.limits)
         try:
-            written = self._gripper.save_calibration(str(target))
+            written = calibration.atomic_write(
+                target, lambda temp: self._gripper.save_calibration(str(temp))
+            )
         except LiteGripError as exc:
             raise BackendError(f"保存标定失败: {exc}") from exc
 

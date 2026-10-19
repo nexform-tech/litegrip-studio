@@ -40,7 +40,7 @@ angles the calibration was recorded at, and what refuses a calibration is
 :func:`~litegrip_studio.units.frame_mismatch`, which compares the file against
 the encoder and never looks at the ordering.
 
-Pure layer: no Qt, no SDK at import time, no I/O beyond reading the JSON files
+Pure layer: no Qt, no SDK at import time, no I/O beyond the calibration files
 it is pointed at.
 """
 
@@ -48,9 +48,11 @@ from __future__ import annotations
 
 import json
 import os
+import stat
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from . import constants
 from .units import Limits, derive_scale
@@ -812,10 +814,68 @@ def build_save_dict(
     return data
 
 
+def atomic_write(
+    path: str | os.PathLike[str], writer: Callable[[Path], object]
+) -> str:
+    """Fill a temporary sibling and move it over ``path`` in one step.
+
+    A calibration file is the difference between a console that moves to a
+    millimetre and one that moves to a clamp, so a half-written one is worse
+    than the file it replaced: it is present, it parses as invalid, and the
+    motion gate closes with nothing in the file to explain why.  ``write_text``
+    truncates first, so a crash, a full disk or an SDK that raises halfway
+    leaves exactly that.
+
+    ``writer`` is a callable rather than a string because the real backend's
+    file is written by the SDK, which takes a path and does its own I/O.  It
+    receives the temporary path, must leave a complete file there, and may
+    raise; whatever it leaves behind is removed.
+
+    The temporary is created in the target's directory, because ``os.replace``
+    is only atomic within one filesystem.  The file is fsynced before the
+    rename and the directory after it, so the replacement survives a power cut
+    rather than merely an orderly crash.
+    """
+    target = Path(path).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+    )
+    os.close(fd)
+    temp = Path(temp_name)
+    try:
+        writer(temp)
+
+        # mkstemp opens at 0600; give the result the permissions the file it
+        # replaces had, or the conventional ones when there was no file yet.
+        mode = (
+            stat.S_IMODE(target.stat().st_mode) if target.exists() else 0o644
+        )
+        os.chmod(temp, mode)
+
+        with open(temp, "rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(temp, target)
+
+        # The rename is durable only once the directory entry is on disk.
+        try:
+            directory = os.open(target.parent, os.O_RDONLY)
+        except OSError:
+            pass  # not supported on this platform; the rename still happened
+        else:
+            try:
+                os.fsync(directory)
+            except OSError:
+                pass
+            finally:
+                os.close(directory)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
+    return str(target)
+
+
 def write_calibration(path: str | os.PathLike[str], data: Mapping[str, Any]) -> str:
     """Write a calibration JSON file, creating parent directories."""
-    target = Path(path).expanduser()
-    if target.parent:
-        target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(dict(data), indent=2), encoding="utf-8")
-    return str(target)
+    text = json.dumps(dict(data), indent=2)
+    return atomic_write(path, lambda temp: temp.write_text(text, encoding="utf-8"))

@@ -169,6 +169,9 @@ class StubGripper:
         self.zero_after_rad = 0.0
         self.zero_enabled = True
 
+        # What ``save_calibration`` raises instead of finishing the file.
+        self.save_error: Exception | None = None
+
         # ``position_mm`` is a sentinel: the backend must not use it.
         self.state = SimpleNamespace(
             position_rad=self.config.pos_closed_rad,
@@ -261,6 +264,10 @@ class StubGripper:
 
     def save_calibration(self, path: str | None = None) -> str:
         self.saved.append(str(path))
+        if self.save_error is not None:
+            # Half a file, then the failure: what a full disk looks like.
+            Path(path).write_text("{ truncated", encoding="utf-8")
+            raise self.save_error
         data = {
             "channel": self.config.can_channel,
             "can_id": self.config.can_id,
@@ -968,6 +975,37 @@ class TestSaveCalibration:
             backend.save_calibration(str(innocent))
 
         assert env.factory.read_text(encoding="utf-8") == "{}"
+
+    def test_an_sdk_that_dies_mid_save_keeps_the_previous_file(self, backend, env) -> None:
+        """The SDK opens the target and writes into it, so a failure halfway
+        leaves a file that parses as invalid — and the next launch refuses to
+        move because of a save that reported failure and looked like success on
+        disk.  The old file is the state to return to."""
+        target = env.dir / "saved.json"
+        target.write_text('{"keep": true}', encoding="utf-8")
+        backend.set_calibration_memory(1.775959, -0.064279, 65.21)
+        _stub(backend).save_error = LiteGripError("no space left on device")
+
+        with pytest.raises(BackendError, match="保存标定失败"):
+            backend.save_calibration(str(target))
+
+        assert json.loads(target.read_text(encoding="utf-8")) == {"keep": True}
+        assert sorted(p.name for p in env.dir.iterdir()) == ["saved.json"]
+
+    def test_a_successful_save_lands_under_the_name_it_was_given(
+        self, backend, env
+    ) -> None:
+        """The backend writes through a temporary, so the returned path — which
+        the caller shows the operator and reloads from — has to be the target,
+        not the temporary it actually filled."""
+        target = env.dir / "saved.json"
+        backend.set_calibration_memory(1.775959, -0.064279, 65.21)
+
+        written = backend.save_calibration(str(target))
+
+        assert written == str(target)
+        assert sorted(p.name for p in env.dir.iterdir()) == ["saved.json"]
+        assert backend.calibration_info().provenance == calibration.PROVENANCE_USER
 
     def test_saving_with_nothing_to_save_is_refused(self, backend) -> None:
         with pytest.raises(NotReady):
