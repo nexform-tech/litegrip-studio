@@ -152,13 +152,35 @@ class TestTheChecksAreNotVacuous:
         with pytest.raises(AssertionError, match="被判成需要改动"):
             selftest.check_the_can_probe_is_read_correctly()
 
-    def test_the_estop_check_fails_on_a_motor_left_enabled(self, monkeypatch) -> None:
-        """It asserts on the reading, so defeating the reading must break it."""
+    def test_the_estop_check_fails_when_the_stop_does_not_stop(
+        self, monkeypatch
+    ) -> None:
+        """Defeating the stop itself, not the line after it.  The check used to
+        call ``disable()`` itself and then assert the motor was disabled, so it
+        would pass with a ``zero_torque`` that did nothing at all."""
         from litegrip_studio.backend import sim as sim_module
 
-        monkeypatch.setattr(sim_module.SimBackend, "disable", lambda self: None)
+        monkeypatch.setattr(sim_module.SimBackend, "zero_torque", lambda self: None)
 
-        with pytest.raises(AssertionError, match="仍是使能"):
+        with pytest.raises(AssertionError, match="仍在输出力矩"):
+            selftest.check_the_estop_zeroes_the_torque()
+
+    def test_the_estop_check_fails_on_a_motor_left_disabled(
+        self, monkeypatch
+    ) -> None:
+        """The other half: a stop that disables the drive is not the stop the
+        console performs, because a disabled DM motor coasts."""
+        from litegrip_studio.backend import sim as sim_module
+
+        stopped = sim_module.SimBackend.zero_torque
+
+        def stop_and_disable(self) -> None:
+            stopped(self)
+            self.disable()
+
+        monkeypatch.setattr(sim_module.SimBackend, "zero_torque", stop_and_disable)
+
+        with pytest.raises(AssertionError, match="电机失能"):
             selftest.check_the_estop_zeroes_the_torque()
 
     def test_the_arrival_check_reads_the_measurement_not_the_plan(
@@ -181,6 +203,22 @@ class TestTheChecksAreNotVacuous:
 
         with pytest.raises(AssertionError, match="停在"):
             selftest.check_a_move_arrives_and_stops()
+
+
+class TestItSurvivesOptimisedPython:
+    def test_no_check_relies_on_a_bare_assert(self) -> None:
+        """``python -O`` strips every ``assert`` statement in the interpreter.
+
+        Every check in this file used to be one, so a build that set ``-O`` —
+        or a launcher that did — would print PASS ten times without running a
+        single check.  A self-test that cannot fail is worse than none, and this
+        is the one property of it that no passing run can demonstrate.
+        """
+        tree = ast.parse(Path(selftest.__file__).read_text(encoding="utf-8"))
+
+        asserts = [node.lineno for node in ast.walk(tree) if isinstance(node, ast.Assert)]
+
+        assert asserts == []
 
 
 class TestItNeedsNoQt:
