@@ -463,6 +463,24 @@ class TestLifecycle:
         with pytest.raises(FaultActive):
             backend.clear_fault()
 
+    def test_a_clear_that_leaves_the_motor_dark_is_not_success(self, backend) -> None:
+        """The SDK accepts error code 0 — the *disabled* drive — as proof the
+        fault has gone, and then marks its own ``_enabled`` flag true without
+        checking the re-enable.  Reporting that as success would leave the
+        console sending frames to a motor that is not listening."""
+        _stub(backend).state.error_code = constants.ERROR_DISABLED
+
+        with pytest.raises(BackendError, match="未能重新使能"):
+            backend.clear_fault()
+
+    def test_a_fault_still_latched_after_the_clear_is_reported(self, backend) -> None:
+        _stub(backend).state.error_code = constants.ERROR_UV
+
+        with pytest.raises(FaultActive) as excinfo:
+            backend.clear_fault()
+
+        assert excinfo.value.code == constants.ERROR_UV
+
     def test_disconnect_swallows_a_failing_teardown(self, backend) -> None:
         """There is nothing to recover at shutdown, and raising would mask the
         reason the session is ending."""

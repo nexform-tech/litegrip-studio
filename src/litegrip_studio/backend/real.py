@@ -179,6 +179,20 @@ class RealBackend(GripperBackend):
         if not cleared:
             raise FaultActive(self.read().error_code, "清除故障失败")
 
+        # The SDK calls either OK code a cleared fault: one is the enabled
+        # drive, zero is the *disabled* one, and ``gripper.clear_fault`` then
+        # sets its own ``_enabled`` flag without asking whether the re-enable
+        # took.  A drive left dark would therefore be reported as an enabled,
+        # fault-free axis — and every frame sent afterwards would reach a motor
+        # that is not listening while the console says it is moving.  The code
+        # that the SDK's own poll loop saw is the only evidence available, and
+        # 1 is the one value that means both "no fault" and "enabled".
+        code = int(self.read().error_code)
+        if code not in constants.OK_ERROR_CODES:
+            raise FaultActive(code, f"清除故障失败: {describe_error(code)}")
+        if code == constants.ERROR_DISABLED:
+            raise BackendError("故障已清除，但电机未能重新使能")
+
     def write_zero(self) -> ZeroResult:
         """Rewrite the encoder offset so the current angle reads as zero.
 
