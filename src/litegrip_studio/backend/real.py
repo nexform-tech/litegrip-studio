@@ -49,7 +49,7 @@ from .. import calibration, constants
 from ..can_link import link_failure
 from ..calibration import CalibrationInfo
 from ..telemetry import Telemetry
-from ..units import Limits, force_from_torque
+from ..units import Limits, force_from_torque, torque_from_force
 from . import (
     BackendError,
     ConnectFailed,
@@ -285,6 +285,16 @@ class RealBackend(GripperBackend):
             return self._refuse(f"非有限值: q={q_rad!r} kp={kp!r} kd={kd!r}")
         if kp < 0.0 or kd < 0.0:
             return self._refuse(f"负增益: kp={kp!r} kd={kd!r}")
+        # A torque frame presses with no gain to cap it, so the mechanical
+        # rating has to be enforced here rather than trusted to the caller.
+        # Every setpoint in this console is already capped at ``FORCE_MAX_N``
+        # (see ``units.clamp_force_torque``); this catches the caller that is
+        # not.  Signed, because a negative torque is a direction, not a fault.
+        tau_max = torque_from_force(constants.FORCE_MAX_N)
+        if abs(tau_nm) > tau_max:
+            return self._refuse(
+                f"力矩 {tau_nm:.6f} N·m 超出机械额定 {tau_max:.6f} N·m"
+            )
 
         info = self._info
         limits = info.limits if info is not None else None

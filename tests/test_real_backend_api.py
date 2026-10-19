@@ -45,7 +45,7 @@ from litegrip_studio.backend import (
     NotReady,
 )
 from litegrip_studio.backend.real import RealBackend
-from litegrip_studio.units import Limits
+from litegrip_studio.units import Limits, torque_from_force
 
 from conftest import shipped_factory_calibrations
 
@@ -717,6 +717,24 @@ class TestFrameRefusal:
         assert armed.stream_frame(1.0, -1.0, 2.0) is False
         assert armed.stream_frame(1.0, 100.0, -1.0) is False
         assert _stub(armed).frames == []
+
+    def test_a_torque_beyond_the_mechanical_rating_is_refused(self, backend) -> None:
+        """A torque frame presses with no gain to bound it.
+
+        Nothing in this console builds one above the 40 N rating — the setpoints
+        are clamped in :func:`~litegrip_studio.units.clamp_force_torque` — but
+        that cap lives in the FSM, and this is the last code before the drive.
+        The sign is a direction rather than a fault, so the limit is on the
+        magnitude.
+        """
+        cap = torque_from_force(constants.FORCE_MAX_N)
+
+        assert backend.stream_frame(0.9, 0.0, 0.0, 0.0, cap + 0.1, ungated=True) is False
+        assert backend.stream_frame(0.9, 0.0, 0.0, 0.0, -cap - 0.1, ungated=True) is False
+        assert _stub(backend).frames == []
+
+        assert backend.stream_frame(0.9, 0.0, 0.0, 0.0, cap, ungated=True) is True
+        assert _stub(backend).frames[-1]["tau"] == cap
 
     def test_a_zero_gain_frame_reaches_an_uncalibrated_motor(self, backend) -> None:
         """零重力 (``RELEASE``) and the wizard's zero gravity (``ZERO_G``) carry

@@ -30,7 +30,7 @@ from typing import Any, Callable
 from .. import calibration, constants
 from ..calibration import CalibrationInfo
 from ..telemetry import Telemetry
-from ..units import Limits, derive_scale
+from ..units import Limits, derive_scale, torque_from_force
 from . import ConnectFailed, FaultActive, GripperBackend, NotReady
 from .plant import Plant, PlantConfig
 
@@ -175,6 +175,11 @@ class SimBackend(GripperBackend):
         if not all(math.isfinite(v) for v in (q_rad, kp, kd, dq_rad_s, tau_nm)):
             return False
         if kp < 0.0 or kd < 0.0:
+            return False
+        # Same mechanical rating the real backend enforces.  The plant would
+        # happily integrate a 10 N·m torque, and a run that does so would report
+        # motion the hardware would have refused.
+        if abs(tau_nm) > torque_from_force(constants.FORCE_MAX_N):
             return False
         self.plant.stream(q_rad, kp, kd, dq_rad_s, tau_nm)
         return True
