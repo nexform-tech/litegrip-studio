@@ -4,13 +4,13 @@ Both replace an SDK method that cannot be used from a GUI, and in both cases
 the reason is the same shape: the SDK's version owns its own loop, and there is
 no way into it.
 
-``calibrate_guided`` (gripper.py:520)
-    Waits for Enter (``sys.stdin.isatty()`` and ``select``, gripper.py:582), so
-    with no terminal it silently degrades to stall-detection only — in a GUI
-    there is no terminal at all.  Each step calls ``control_mit_stream`` for a
-    fixed 0.3 s, so nothing can interrupt it, and its output goes to ``print``.
+``LiteGrip.calibrate_guided``
+    Waits for Enter (``sys.stdin.isatty()`` and ``select``), so with no terminal
+    it silently degrades to stall-detection only — in a GUI there is no terminal
+    at all.  Each step calls ``control_mit_stream`` for a fixed 0.3 s, so nothing
+    can interrupt it, and its output goes to ``print``.
 
-``calibrate_manual`` (gripper.py:354)
+``LiteGrip.calibrate_manual``
     Sweeps the axis with the motor for a fixed duration with the position gain
     at zero and takes the extremes it passed through.  It documents "press
     Ctrl+C to stop early", which can never happen here: Python delivers signals
@@ -36,7 +36,7 @@ rather than integrated, so a stalled axis cannot wind up.
 
 **A reading is a reading.**  Both probes drop a measurement the mechanism could
 not have produced — a value that moved further in one tick than the drive can,
-or one outside the SDK's own plausibility bound — rather than folding it into
+or one outside the console's own plausibility bound — rather than folding it into
 the result.  The failure this catches is not hypothetical: a dropped frame
 leaves the SDK's cached position at ``0.0``, and ``0.0`` is inside any real
 travel, so it looks exactly like a limit that was reached.
@@ -467,10 +467,11 @@ class GuidedCalibFSM:
     def _backoff_tick(self) -> ProbeOut:
         """Move away from the open stop, one bounded step at a time.
 
-        The SDK backs off by commanding ``open_rad - 0.15`` (gripper.py:610),
-        which is *further into* the open stop — the sign is wrong on its own
-        mounting and it presses at kp=80 for half a second.  Backing off means
-        moving toward closed, which is :attr:`_sign` during this phase.
+        The SDK backs off in one blocking ``control_mit_stream`` call — half a
+        second at kp=80, with no way to stop it early — so the press it leaves
+        behind is bounded only by the drive.  Backing off here means moving
+        toward closed, which is :attr:`_sign` during this phase, one measured
+        step at a time.
 
         The length of the back-off is a step *count*
         (:attr:`backoff_steps`), not a distance to be measured.  Everywhere else
@@ -823,8 +824,9 @@ class TwoPointCalibFSM:
         """Whether this tick's reading is one to build a calibration on.
 
         Two ways it is not, and neither is hypothetical.  ``abs(rad) >=
-        pos_guard_rad`` is the SDK's own guard (gripper.py:427) against a runaway
-        value being adopted as a limit.  The jump is this console's, and it is
+        pos_guard_rad`` is the console's own bound
+        (:data:`~litegrip_studio.constants.MANUAL_POS_GUARD_RAD`) against a
+        runaway value being adopted as a limit.  The jump is this console's, and it is
         the one that matters on a hand-driven axis: a dropped frame leaves the
         SDK's cached position at 0.0, which is well inside the first guard and is
         also where a misread would put the *open* limit — the one reading that

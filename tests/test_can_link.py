@@ -1177,7 +1177,7 @@ class TestTellingATransportFailureApart:
     problem.
 
     The wrapped case is the one that actually happens: the SDK stringifies the
-    exception (``gripper.py:221``, ``raise HardwareError(f"使能失败: {e}")``),
+    exception (``raise HardwareError(f"使能失败: {e}")`` in ``LiteGrip.enable``),
     so the errno survives only in the implicit ``__context__`` chain.
     """
 

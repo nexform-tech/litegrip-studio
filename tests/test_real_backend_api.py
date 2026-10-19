@@ -45,7 +45,7 @@ from litegrip_studio.backend import (
     NotReady,
 )
 from litegrip_studio.backend.real import RealBackend
-from litegrip_studio.units import Limits
+from litegrip_studio.units import Limits, torque_from_force
 
 from conftest import shipped_factory_calibrations
 
@@ -169,6 +169,9 @@ class StubGripper:
         self.zero_after_rad = 0.0
         self.zero_enabled = True
 
+        # What ``save_calibration`` raises instead of finishing the file.
+        self.save_error: Exception | None = None
+
         # ``position_mm`` is a sentinel: the backend must not use it.
         self.state = SimpleNamespace(
             position_rad=self.config.pos_closed_rad,
@@ -261,6 +264,10 @@ class StubGripper:
 
     def save_calibration(self, path: str | None = None) -> str:
         self.saved.append(str(path))
+        if self.save_error is not None:
+            # Half a file, then the failure: what a full disk looks like.
+            Path(path).write_text("{ truncated", encoding="utf-8")
+            raise self.save_error
         data = {
             "channel": self.config.can_channel,
             "can_id": self.config.can_id,
@@ -463,6 +470,24 @@ class TestLifecycle:
         with pytest.raises(FaultActive):
             backend.clear_fault()
 
+    def test_a_clear_that_leaves_the_motor_dark_is_not_success(self, backend) -> None:
+        """The SDK accepts error code 0 — the *disabled* drive — as proof the
+        fault has gone, and then marks its own ``_enabled`` flag true without
+        checking the re-enable.  Reporting that as success would leave the
+        console sending frames to a motor that is not listening."""
+        _stub(backend).state.error_code = constants.ERROR_DISABLED
+
+        with pytest.raises(BackendError, match="未能重新使能"):
+            backend.clear_fault()
+
+    def test_a_fault_still_latched_after_the_clear_is_reported(self, backend) -> None:
+        _stub(backend).state.error_code = constants.ERROR_UV
+
+        with pytest.raises(FaultActive) as excinfo:
+            backend.clear_fault()
+
+        assert excinfo.value.code == constants.ERROR_UV
+
     def test_disconnect_swallows_a_failing_teardown(self, backend) -> None:
         """There is nothing to recover at shutdown, and raising would mask the
         reason the session is ending."""
@@ -532,12 +557,17 @@ class TestPrimitives:
         assert limits.rad_to_mm != pytest.approx(USER_RAW["rad_to_mm"])
         assert tele.position_mm != pytest.approx(by_the_file)
 
-    def test_position_mm_is_zero_with_no_calibration(self, backend) -> None:
+    def test_position_mm_is_nan_with_no_calibration(self, backend) -> None:
         """Millimetres are undefined until the travel is known, and the SDK's
-        fallback number would come from the reversed default config."""
+        fallback number would come from the reversed default config.
+
+        NaN rather than 0.0, because 0 mm is a *place*: the closed stop.  A
+        console that read it as a position would hold the jaws shut on the
+        strength of a measurement nobody made.
+        """
         backend._info = None
         _stub(backend).state.position_rad = 1.5
-        assert backend.read().position_mm == 0.0
+        assert math.isnan(backend.read().position_mm)
 
     def test_force_is_reported_even_uncalibrated(self, backend) -> None:
         """It is a torque times a constant — and the probe needs it before any
@@ -687,6 +717,24 @@ class TestFrameRefusal:
         assert armed.stream_frame(1.0, -1.0, 2.0) is False
         assert armed.stream_frame(1.0, 100.0, -1.0) is False
         assert _stub(armed).frames == []
+
+    def test_a_torque_beyond_the_mechanical_rating_is_refused(self, backend) -> None:
+        """A torque frame presses with no gain to bound it.
+
+        Nothing in this console builds one above the 40 N rating — the setpoints
+        are clamped in :func:`~litegrip_studio.units.clamp_force_torque` — but
+        that cap lives in the FSM, and this is the last code before the drive.
+        The sign is a direction rather than a fault, so the limit is on the
+        magnitude.
+        """
+        cap = torque_from_force(constants.FORCE_MAX_N)
+
+        assert backend.stream_frame(0.9, 0.0, 0.0, 0.0, cap + 0.1, ungated=True) is False
+        assert backend.stream_frame(0.9, 0.0, 0.0, 0.0, -cap - 0.1, ungated=True) is False
+        assert _stub(backend).frames == []
+
+        assert backend.stream_frame(0.9, 0.0, 0.0, 0.0, cap, ungated=True) is True
+        assert _stub(backend).frames[-1]["tau"] == cap
 
     def test_a_zero_gain_frame_reaches_an_uncalibrated_motor(self, backend) -> None:
         """零重力 (``RELEASE``) and the wizard's zero gravity (``ZERO_G``) carry
@@ -945,6 +993,37 @@ class TestSaveCalibration:
             backend.save_calibration(str(innocent))
 
         assert env.factory.read_text(encoding="utf-8") == "{}"
+
+    def test_an_sdk_that_dies_mid_save_keeps_the_previous_file(self, backend, env) -> None:
+        """The SDK opens the target and writes into it, so a failure halfway
+        leaves a file that parses as invalid — and the next launch refuses to
+        move because of a save that reported failure and looked like success on
+        disk.  The old file is the state to return to."""
+        target = env.dir / "saved.json"
+        target.write_text('{"keep": true}', encoding="utf-8")
+        backend.set_calibration_memory(1.775959, -0.064279, 65.21)
+        _stub(backend).save_error = LiteGripError("no space left on device")
+
+        with pytest.raises(BackendError, match="保存标定失败"):
+            backend.save_calibration(str(target))
+
+        assert json.loads(target.read_text(encoding="utf-8")) == {"keep": True}
+        assert sorted(p.name for p in env.dir.iterdir()) == ["saved.json"]
+
+    def test_a_successful_save_lands_under_the_name_it_was_given(
+        self, backend, env
+    ) -> None:
+        """The backend writes through a temporary, so the returned path — which
+        the caller shows the operator and reloads from — has to be the target,
+        not the temporary it actually filled."""
+        target = env.dir / "saved.json"
+        backend.set_calibration_memory(1.775959, -0.064279, 65.21)
+
+        written = backend.save_calibration(str(target))
+
+        assert written == str(target)
+        assert sorted(p.name for p in env.dir.iterdir()) == ["saved.json"]
+        assert backend.calibration_info().provenance == calibration.PROVENANCE_USER
 
     def test_saving_with_nothing_to_save_is_refused(self, backend) -> None:
         with pytest.raises(NotReady):

@@ -169,6 +169,11 @@ def _contact_reason(gap: bool, torque: bool, still: bool) -> str:
 GRIP_ARRIVED = "到位：夹到目标位"
 GRIP_DEADLINE = "超时：未到位"
 
+#: Why a position command is refused when the reading it would be anchored to
+#: is not a number.  Distinct from the worker's "no frame has arrived yet": the
+#: frame may have arrived and carried a NaN, which is no better as an anchor.
+_NO_POSITION = "尚未读到位置；无法按位置指令运动"
+
 
 class MotionFSM:
     """Owns the commanded trajectory.  Call :meth:`tick` once per control tick."""
@@ -236,7 +241,16 @@ class MotionFSM:
         and the fingers would drive at the force setpoint instead of tracking
         the trajectory.  Force is opt-in, and only :meth:`grasp` and an explicit
         ``close(force_n=...)`` ask for it.
+
+        A non-finite ``target_mm`` is refused rather than clamped: the clamp
+        cannot name a place for it, and the alternative reading of NaN — the
+        closed stop — is a command to shut the jaws that nobody asked for.  The
+        commands reaching here come from the UI and the CLI, both of which parse
+        floats, so a bug (or ``float("nan")`` on the command line) is reported
+        as a failed command rather than executed.
         """
+        if not math.isfinite(target_mm):
+            raise ValueError(f"目标位置不是有限数: {target_mm!r}")
         target = self.limits.clamp_mm(target_mm)
         self.last_command_mm = target
         self.source = source
@@ -430,8 +444,14 @@ class MotionFSM:
             # console whose calibration is unusable, or 零重力 does nothing and an
             # operator with a bad file cannot move the jaws by hand — which is
             # exactly when they need to re-calibrate.
+            #
+            # The position field still has to be a number, because the backends
+            # refuse a non-finite frame; and it is inert — kp and kd are zero,
+            # so the drive multiplies it away.  A placeholder is therefore
+            # harmless here in a way it never is in a position command.
+            q_mm = pos_mm if math.isfinite(pos_mm) else 0.0
             return self._send(
-                backend, pos_mm, 0.0, 0.0, 0.0, 0.0, 0.0, self.state.value, ungated=True
+                backend, q_mm, 0.0, 0.0, 0.0, 0.0, 0.0, self.state.value, ungated=True
             )
 
         if self.state is MotionState.HOLD_RAD:
@@ -449,6 +469,8 @@ class MotionFSM:
             # have usually moved by then and the trajectory is stale.
             if not allow_motion:
                 return self._refused(blocked_reason)
+            if not math.isfinite(pos_mm):
+                return self._refused(_NO_POSITION)
             self.hold(pos_mm)
             return self._hold_frame(backend, pos_mm)
 
@@ -458,6 +480,17 @@ class MotionFSM:
             if self.state is MotionState.SERVO:
                 self._block(pos_mm, blocked_reason)
             return self._refused(blocked_reason)
+
+        # No measurement, no position command.  The worker refuses a gated move
+        # for the same reason one layer up, so this is the state machine keeping
+        # its own contract rather than trusting every caller to: the clamp no
+        # longer turns a NaN into the closed stop, but a NaN that reached the
+        # profile would still have to be invented into one somewhere before a
+        # frame could carry it.
+        if not math.isfinite(pos_mm):
+            if self.state is MotionState.SERVO:
+                self._block(pos_mm, _NO_POSITION)
+            return self._refused(_NO_POSITION)
 
         if self.state is MotionState.HOLD:
             # Keeps sending frames so the pose is held — the motor needs a
@@ -628,8 +661,12 @@ class MotionFSM:
         is the *limits* that are in doubt, and ``q_cmd`` is derived from them.
         Under a reversed calibration every millimetre reading maps to an angle
         that drives the wrong way, so "hold still" can be a command to close hard.
-        The worker zero-torques alongside this, so the motor is not left acting on
-        whatever frame it last received.
+        When the gate is what closed, the worker also zero-torques once on that
+        edge (``_evaluate_gate``), so the last frame is withdrawn rather than
+        left running.  A refusal that leaves the gate open — an unreadable
+        frame, which the gate skips rather than judges — sends nothing at all;
+        a substitute pose would be a guess, and zeroing the motor is the
+        worker's decision to make, not this method's.
         """
         if reason:
             self._note = reason
@@ -884,6 +921,14 @@ class MotionFSM:
         note: str,
         ungated: bool = False,
     ) -> FrameOut:
+        # The single choke point every millimetre frame passes through, so the
+        # invariant is enforced here rather than trusted from each caller: a
+        # frame needs a finite position.  It matters even for a NaN that got
+        # this far, because ``to_rad`` answers a zero-scale calibration with a
+        # finite angle — the closed stop — and that would turn an unknown
+        # reading into a position command under full gain.
+        if not math.isfinite(q_cmd_mm):
+            return self._refused(_NO_POSITION)
         q_mm = self.limits.clamp_mm(q_cmd_mm)
         q_rad = self.limits.clamp_rad(self.limits.to_rad(q_mm))
         dq_rad = mm_to_rad_per_s(

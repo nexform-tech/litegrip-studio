@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
 import time
 from typing import Callable
@@ -175,6 +176,10 @@ class RecordingBackend(GripperBackend):
         #: nonzero ``zero_after_rad`` is a drive that did not accept the frame.
         self.zero_enabled = True
         self.zero_after_rad = 0.0
+        #: Report the angle but no millimetres — what the real backend does when
+        #: it has a reading and no usable calibration to name it in.  The two
+        #: halves are separate on purpose: a hold at the angle needs no limits.
+        self.unknown_mm = False
 
     def _record(self, name: str, *args) -> None:
         if name in self.fail:
@@ -251,7 +256,7 @@ class RecordingBackend(GripperBackend):
             temperature_mos=30,
             temperature_coil=30,
             error_code=self.error_code,
-            position_mm=self._limits.to_mm(q_rad),
+            position_mm=math.nan if self.unknown_mm else self._limits.to_mm(q_rad),
             force_n=0.0,
             t=0.0,
         )
@@ -2811,7 +2816,7 @@ class TestTheZeroWrite:
     def test_a_re_enable_that_did_not_take_is_not_reported_as_a_finished_zero(self) -> None:
         """``WriteZeroResult.ok`` means the drive accepted the frame, which is
         not the same as the motor having come back — the SDK re-enables around
-        the write and drops that result (gripper.py:1431)."""
+        the write and drops that result (``LiteGrip.write_zero``)."""
         backend = RecordingBackend()
         backend.zero_enabled = False
         bench = Bench(backend)
@@ -3017,6 +3022,63 @@ class TestTheThread:
         assert not worker.enabled
         assert not worker.estopped
         assert worker.loop.last_frame.motion_state == MotionState.IDLE.value
+
+
+class TestAnUnknownPosition:
+    """A reading nobody took is not the closed stop.
+
+    ``RealBackend.read`` reports NaN millimetres with no usable calibration, and
+    an unreadable frame can carry a NaN angle.  Both used to arrive at the clamp,
+    which answered NaN with 0 mm — the closed stop — and the hold then commanded
+    it with the full position gain.
+    """
+
+    def test_a_nan_reading_is_no_reading_and_nothing_is_commanded(self) -> None:
+        bench = Bench()
+        bench.bring_up()
+        bench.backend.q_rad = math.nan
+        bench.backend.calls.clear()
+
+        frame = bench.frame()
+
+        assert bench.loop.gate is GateState.READY, "the refusal is about the reading"
+        assert frame.position_mm is None
+        assert "stream_frame" not in bench.backend.names()
+
+    def test_zero_gravity_still_reaches_the_motor_with_no_reading(self) -> None:
+        """The escape hatch must work on the console that cannot name a
+        millimetre, which is exactly the one that needs re-calibrating."""
+        bench = Bench()
+        bench.bring_up()
+        bench.backend.q_rad = math.nan
+        bench.backend.calls.clear()
+
+        bench.send(cmd.SetZeroGravity(True))
+
+        frames = [args for name, args in bench.backend.calls if name == "stream_frame"]
+        assert frames, "零重力 must still reach the drive"
+        q_rad, kp, kd, dq_rad_s, tau_nm, ungated = frames[-1]
+        assert all(math.isfinite(v) for v in (q_rad, kp, kd, dq_rad_s, tau_nm))
+        assert (kp, kd, tau_nm) == (0.0, 0.0, 0.0), "and carry no command"
+        assert ungated
+
+    def test_no_millimetres_yet_the_angle_is_known_holds_the_angle(self) -> None:
+        """The gate is shut because the file is unusable, and the reading is
+        still perfectly good in rad.  The enable holds that angle instead of
+        leaving the axis free until a millimetre appears that never will."""
+        backend = RecordingBackend(info=BROKEN)
+        backend.unknown_mm = True
+        bench = Bench(backend=backend)
+
+        bench.bring_up()
+
+        assert bench.loop.gate is GateState.BLOCKED
+        assert bench.loop.motion.state is MotionState.HOLD_RAD
+        assert not bench.loop._awaiting_position, "the frame was read; only mm is undefined"
+        assert any("标定不可用：已在" in line for line in bench.signals.logs())
+        frames = [args for name, args in backend.calls if name == "stream_frame"]
+        assert frames, "a hold at an angle still has to be sent"
+        assert math.isfinite(frames[-1][0])
 
 
 class TestAReadingThatHasGoneStale:

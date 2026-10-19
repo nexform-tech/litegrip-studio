@@ -11,16 +11,19 @@ installing and running it.
 
 Three SDK constraints decided the structure, all of them confirmed by reading the source:
 
-1. **The SDK is not thread-safe at all** — the whole package contains no `threading` and no locks,
-   and every motion method runs a 200 Hz blocking loop in the caller's thread, sharing one socket
-   and one `MotorState`. ⇒ A single `GripperWorker` (`QThread`) owns the SDK; the GUI thread never
-   touches it, and a cross-thread call raises `RuntimeError`.
-2. **`control_mit_stream()` has no interruption hook** (`protocols/can_bus.py:342` is a bare
-   `while`), and every convenience motion method ends up there. ⇒ **Those methods are not used**;
-   the console sends `send_mit_frame` and calls `poll` on its own 5 ms tick, which is what puts the
+1. **The SDK is not safe to share between threads** — it exposes one socket and one `MotorState`,
+   its only lock is an internal one around CAN I/O for its own teleop thread, and every motion
+   method runs a blocking loop in the caller's thread. ⇒ A single `GripperWorker` (`QThread`) owns
+   the SDK; the GUI thread never touches it, and a cross-thread call raises `RuntimeError`.
+2. **Every convenience motion method runs a blocking loop with no interruption hook** —
+   `control_mit_stream` is a bare `while`, and the higher-level ramps in `GripperActions` are the
+   same shape, so an E-stop cannot reach inside any of them. ⇒ **Those methods are not used**; the
+   console sends `send_mit_frame` and calls `poll` on its own 5 ms tick, which is what puts the
    emergency-stop check inside the loop.
-3. **`move_at_speed()` always appends 20 hold frames** (`gripper.py:1117`) per call. ⇒ "Move while
-   echoing live" cannot be built by calling it in small slices; each slice would stall for 100 ms.
+3. **"Success" does not mean the motor is running** — `clear_fault()` accepts error code `0`
+   (disabled) as a cleared fault, and `write_zero()` discards the result of its own re-enable. ⇒ The
+   backend re-reads the fresh error code and the enabled state instead of trusting either return
+   value, and reports a motor that did not come back.
 
 ```text
 src/litegrip_studio/
@@ -623,10 +626,11 @@ the same name would be a *different* SDK: the numbers the console falls back to 
 file beside whichever `litegrip` was imported, so the wrong one loads a different set of numbers
 without saying so.
 
-Do not edit anything under `src/litegrip` other than the factory calibration this repository
-deliberately overrides. A local edit survives only until the next re-vendor, which copies each file
-wholesale; a change that belongs there goes upstream. `VENDORED.md` records a hash of the whole
-tree and `tests/test_vendored_sdk.py` recomputes it, so an edit in place fails the suite.
+Do not edit anything under `src/litegrip`. A local edit survives only until the next re-vendor,
+which copies each file wholesale; a change that belongs there goes upstream. When a divergence is
+genuinely unavoidable, record it by name in `VENDORED.md`, which also holds a hash of the whole
+tree; `tests/test_vendored_sdk.py` recomputes it, so an edit in place fails the suite. There is no
+local override today.
 
 To run the console or the suite against SDK HEAD instead, set `LITEGRIP_SDK_PATH` to that checkout.
 It goes in front of the vendored copy.

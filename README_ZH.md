@@ -424,14 +424,14 @@ QT_QPA_PLATFORM=offscreen python3 -m pytest tests/ -q
 ```
 
 `QT_QPA_PLATFORM=offscreen` 是没有显示器时也能让 UI 测试建出真实控件的原因。`tests/conftest.py`
-把 `HOME` 指到本次会话自己的临时目录，所以任何测试都读不到、也写不到你的 `~/.litegrip/`；它还把
-`src/` 插进 `sys.path`，vendor 进来的 SDK 只差这一步就能 import。
+把 `HOME` 指到本次会话自己的临时目录，所以任何测试都读不到、也写不到你的 `~/.litegrip/`；仓库根目录
+的 `conftest.py` 还把 `src/` 插进 `sys.path`，vendor 进来的 SDK 只差这一步就能 import。
 
 SDK 是 **vendor 进来的，不是依赖**：`src/litegrip` 里存着 litegrip-python 的一个固定 commit，所以
-clone 下来什么都不用装就能跑。**除了本仓库有意覆盖的那份出厂标定，不要改它下面的任何文件**——
-就地改动只能活到下一次 vendor，那时每个文件都是整份覆盖的。`src/litegrip/VENDORED.md` 记着文件
-清单、整棵树的哈希和重新 vendor 的步骤，`tests/test_vendored_sdk.py` 会重算那个哈希，所以就地
-改一处就会让测试变红。
+clone 下来什么都不用装就能跑。**不要改它下面的任何文件**——就地改动只能活到下一次 vendor，那时
+每个文件都是整份覆盖的。确实不得不有分歧时，在 `src/litegrip/VENDORED.md` 里按文件记下来；那份
+文件同时记着整棵树的哈希和重新 vendor 的步骤，`tests/test_vendored_sdk.py` 会重算那个哈希，所以
+就地改一处就会让测试变红。今天没有任何本地覆盖：那里的每个文件都是上游的。
 
 `./run_litegrip_studio.sh build` 在 `dist/` 下产出单文件可执行程序。发版由 semantic-release 在每次
 合并进 `main` 时自动完成；git tag 是版本号的唯一事实来源，`pyproject.toml` 里的

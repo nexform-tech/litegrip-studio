@@ -13,6 +13,7 @@ produces the same numbers on every machine.
 from __future__ import annotations
 
 import json
+import math
 
 import pytest
 
@@ -21,7 +22,7 @@ from litegrip_studio.backend import GripperBackend, Unsupported
 from litegrip_studio.backend.sim import SimBackend
 from litegrip_studio.calibration import PROVENANCE_INVALID, PROVENANCE_USER
 from litegrip_studio.core.worker import GateState, evaluate_gate
-from litegrip_studio.units import derive_scale
+from litegrip_studio.units import derive_scale, torque_from_force
 
 from conftest import FakeClock
 
@@ -135,6 +136,53 @@ class TestDisableUnloadsThePlant:
         bench.sim.disable()
 
         assert not bench.sim.stream_frame(0.0, constants.KP_MOVE, constants.KD_DEFAULT)
+
+
+class TestItRefusesWhatTheRealBackendRefuses:
+    """A frame the real backend would not send must not move the plant either.
+
+    The two backends have to answer alike, or a console that behaves in the
+    simulator misbehaves on the bench.  Non-finite values are the worst case to
+    differ on: NaN poisons the plant's state, and every comparison against NaN is
+    false, so the drive would look inert rather than broken.
+    """
+
+    def test_a_non_finite_frame_is_refused(self) -> None:
+        bench = Bench()
+        q_rad = bench.sim.plant.q
+
+        assert (
+            bench.sim.stream_frame(math.nan, constants.KP_MOVE, constants.KD_DEFAULT)
+            is False
+        )
+        assert bench.sim.stream_frame(math.inf, 0.0, 0.0) is False
+        assert bench.sim.stream_frame(0.0, math.nan, 0.0) is False
+
+        bench.run(0.2)
+
+        assert bench.sim.plant.q == q_rad, "the refused frames moved nothing"
+        assert math.isfinite(bench.sim.plant.q)
+
+    def test_a_negative_gain_is_refused(self) -> None:
+        bench = Bench()
+        assert bench.sim.stream_frame(0.0, -1.0, constants.KD_DEFAULT) is False
+        assert bench.sim.stream_frame(0.0, constants.KP_MOVE, -1.0) is False
+
+    def test_a_torque_beyond_the_mechanical_rating_is_refused(self) -> None:
+        """The plant integrates whatever it is handed, so a torque the real
+        backend would refuse has to be refused here too — otherwise the
+        simulator shows motion the hardware would never make."""
+        bench = Bench()
+        cap = torque_from_force(constants.FORCE_MAX_N)
+        q_rad = bench.sim.plant.q
+
+        assert bench.sim.stream_frame(0.0, 0.0, 0.0, 0.0, cap + 0.1) is False
+        assert bench.sim.stream_frame(0.0, 0.0, 0.0, 0.0, -cap - 0.1) is False
+
+        bench.run(0.2)
+
+        assert bench.sim.plant.q == q_rad, "the refused frames moved nothing"
+        assert bench.sim.stream_frame(0.0, 0.0, 0.0, 0.0, cap) is True
 
 
 class TestItsOwnCalibration:

@@ -5,7 +5,7 @@ Only public SDK methods are used, and only four of them are on the control path
 convenience method is deliberately unused, and the reasons are structural rather
 than stylistic (they are listed at length in
 :mod:`litegrip_studio.backend`).  The one that matters most here:
-``control_mit_stream`` has no abort hook (can_bus.py:342), so anything built on
+``control_mit_stream`` has no abort hook, so anything built on
 it cannot be interrupted, which rules out ``open``, ``close``, ``grasp``,
 ``goto``, ``move_to`` and ``move_at_speed`` for a console whose E-stop has to
 work inside one tick.
@@ -49,7 +49,7 @@ from .. import calibration, constants
 from ..can_link import link_failure
 from ..calibration import CalibrationInfo
 from ..telemetry import Telemetry
-from ..units import Limits, force_from_torque
+from ..units import Limits, force_from_torque, torque_from_force
 from . import (
     BackendError,
     ConnectFailed,
@@ -105,8 +105,9 @@ class RealBackend(GripperBackend):
 
         # Built through ``config`` rather than positional arguments: the SDK's
         # constructor substitutes ``config`` values for any argument left at its
-        # default (gripper.py:101), so passing both means the config silently
-        # wins for exactly the arguments that are hardest to notice.
+        # default (the constructor substitutes ``config`` for them), so passing
+        # both means the config silently wins for exactly the arguments that
+        # are hardest to notice.
         cfg = GripperConfig()
         cfg.can_channel = channel
         cfg.max_stroke_mm = float(max_stroke_mm)
@@ -179,6 +180,20 @@ class RealBackend(GripperBackend):
         if not cleared:
             raise FaultActive(self.read().error_code, "清除故障失败")
 
+        # The SDK calls either OK code a cleared fault: one is the enabled
+        # drive, zero is the *disabled* one, and ``gripper.clear_fault`` then
+        # sets its own ``_enabled`` flag without asking whether the re-enable
+        # took.  A drive left dark would therefore be reported as an enabled,
+        # fault-free axis — and every frame sent afterwards would reach a motor
+        # that is not listening while the console says it is moving.  The code
+        # that the SDK's own poll loop saw is the only evidence available, and
+        # 1 is the one value that means both "no fault" and "enabled".
+        code = int(self.read().error_code)
+        if code not in constants.OK_ERROR_CODES:
+            raise FaultActive(code, f"清除故障失败: {describe_error(code)}")
+        if code == constants.ERROR_DISABLED:
+            raise BackendError("故障已清除，但电机未能重新使能")
+
     def write_zero(self) -> ZeroResult:
         """Rewrite the encoder offset so the current angle reads as zero.
 
@@ -215,10 +230,10 @@ class RealBackend(GripperBackend):
             raise BackendError(f"标零失败: {exc}") from exc
 
         # ``enabled`` is read, never assumed, and never fixed up here.  The SDK
-        # discards its own re-enable result (gripper.py:1431), so the motor can
-        # legitimately be left disabled with the offset already written — and
-        # calling ``enable`` again from here would swallow a failure the worker
-        # is the object that knows how to report.
+        # discards its own re-enable result (``LiteGrip.write_zero``), so the
+        # motor can legitimately be left disabled with the offset already
+        # written — and calling ``enable`` again from here would swallow a
+        # failure the worker is the object that knows how to report.
         return ZeroResult(
             before_rad=float(result.before_rad),
             after_rad=float(result.after_rad),
@@ -241,9 +256,9 @@ class RealBackend(GripperBackend):
 
         The last line of defence before hardware, and the only one that is not
         in :mod:`litegrip_studio.core`: the FSM already clamps every command to
-        the validated travel and the units layer already replaces non-finite
-        values, so a command arriving here out of range means a bug in one of
-        them.  Sending it anyway is how a motor gets a garbage frame; refusing
+        the validated travel and refuses to build one from a position that is
+        not a number, so a command arriving here out of range or non-finite
+        means a bug in one of them.  Sending it anyway is how a motor gets a garbage frame; refusing
         turns the bug into a stopped gripper.  The clamp uses *our* limits, not
         the SDK config's, because a clamp derived from a config that may be
         reversed converts a wrong command into a wrong command that looks
@@ -271,6 +286,16 @@ class RealBackend(GripperBackend):
             return self._refuse(f"非有限值: q={q_rad!r} kp={kp!r} kd={kd!r}")
         if kp < 0.0 or kd < 0.0:
             return self._refuse(f"负增益: kp={kp!r} kd={kd!r}")
+        # A torque frame presses with no gain to cap it, so the mechanical
+        # rating has to be enforced here rather than trusted to the caller.
+        # Every setpoint in this console is already capped at ``FORCE_MAX_N``
+        # (see ``units.clamp_force_torque``); this catches the caller that is
+        # not.  Signed, because a negative torque is a direction, not a fault.
+        tau_max = torque_from_force(constants.FORCE_MAX_N)
+        if abs(tau_nm) > tau_max:
+            return self._refuse(
+                f"力矩 {tau_nm:.6f} N·m 超出机械额定 {tau_max:.6f} N·m"
+            )
 
         info = self._info
         limits = info.limits if info is not None else None
@@ -336,12 +361,15 @@ class RealBackend(GripperBackend):
             temperature_mos=int(state.temperature_mos),
             temperature_coil=int(state.temperature_coil),
             error_code=int(state.error_code),
-            # Zero rather than the SDK's own conversion when there is no usable
+            # NaN rather than the SDK's own conversion when there is no usable
             # calibration: millimetres are undefined until the travel is known,
-            # and a number derived from a possibly-reversed config is worse than
-            # no number.  Anything that needs the position while uncalibrated —
-            # the probe — works in rad, which is always meaningful.
-            position_mm=limits.to_mm(state.position_rad) if limits is not None else 0.0,
+            # and the SDK's number would be derived from a possibly-reversed
+            # config.  It is emphatically not 0.0 either — 0 mm is the closed
+            # stop, and a console that read it as a position would hold the jaws
+            # shut on the strength of a place nobody measured.  Anything that
+            # needs the position while uncalibrated — the probe — works in rad,
+            # which is always meaningful.
+            position_mm=limits.to_mm(state.position_rad) if limits is not None else math.nan,
             # Well-defined without a calibration: it is a torque scaled by a
             # constant, and the operator needs it most during the probe.
             force_n=force_from_torque(state.torque_nm),
@@ -400,8 +428,8 @@ class RealBackend(GripperBackend):
 
         # The one check that observes the outcome instead of constraining the
         # input.  ``load_calibration`` also overwrites kp, kd, can_id, mst_id,
-        # channel and canfd_mode from the file (gripper.py:752-767), so a file
-        # that disagrees with the running link shows up here too.
+        # channel and canfd_mode from the file, so a file that disagrees with
+        # the running link shows up here too.
         applied = Limits.from_config(self._gripper.config)
         mismatch = calibration.cross_check(info, applied)
         if mismatch:
@@ -455,9 +483,14 @@ class RealBackend(GripperBackend):
 
         # The SDK writes the file from its own config, so the config has to
         # carry our numbers first or we would save whatever was there before.
+        # It writes to a temporary and we rename it, so an SDK that fails
+        # halfway leaves the previous calibration in place instead of a
+        # truncated file the next launch would refuse.
         self._apply_to_config(info.limits)
         try:
-            written = self._gripper.save_calibration(str(target))
+            written = calibration.atomic_write(
+                target, lambda temp: self._gripper.save_calibration(str(temp))
+            )
         except LiteGripError as exc:
             raise BackendError(f"保存标定失败: {exc}") from exc
 

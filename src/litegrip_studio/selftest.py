@@ -125,6 +125,24 @@ class Check:
         self.run = run
 
 
+class CheckFailed(AssertionError):
+    """A self-test check did not hold.
+
+    An ``AssertionError`` so that callers and tests written against the old bare
+    ``assert`` statements keep working, and raised explicitly rather than with
+    ``assert`` because the console may be launched from a script running Python
+    with ``-O``.  That strips every bare assertion in the interpreter, and this
+    file is made of them: a build that set ``-O`` would print PASS for all ten
+    checks without running a single one, which is the worst answer a self-test
+    can give.
+    """
+
+
+def _require(condition: bool, message: str) -> None:
+    if not condition:
+        raise CheckFailed(message)
+
+
 def _tick_loop(
     fsm: MotionFSM, sim: SimBackend, clock, seconds: float
 ) -> None:
@@ -157,7 +175,7 @@ def check_units_round_trip() -> None:
         for mm in (0.0, 1.0, 37.5, limits.stroke_mm):
             rad = limits.to_rad(mm)
             back = limits.to_mm(rad)
-            assert abs(back - mm) < 1e-6, f"{mm} mm 往返后成了 {back} mm"
+            _require(abs(back - mm) < 1e-6, f"{mm} mm 往返后成了 {back} mm")
 
 
 def check_the_direction_is_read_from_the_two_angles() -> None:
@@ -176,33 +194,38 @@ def check_the_direction_is_read_from_the_two_angles() -> None:
     """
     for closed, open_, _file_scale, _agrees, label in KNOWN_CALIBRATIONS:
         limits = _limits(closed, open_)
-        assert limits.to_rad(0.0) == closed, f"{label}：0 mm 不是记录的闭合角"
-        assert limits.to_rad(limits.max_stroke_mm) != closed, (
-            f"{label}：量程顶端和 0 mm 落在同一个角度，换算没有方向"
+        _require(limits.to_rad(0.0) == closed, f"{label}：0 mm 不是记录的闭合角")
+        _require(
+            limits.to_rad(limits.max_stroke_mm) != closed,
+            f"{label}：量程顶端和 0 mm 落在同一个角度，换算没有方向",
         )
         # The sign of the slope has to be the ordering the two recorded angles
         # have — the one thing a wrong `direction` cannot fake, since it moves
         # the conversions and leaves the angles where they were.
         grew = limits.to_rad(limits.max_stroke_mm) > closed
-        assert grew is (open_ > closed), f"{label}：换算是朝反方向的"
+        _require(grew is (open_ > closed), f"{label}：换算是朝反方向的")
 
     uncalibrated = _limits(*KNOWN_CALIBRATIONS[0][:2])
     template = _limits(*KNOWN_CALIBRATIONS[1][:2])
     user = _limits(*KNOWN_CALIBRATIONS[2][:2])
-    assert uncalibrated.direction == 1.0, "SDK 默认值的两个角次序被读成了别的方向"
-    assert template.direction == -1.0, "SDK 出厂模板的方向读错了"
-    assert user.direction == -1.0, "用户标定的方向读错了"
+    _require(uncalibrated.direction == 1.0, "SDK 默认值的两个角次序被读成了别的方向")
+    _require(template.direction == -1.0, "SDK 出厂模板的方向读错了")
+    _require(user.direction == -1.0, "用户标定的方向读错了")
 
     # And the answer has to come from something other than the ordering: both
     # orderings of a pair describe a gripper, so what refuses a file that
     # belongs to another one is the encoder reading.
     bench = _limits(MEASURED_CLOSED_RAD, MEASURED_OPEN_RAD)
-    assert bench.direction == 1.0, "本机两个极限的次序被读成了别的方向"
+    _require(bench.direction == 1.0, "本机两个极限的次序被读成了别的方向")
     for measured in (MEASURED_CLOSED_RAD, MEASURED_OPEN_RAD):
-        assert frame_mismatch(uncalibrated, measured), (
-            f"实测角度 {measured:.4f} rad 落在 SDK 默认值的行程里，这份零点不属于本机"
+        _require(
+            bool(frame_mismatch(uncalibrated, measured)),
+            f"实测角度 {measured:.4f} rad 落在 SDK 默认值的行程里，这份零点不属于本机",
         )
-        assert frame_mismatch(bench, measured) == "", "本机标定在自己的读数上被拦下"
+        _require(
+            frame_mismatch(bench, measured) == "",
+            "本机标定在自己的读数上被拦下",
+        )
 
 
 def check_the_travel_is_derived_from_the_recorded_angles() -> None:
@@ -227,12 +250,13 @@ def check_the_travel_is_derived_from_the_recorded_angles() -> None:
     inset = constants.SPAN_INSET_MM
     for closed, open_, file_scale, agrees, label in KNOWN_CALIBRATIONS:
         limits = _limits(closed, open_)
-        assert abs(limits.to_mm(closed)) < 1e-9, f"{label}：记录的闭合角不是 0 mm"
+        _require(abs(limits.to_mm(closed)) < 1e-9, f"{label}：记录的闭合角不是 0 mm")
 
         span = limits.stroke_mm
-        assert abs(span - (travel + inset)) < 1e-6, (
+        _require(
+            abs(span - (travel + inset)) < 1e-6,
             f"{label} 的记录跨度是 {span:.2f} mm，应为 {travel + inset:.2f} mm"
-            f"（行程 {travel:.0f} + 内缩 {inset:.0f}）"
+            f"（行程 {travel:.0f} + 内缩 {inset:.0f}）",
         )
 
         # The top of the commanded range, back in angles: it sits the inset away
@@ -241,8 +265,9 @@ def check_the_travel_is_derived_from_the_recorded_angles() -> None:
         # sign error between them shows up — a to_rad that ran the other way
         # would leave the whole travel between them here, not the inset.
         gap_mm = abs(limits.to_rad(travel) - open_) * limits.rad_to_mm
-        assert abs(gap_mm - inset) < 1e-6, (
-            f"{label} 的量程顶端离记录的张开角 {gap_mm:.2f} mm，应为 {inset:.0f} mm"
+        _require(
+            abs(gap_mm - inset) < 1e-6,
+            f"{label} 的量程顶端离记录的张开角 {gap_mm:.2f} mm，应为 {inset:.0f} mm",
         )
 
         # The file's own number is not what the console moves by.  On the old
@@ -256,14 +281,21 @@ def check_the_travel_is_derived_from_the_recorded_angles() -> None:
         # over the recorded span.  The tolerance keeps each equality from turning
         # into a claim about the last decimal of a stored float.
         same = math.isclose(limits.rad_to_mm, file_scale, rel_tol=1e-9)
-        assert same is agrees, (
+        _require(
+            same is agrees,
             f"{label}：文件自带的 mm/rad（{file_scale}）与推导值（{limits.rad_to_mm}）"
-            f"{'应当' if agrees else '不应'}相同"
+            f"{'应当' if agrees else '不应'}相同",
         )
 
 
 def check_plant_settles_on_a_step() -> None:
-    """A step into free space must arrive, and must not overshoot."""
+    """A step into free space must arrive and stay there.
+
+    It does overshoot — the MIT loop is underdamped under a step of this size —
+    so this says nothing about the transient.  The console never sends a step:
+    the profile ramps every move, and what this check is for is that the plant
+    and the control law agree on where the jaws end up.
+    """
     clock = _Clock()
     plant = Plant(PlantConfig())
     limits = plant.limits
@@ -273,7 +305,7 @@ def check_plant_settles_on_a_step() -> None:
         clock.advance(constants.CTRL_DT)
 
     position = plant.snapshot().position_mm
-    assert abs(position - 60.0) < 1.0, f"稳态位置 {position:.2f} mm，目标 60.00 mm"
+    _require(abs(position - 60.0) < 1.0, f"稳态位置 {position:.2f} mm，目标 60.00 mm")
 
 
 def check_a_move_arrives_and_stops() -> None:
@@ -292,13 +324,18 @@ def check_a_move_arrives_and_stops() -> None:
     fsm.open()
     _tick_loop(fsm, sim, clock, 8.0)
     opened = sim.read().position_mm
-    assert fsm.state is MotionState.HOLD, f"张开后停在 {fsm.state.value}"
-    assert abs(opened - top) < 1.0, f"张开后停在 {opened:.1f} mm，量程顶端是 {top:.1f} mm"
+    _require(fsm.state is MotionState.HOLD, f"张开后停在 {fsm.state.value}")
+    _require(
+        abs(opened - top) < 1.0,
+        f"张开后停在 {opened:.1f} mm，量程顶端是 {top:.1f} mm",
+    )
 
     fsm.move_to_mm(45.0, source="selftest")
     _tick_loop(fsm, sim, clock, 8.0)
     arrived = sim.read().position_mm
-    assert abs(arrived - 45.0) < constants.TOL_MM, f"停在 {arrived:.2f} mm，目标 45.00 mm"
+    _require(
+        abs(arrived - 45.0) < constants.TOL_MM, f"停在 {arrived:.2f} mm，目标 45.00 mm"
+    )
 
     sim.disconnect()
 
@@ -317,22 +354,48 @@ def check_a_stall_is_detected_rather_than_fought() -> None:
     _tick_loop(fsm, sim, clock, 8.0)
     force = abs(sim.read().force_n)
 
-    assert fsm.state is not MotionState.SERVO, "顶住不动却还在伺服"
-    assert force <= constants.FORCE_MAX_N * 1.1, f"顶住时力到了 {force:.1f} N"
+    _require(fsm.state is not MotionState.SERVO, "顶住不动却还在伺服")
+    _require(force <= constants.FORCE_MAX_N * 1.1, f"顶住时力到了 {force:.1f} N")
     sim.disconnect()
 
 
 def check_the_estop_zeroes_the_torque() -> None:
+    """The stop must leave the motor listening and pushing with nothing.
+
+    Both halves matter.  Zero torque is the stop itself; staying enabled is what
+    lets the console command the axis again without a re-enable, and a disabled
+    DM motor coasts rather than holding.  The version of this check that shipped
+    called ``disable()`` itself and then asserted the motor was disabled, so it
+    tested the line above it and not the stop.
+    """
     clock = _Clock()
     sim = SimBackend(clock=clock)
     sim.connect()
     sim.enable()
-    sim.stream_frame(sim.limits().to_rad(10.0), constants.KP_MOVE, constants.KD_DEFAULT)
-    sim.zero_torque()
-    sim.disable()
-    _ = clock
+    limits = sim.limits()
+    # Press on something first: a mechanism that was resting reads zero torque
+    # whether the stop worked or not.
+    sim.plant.object_mm = 20.0
+    for _ in range(200):
+        sim.stream_frame(limits.to_rad(0.0), constants.KP_MOVE, constants.KD_DEFAULT)
+        clock.advance(constants.CTRL_DT)
+        sim.poll()
+    before = abs(sim.read().force_n)
+    _require(before > 1.0, f"急停前没有建立力矩（{before:.2f} N），这个检查证明不了什么")
 
-    assert not sim.read().is_enabled, "急停后电机仍是使能状态"
+    sim.zero_torque()
+    clock.advance(constants.CTRL_DT)
+    sim.poll()
+
+    _require(
+        sim.read().is_enabled,
+        "急停后电机失能：失能的 DM 电机自由滑行，下一条指令还要先重新使能",
+    )
+    after = abs(sim.read().force_n)
+    _require(
+        after < 0.05 * before,
+        f"急停后仍在输出力矩：{after:.2f} N（急停前 {before:.2f} N）",
+    )
     sim.disconnect()
 
 
@@ -345,22 +408,26 @@ def check_the_can_probe_is_read_correctly() -> None:
     other nodes are on.  Both are string handling, so they can be pinned here, on
     a machine with no adapter plugged in.
     """
-    assert parse_link(IP_RAISED_CLASSIC, 0).matches(constants.CAN_BITRATE), (
-        "已 up 且比特率正确的接口被判成需要改动，每次连接都会弹授权框"
+    _require(
+        parse_link(IP_RAISED_CLASSIC, 0).matches(constants.CAN_BITRATE),
+        "已 up 且比特率正确的接口被判成需要改动，每次连接都会弹授权框",
     )
 
     fd = parse_link(IP_RAISED_FD, 0)
-    assert not fd.matches(constants.CAN_BITRATE), (
-        "CAN FD 被判成经典 CAN，控制台会去改这个总线"
+    _require(
+        not fd.matches(constants.CAN_BITRATE),
+        "CAN FD 被判成经典 CAN，控制台会去改这个总线",
     )
-    assert fd.bitrate == constants.CAN_BITRATE, (
-        f"FD 接口的标称比特率读成了 {fd.bitrate}：dbitrate 被当成了 bitrate"
+    _require(
+        fd.bitrate == constants.CAN_BITRATE,
+        f"FD 接口的标称比特率读成了 {fd.bitrate}：dbitrate 被当成了 bitrate",
     )
 
-    assert not parse_link(IP_UNPLUGGED, 1).exists, "不存在的接口被判成存在"
+    _require(not parse_link(IP_UNPLUGGED, 1).exists, "不存在的接口被判成存在")
 
-    assert parse_link(IP_UP_BUT_UNKNOWN_OPERSTATE, 0).up, (
-        "从 operstate 读管理状态，把 up 的接口读成了 down"
+    _require(
+        parse_link(IP_UP_BUT_UNKNOWN_OPERSTATE, 0).up,
+        "从 operstate 读管理状态，把 up 的接口读成了 down",
     )
 
 
@@ -376,17 +443,21 @@ def check_a_calibration_from_another_frame_is_refused() -> None:
     the ones from the incident, and they do not overlap at all.
     """
     other_frame = Limits(1.775959, -0.064279, 65.21, constants.DEFAULT_TRAVEL_MM)
-    assert frame_mismatch(other_frame, -1.0), (
-        "零点在别的编码器帧上的标定没有被拦下，实测位置会被夹到行程端点再发出去"
+    _require(
+        bool(frame_mismatch(other_frame, -1.0)),
+        "零点在别的编码器帧上的标定没有被拦下，实测位置会被夹到行程端点再发出去",
     )
-    assert frame_mismatch(other_frame, 0.5) == "", "行程内的实测位置被判成了不匹配"
+    _require(
+        frame_mismatch(other_frame, 0.5) == "", "行程内的实测位置被判成了不匹配"
+    )
 
     # A calibration that stops short of the hard stops is the safer kind, and it
     # leaves the axis legitimately parked outside its own commanded range — so
     # the check has to have a tolerance, and this is what it is for.
     red_lines = Limits(-0.170982, -1.403653, 65.0229, 80.16)
-    assert frame_mismatch(red_lines, -0.109674) == "", (
-        "停在闭合硬止挡上的夹爪被判成标定不匹配，闸门会被误关"
+    _require(
+        frame_mismatch(red_lines, -0.109674) == "",
+        "停在闭合硬止挡上的夹爪被判成标定不匹配，闸门会被误关",
     )
 
 
@@ -402,16 +473,19 @@ def check_the_fallback_calibration_is_usable() -> None:
     GUI was not the first thing to be tried.
     """
     path = calibration.factory_path()
-    assert path.is_file(), f"出厂标定文件不在产物里：{path}（打包时漏了数据文件）"
+    _require(
+        path.is_file(),
+        f"出厂标定文件不在产物里：{path}（打包时漏了数据文件）",
+    )
 
     raw, problems = calibration.parse_calibration_json(path.read_text(encoding="utf-8"))
-    assert not problems, f"出厂标定读不出来：{problems}"
+    _require(not problems, f"出厂标定读不出来：{problems}")
 
     limits = calibration.limits_from_raw(raw, constants.DEFAULT_TRAVEL_MM)
     hard, _soft = calibration.validate_limits(
         limits, constants.DEFAULT_TRAVEL_MM, calibration.file_scale(raw)
     )
-    assert not hard, f"出厂标定没通过校验：{hard}"
+    _require(not hard, f"出厂标定没通过校验：{hard}")
 
 
 CHECKS = (
@@ -419,11 +493,11 @@ CHECKS = (
     Check("方向取自记录的两个角度", check_the_direction_is_read_from_the_two_angles),
     Check("标定零点不属于本机时被拦下", check_a_calibration_from_another_frame_is_refused),
     Check("每份标定的 0 点与量程顶端正确", check_the_travel_is_derived_from_the_recorded_angles),
-    Check("被控对象在阶跃下收敛且不过冲", check_plant_settles_on_a_step),
+    Check("被控对象在阶跃下收敛", check_plant_settles_on_a_step),
     Check("CAN 口探测结果读取正确", check_the_can_probe_is_read_correctly),
     Check("一次运动能到位并停住", check_a_move_arrives_and_stops),
     Check("顶住硬物时力矩有上限", check_a_stall_is_detected_rather_than_fought),
-    Check("急停后电机失能", check_the_estop_zeroes_the_torque),
+    Check("急停后力矩归零且电机保持使能", check_the_estop_zeroes_the_torque),
     Check("出厂标定文件可用", check_the_fallback_calibration_is_usable),
 )
 

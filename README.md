@@ -473,14 +473,15 @@ QT_QPA_PLATFORM=offscreen python3 -m pytest tests/ -q
 
 `QT_QPA_PLATFORM=offscreen` is what lets the UI tests build real widgets without a display.
 `tests/conftest.py` points `HOME` at a temporary directory of the session's own, so no test reads or
-writes your `~/.litegrip/`, and it puts `src/` on `sys.path`, which is all the vendored SDK needs.
+writes your `~/.litegrip/`, and the repository-root `conftest.py` puts `src/` on `sys.path`, which
+is all the vendored SDK needs.
 
 The SDK is **vendored, not a dependency**: `src/litegrip` holds litegrip-python at a pinned commit,
-so a clone runs with nothing installed beside it. **Do not edit anything under it except the
-factory calibration this repository deliberately overrides** — a local edit survives only until the
-next re-vendor, which copies each file wholesale. `src/litegrip/VENDORED.md` records the file list,
-the tree hash and the re-vendor steps, and `tests/test_vendored_sdk.py` recomputes the hash, so an
-edit in place fails the suite.
+so a clone runs with nothing installed beside it. **Do not edit anything under it** — a local edit
+survives only until the next re-vendor, which copies each file wholesale. When a divergence is
+genuinely unavoidable, record it by name in `src/litegrip/VENDORED.md`, which also holds the tree
+hash and the re-vendor steps; `tests/test_vendored_sdk.py` recomputes the hash, so an edit in place
+fails the suite. There is no local override today: every file there is upstream's.
 
 `./run_litegrip_studio.sh build` produces a one-file executable in `dist/`. Releases are automated
 by semantic-release on every merge to `main`; the git tag is the only source of truth for the

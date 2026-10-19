@@ -21,6 +21,7 @@ instead of sleeping.
 
 from __future__ import annotations
 
+import math
 import random
 import time
 from pathlib import Path
@@ -29,7 +30,7 @@ from typing import Any, Callable
 from .. import calibration, constants
 from ..calibration import CalibrationInfo
 from ..telemetry import Telemetry
-from ..units import Limits, derive_scale
+from ..units import Limits, derive_scale, torque_from_force
 from . import ConnectFailed, FaultActive, GripperBackend, NotReady
 from .plant import Plant, PlantConfig
 
@@ -165,6 +166,20 @@ class SimBackend(GripperBackend):
         if not self._connected or not self._enabled:
             return False
         if self.tx_fail:
+            return False
+        # The same sanity check the real backend makes, for the same reason the
+        # real one makes it: a non-finite frame is a bug upstream, and executing
+        # it would poison the plant's whole state (every comparison against NaN
+        # is false, so the drive would look inert while its integrators are
+        # NaN).  Refusing keeps the two backends answering alike.
+        if not all(math.isfinite(v) for v in (q_rad, kp, kd, dq_rad_s, tau_nm)):
+            return False
+        if kp < 0.0 or kd < 0.0:
+            return False
+        # Same mechanical rating the real backend enforces.  The plant would
+        # happily integrate a 10 N·m torque, and a run that does so would report
+        # motion the hardware would have refused.
+        if abs(tau_nm) > torque_from_force(constants.FORCE_MAX_N):
             return False
         self.plant.stream(q_rad, kp, kd, dq_rad_s, tau_nm)
         return True

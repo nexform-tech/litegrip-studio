@@ -2,9 +2,9 @@
 
 Why this module exists
 ----------------------
-The SDK's ``load_calibration(path)`` reads ``[path, factory_calibration.json]``
-in order and returns ``True`` for BOTH, distinguishing them only with a
-``log.info`` call (gripper.py:726-749).  A factory file belongs to a nominal
+The SDK's ``LiteGrip.load_calibration(path)`` reads
+``[path, factory_calibration.json]`` in order and returns ``True`` for BOTH,
+distinguishing them only by the path in a ``log.info`` call.  A factory file belongs to a nominal
 unit, not necessarily to the gripper on the bench, so silently loading it makes
 every mm and force reading wrong with nothing on screen to show it.  Worse,
 calling nothing at all leaves ``GripperConfig``'s defaults in place —
@@ -40,7 +40,7 @@ angles the calibration was recorded at, and what refuses a calibration is
 :func:`~litegrip_studio.units.frame_mismatch`, which compares the file against
 the encoder and never looks at the ordering.
 
-Pure layer: no Qt, no SDK at import time, no I/O beyond reading the JSON files
+Pure layer: no Qt, no SDK at import time, no I/O beyond the calibration files
 it is pointed at.
 """
 
@@ -48,9 +48,11 @@ from __future__ import annotations
 
 import json
 import os
+import stat
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from . import constants
 from .units import Limits, derive_scale
@@ -70,13 +72,14 @@ PROVENANCE_LABELS = {
     PROVENANCE_MEMORY: "内存标定（未保存）",
 }
 
-# The three keys the SDK requires; it indexes them unguarded (gripper.py:745),
-# so a file missing one raises KeyError from inside the SDK rather than a
-# diagnosable error.  We validate before it ever gets there.
+# The three keys the SDK's ``load_calibration`` indexes unguarded, so a file
+# missing one raises KeyError from inside the SDK rather than a diagnosable
+# error.  We validate before it ever gets there.
 REQUIRED_KEYS = ("zero_position_rad", "max_position_rad", "rad_to_mm")
 
-# Keys the SDK's save_calibration() writes.  We mirror the full set so a file we
-# produce is loadable by the SDK unchanged.
+# The keys this console writes.  The SDK's ``save_calibration`` also writes
+# ``calibrated``, ``work_stroke_mm`` and (when known) ``mst_id``; every one of
+# those is optional on load, so a file produced here is loadable unchanged.
 _SAVED_KEYS = (
     "channel",
     "can_id",
@@ -94,7 +97,13 @@ _SAVED_KEYS = (
 
 
 def default_user_path() -> Path:
-    """Mirrors the SDK's ``DEFAULT_CALIB`` (gripper.py:39)."""
+    """``$LITEGRIP_CALIB``, or the SDK's legacy ``DEFAULT_CALIB`` location.
+
+    The variable is read per call rather than once at import, which is what lets
+    a test (or a launcher) redirect it.  The per-channel
+    ``LiteGrip.default_calib_path`` is deliberately not mirrored: the console
+    always names the file it loads and saves explicitly.
+    """
     env = os.environ.get("LITEGRIP_CALIB")
     if env:
         return Path(env).expanduser()
@@ -102,7 +111,7 @@ def default_user_path() -> Path:
 
 
 def _sdk_factory_path() -> Path:
-    """The SDK's own factory calibration (gripper.py:33).
+    """The SDK's own factory calibration (``litegrip.gripper._FACTORY_CALIB``).
 
     Resolved through ``litegrip.__file__`` so it is correct inside a PyInstaller
     bundle (``sys._MEIPASS``), which is why the build must pass
@@ -808,14 +817,75 @@ def build_save_dict(
         "kd": kd,
         "grasp_torque_threshold": grasp_torque_threshold,
     }
-    assert set(data) == set(_SAVED_KEYS), "save schema drifted from the SDK's"
+    # An explicit raise rather than ``assert``: ``python -O`` strips asserts,
+    # and this one guards a schema the operator's file is written in.
+    if set(data) != set(_SAVED_KEYS):
+        raise AssertionError("save schema drifted from ``_SAVED_KEYS``")
     return data
+
+
+def atomic_write(
+    path: str | os.PathLike[str], writer: Callable[[Path], object]
+) -> str:
+    """Fill a temporary sibling and move it over ``path`` in one step.
+
+    A calibration file is the difference between a console that moves to a
+    millimetre and one that moves to a clamp, so a half-written one is worse
+    than the file it replaced: it is present, it parses as invalid, and the
+    motion gate closes with nothing in the file to explain why.  ``write_text``
+    truncates first, so a crash, a full disk or an SDK that raises halfway
+    leaves exactly that.
+
+    ``writer`` is a callable rather than a string because the real backend's
+    file is written by the SDK, which takes a path and does its own I/O.  It
+    receives the temporary path, must leave a complete file there, and may
+    raise; whatever it leaves behind is removed.
+
+    The temporary is created in the target's directory, because ``os.replace``
+    is only atomic within one filesystem.  The file is fsynced before the
+    rename and the directory after it, so the replacement survives a power cut
+    rather than merely an orderly crash.
+    """
+    target = Path(path).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+    )
+    os.close(fd)
+    temp = Path(temp_name)
+    try:
+        writer(temp)
+
+        # mkstemp opens at 0600; give the result the permissions the file it
+        # replaces had, or the conventional ones when there was no file yet.
+        mode = (
+            stat.S_IMODE(target.stat().st_mode) if target.exists() else 0o644
+        )
+        os.chmod(temp, mode)
+
+        with open(temp, "rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(temp, target)
+
+        # The rename is durable only once the directory entry is on disk.
+        try:
+            directory = os.open(target.parent, os.O_RDONLY)
+        except OSError:
+            pass  # not supported on this platform; the rename still happened
+        else:
+            try:
+                os.fsync(directory)
+            except OSError:
+                pass
+            finally:
+                os.close(directory)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
+    return str(target)
 
 
 def write_calibration(path: str | os.PathLike[str], data: Mapping[str, Any]) -> str:
     """Write a calibration JSON file, creating parent directories."""
-    target = Path(path).expanduser()
-    if target.parent:
-        target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(dict(data), indent=2), encoding="utf-8")
-    return str(target)
+    text = json.dumps(dict(data), indent=2)
+    return atomic_write(path, lambda temp: temp.write_text(text, encoding="utf-8"))

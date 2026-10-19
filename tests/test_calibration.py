@@ -203,9 +203,9 @@ class TestSchemaValidation:
 
     @pytest.mark.parametrize("missing", calibration.REQUIRED_KEYS)
     def test_a_missing_required_key_is_named_not_raised(self, missing: str) -> None:
-        """The SDK indexes these three unguarded (gripper.py:745), so a file
-        missing one raises ``KeyError`` from inside the SDK — with no way to
-        tell which file, or why."""
+        """The SDK indexes these three unguarded in ``load_calibration``, so a
+        file missing one raises ``KeyError`` from inside the SDK — with no way
+        to tell which file, or why."""
         data = dict(USER_RAW)
         del data[missing]
         raw, problems = calibration.parse_calibration_json(json.dumps(data))
@@ -832,6 +832,17 @@ class TestRoundTrip:
         _, problems = calibration.parse_calibration_json(json.dumps(data))
         assert problems == []
 
+    def test_the_schema_guard_is_a_raise_not_an_assert(self, monkeypatch) -> None:
+        """``python -O`` strips ``assert`` statements, and this one guards the
+        schema every calibration file is written in.  Defeated by declaring a
+        key the builder does not write."""
+        monkeypatch.setattr(
+            calibration, "_SAVED_KEYS", calibration._SAVED_KEYS + ("calibrated",)
+        )
+
+        with pytest.raises(AssertionError, match="schema drifted"):
+            calibration.build_save_dict(Limits(1.775959, -0.064279, 65.21))
+
     def test_a_saved_file_reloads_to_the_same_limits(self, env) -> None:
         original = calibration.resolve(_write(env.dir / "a.json", USER_RAW))
         target = env.dir / "nested" / "b.json"
@@ -857,6 +868,64 @@ class TestRoundTrip:
 
     def test_a_custom_stroke_is_passed_through(self) -> None:
         assert calibration.limits_from_raw(USER_RAW, 200.0).max_stroke_mm == 200.0
+
+
+class TestTheWriteIsAtomic:
+    """A save that fails must leave the previous calibration, not half of one.
+
+    The file is what the motion gate is opened from, so a truncated write is
+    the one failure that turns a working console into a refused one at the next
+    launch — and the truncated file is the *only* evidence of what happened.
+    """
+
+    def test_a_writer_that_dies_leaves_the_previous_file_alone(self, env) -> None:
+        target = env.dir / "cal.json"
+        target.write_text('{"keep": true}', encoding="utf-8")
+
+        def half_written(temp: Path) -> None:
+            temp.write_text("{ truncated", encoding="utf-8")
+            raise RuntimeError("disk full")
+
+        with pytest.raises(RuntimeError, match="disk full"):
+            calibration.atomic_write(target, half_written)
+
+        assert json.loads(target.read_text(encoding="utf-8")) == {"keep": True}
+
+    def test_a_failed_write_leaves_no_temporary_behind(self, env) -> None:
+        """A ``.cal.json.XXXX.tmp`` in the directory would be invisible to every
+        reader of the calibration and permanent, so the cleanup is not optional.
+        """
+        target = env.dir / "cal.json"
+        target.write_text("{}", encoding="utf-8")
+
+        with pytest.raises(OSError):
+            calibration.atomic_write(
+                target, lambda temp: (_ for _ in ()).throw(OSError("no space"))
+            )
+
+        assert [p.name for p in env.dir.iterdir()] == ["cal.json"]
+
+    def test_a_successful_write_leaves_no_temporary_behind(self, env) -> None:
+        target = env.dir / "cal.json"
+
+        calibration.write_calibration(target, {"zero_position_rad": 1.0})
+
+        assert [p.name for p in env.dir.iterdir()] == ["cal.json"]
+        assert json.loads(target.read_text(encoding="utf-8")) == {
+            "zero_position_rad": 1.0
+        }
+
+    def test_the_replaced_file_keeps_its_permissions(self, env) -> None:
+        """``mkstemp`` opens at 0600 whatever the file it replaces was, so the
+        replacement has to carry the old mode across or a calibration saved to
+        a group-readable path silently becomes private on the next save."""
+        target = env.dir / "cal.json"
+        target.write_text("{}", encoding="utf-8")
+        target.chmod(0o640)
+
+        calibration.write_calibration(target, {"zero_position_rad": 1.0})
+
+        assert target.stat().st_mode & 0o777 == 0o640
 
 
 # ── presentation ────────────────────────────────────────────────────────────
@@ -966,8 +1035,8 @@ class TestPaths:
         assert calibration.default_user_path() == tmp_path / "x.json"
 
     def test_the_user_path_defaults_to_the_sdk_location(self, monkeypatch) -> None:
-        """Mirrors ``DEFAULT_CALIB`` (gripper.py:39) — if these diverge, the file
-        the console validates is not the file the SDK loads."""
+        """Mirrors ``DEFAULT_CALIB`` — if these diverge, the file the console
+        validates is not the file the SDK loads."""
         monkeypatch.delenv("LITEGRIP_CALIB", raising=False)
         assert calibration.default_user_path() == (
             Path.home() / ".litegrip" / "litegrip_calibration.json"

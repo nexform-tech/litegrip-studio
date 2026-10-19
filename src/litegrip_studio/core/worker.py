@@ -63,6 +63,7 @@ adds the ``QThread`` and the signals and nothing else.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from collections import deque
@@ -467,8 +468,12 @@ class WorkerLoop:
         self._track_link(fresh)
 
         if self._awaiting_position:
-            measured = self._measured_mm()
-            if measured is not None:
+            # Keyed on the angle, not the millimetres: a console with no usable
+            # calibration has a perfectly good reading and no way to name it in
+            # mm, and it still has a pose worth holding.  ``_hold_measured``
+            # picks which of the two holds that is.
+            measured_rad = self._measured_rad()
+            if measured_rad is not None:
                 # The frame has arrived: now there is somewhere honest to hold.
                 # Until this ran the axis was left free, which is the only state
                 # that asks nothing of a position nobody has measured.  Which
@@ -477,7 +482,8 @@ class WorkerLoop:
                 # rather than a millimetre nobody has vetted.
                 self._awaiting_position = False
                 self._hold_measured("使能后尚未读到位置")
-                if self._gate is GateState.READY:
+                measured = self._measured_mm()
+                if measured is not None and self._gate is GateState.READY:
                     self._log("info", f"已读到位置 {measured:.1f} mm，在此保持")
 
         self._evaluate_gate()
@@ -674,6 +680,13 @@ class WorkerLoop:
         """
         if not self._connected or not self._enabled or not self._have_position:
             return None
+        # A frame that arrived is not the same as a number in it.  A NaN here
+        # means the backend could not name a millimetre (no usable calibration,
+        # or an unreadable angle), and it is reported as no reading: the clamp
+        # used to turn it into 0 mm — the closed stop — which is the most
+        # dangerous place to guess.
+        if not math.isfinite(self._tele.position_mm):
+            return None
         return self._tele.position_mm
 
     def _measured_rad(self) -> float | None:
@@ -684,6 +697,8 @@ class WorkerLoop:
         calibration at all: a hold at the pose the jaws are already in.
         """
         if not self._connected or not self._enabled or not self._have_position:
+            return None
+        if not math.isfinite(self._tele.position_rad):
             return None
         return self._tele.position_rad
 
@@ -1194,8 +1209,11 @@ class WorkerLoop:
             )
         measured = self._anchor_here("使能后尚未读到位置")
         if measured is None:
+            # No frame has arrived yet — the pose is forgotten above, so this is
+            # the only way to be here.  The tick that receives one takes the
+            # hold, in millimetres or in the measured angle, and says which.
             self._log("info", "电机已使能；尚未读到位置，先零重力，读到后自动保持")
-        elif state is GateState.READY:
+        else:
             self._log("info", f"电机已使能，保持当前位置 {measured:.1f} mm")
 
     def _anchor_here(self, release_reason: str) -> float | None:
@@ -1217,14 +1235,16 @@ class WorkerLoop:
         Returns the measurement it anchored to, or ``None`` when it left the axis
         free, so the caller can say which of the two happened.
         """
-        measured = self._measured_mm()
-        if measured is None:
+        # The angle is what the hold actually freezes, so that is what decides
+        # whether there is anything to anchor to.  Millimetres may be undefined
+        # under a calibration nobody has vetted while the pose is known exactly.
+        if self._measured_rad() is None:
             self._awaiting_position = True
             self._motion.release(release_reason)
             return None
         self._awaiting_position = False
         self._hold_measured(release_reason)
-        return measured
+        return self._measured_mm()
 
     def _clear_fault(self) -> None:
         if not self._connected:
@@ -1815,7 +1835,8 @@ class WorkerLoop:
         small next to ``CALIB_MISMATCH_RAD``, the gate will not notice.  The
         second exists because ``WriteZeroResult.ok`` means the drive *accepted
         the frame*, which is not the same as the motor having come back: the SDK
-        re-enables around the write and drops that result (gripper.py:1431).
+        re-enables around the write and drops that result
+        (``LiteGrip.write_zero``).
         """
         detail = (
             "当前标定文件中的角度是在旧零点下测得的，"

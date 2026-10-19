@@ -46,7 +46,7 @@ CTRL_DT = constants.CTRL_DT
 # ``test_motion_fsm``, a file in which no calibration is mentioned at all.
 #
 # Pointing ``HOME`` at a directory of the suite's own closes every one of those
-# doors at once, including the SDK's ``DEFAULT_CALIB`` (gripper.py:39), and it
+# doors at once, including the SDK's ``DEFAULT_CALIB``, and it
 # does so without stubbing the functions that compute the paths: a test may
 # still assert that a default resolves to ``~/.litegrip/...``, because that is
 # still exactly what it does.  The two environment variables are dropped for the

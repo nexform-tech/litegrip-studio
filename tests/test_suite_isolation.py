@@ -72,6 +72,14 @@ class TestTheSuiteHasAHomeOfItsOwn:
         env["PYTHONPATH"] = os.pathsep.join(SDK_PATHS)
         env["LITEGRIP_CALIB"] = theirs
         env["LITEGRIP_FACTORY_CALIB"] = theirs
+        # The child imports ``conftest``, which imports pytest, and pytest may
+        # live in the *operator's* user site — the one the parent's redirect has
+        # already moved HOME away from.  Handing the child the operator's home
+        # to import with does not weaken what is under test: ``conftest``
+        # redirects HOME itself as it loads, and the assertion below is about
+        # the path it resolves afterwards.  Without this the child cannot import
+        # its own fixtures on a machine where the suite is installed per user.
+        env["HOME"] = str(OPERATOR_HOME)
 
         resolved = subprocess.run(
             [sys.executable, "-c",

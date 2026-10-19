@@ -204,8 +204,8 @@ One key still differs from the C++ copy: upstream's file carries `work_stroke_mm
 one has no such key at all. Upstream's commit says why it kept it — dropping it "would let open() run
 to the mechanical stop instead of the 6 mm-short work stroke that was chosen deliberately".
 
-**That key never reaches this console, in any file.** `work_stroke_mm` is read in exactly one place
-in the SDK, `Gripper.open`, through `work_limit_target` (`actions.py:402`), and the console does not
+**That key never reaches this console, in any file.** `work_stroke_mm` changes a motion in exactly
+one place in the SDK, `Gripper.open`, through `work_limit_target`, and the console does not
 call `Gripper.open` — or `close`, or `grasp`, or any other SDK convenience method. It streams its own
 MIT frames from `send_mit_frame` / `poll` / `get_state` / `stop`; the reasons are structural and
 listed in `backend/real.py` and `backend/__init__.py`. The console's own `open` drives to

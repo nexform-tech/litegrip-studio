@@ -11,7 +11,8 @@ named so the two can be re-checked when the SDK moves.
 from __future__ import annotations
 
 # ── Control loop ────────────────────────────────────────────────────────────
-# 200 Hz, the SDK's own MIT stream rate (can_bus.py:328 interval_s=0.005).  The
+# 200 Hz, the SDK's own MIT stream rate (``control_mit_stream``'s default
+# ``interval_s=0.005``).  The
 # rate is not free and this is the number that was measured, not a default: a
 # move commanded at ``v`` advances the command by ``v·dt`` per tick, and when
 # the jaws meet something the servo turns that whole advance into force before
@@ -426,7 +427,9 @@ RAD_TO_MM_MAX = 200.0
 CALIB_MISMATCH_RAD = 0.15
 
 # ── Calibration ─────────────────────────────────────────────────────────────
-# Guided probe, mirroring calibrate_guided()'s defaults (gripper.py:516).
+# Guided probe.  The SDK's ``calibrate_guided`` defaults (kp=20, step=0.05,
+# 200 iterations) are a starting point only; the probe here is a different
+# machine, ticked from the console at 200 Hz, and these are its own values.
 GUIDED_KP = KP_PROBE  # 60.0
 GUIDED_STEP_RAD = 0.08
 GUIDED_STALL_DELTA = 4.0e-4
@@ -437,8 +440,8 @@ GUIDED_BACKOFF_RAD = 0.15
 
 # A probe step is bounded so that the press it can build up never exceeds the
 # mechanical rating.  At a stall the MIT law's torque is exactly ``kp × step``
-# (the velocity term has nothing left to damp), so the SDK's own kp=60 with
-# step=0.08 asks for 4.8 Nm — 48 N, over the 40 N rating — with nothing between
+# (the velocity term has nothing left to damp), so kp=60 with step=0.08 would
+# ask for 4.8 Nm — 48 N, over the 40 N rating — with nothing between
 # it and the hard stop except the drive's 10 Nm limit.  The step is therefore
 # derived from the cap rather than chosen: ``torque_from_force(FORCE_MAX_N)/kp``,
 # which is 0.0667 rad at kp=60 and still covers a full stroke inside max_iter.
@@ -480,7 +483,7 @@ PROBE_REFUSED_FAIL_S = 0.5
 # which matters.  The failure it has to catch is a dropped frame leaving the
 # SDK's cached position at zero, and the size of that jump is however far the
 # jaws had been pushed: from a mid-travel position 0 is a few tenths of a rad,
-# comfortably *inside* the SDK's own ``|pos| < 50`` guard and inside a motor-rate
+# comfortably *inside* ``MANUAL_POS_GUARD_RAD`` and inside a motor-rate
 # threshold too.  Adopted as an extreme, it would overstate the travel and so
 # understate every millimetre the console reads.  At 1 m/s — 6.7× the console's
 # own top speed — the jump is caught.  A yank faster than that costs one sample
@@ -494,8 +497,8 @@ MANUAL_MAX_HAND_SPEED_MM_S = 1000.0
 # What that leaves is a wait that can only end when someone presses a button, and
 # the axis is limp throughout it, so each wait is bounded.
 #
-# Five minutes per point: the procedure is two hand moves, and the SDK's own
-# version gives the whole sweep thirty seconds.  Generous because the timeout
+# Five minutes per point: the procedure is two hand moves, and the SDK's
+# ``calibrate_manual`` gives the whole sweep its ``duration`` default, 30 s.  Generous because the timeout
 # ends in a failed probe and the operator has to start again, and bounded at all
 # because the alternative is a console left holding the motor enabled and limp
 # for as long as someone forgets about it.
