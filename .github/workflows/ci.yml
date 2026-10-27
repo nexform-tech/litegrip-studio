@@ -29,9 +29,6 @@
 # is not hypothetical: litegrip-python's main requires the check named `test`,
 # and its first attempt at a second interpreter used a matrix and left every
 # merge blocked until the shape was changed back.
-#
-# AGENTS.md is deliberately not linted: it is canonical content synced from
-# repo-template and must not be edited here.
 name: CI
 
 on:
@@ -66,7 +63,6 @@ jobs:
         run: |
           set -euo pipefail
           test -s README.md
-          test -s AGENTS.md
           test -s LICENSE
           python3 -c "import json; json.load(open('.releaserc.json'))"
           python3 -c "import json; json.load(open('.markdownlint.json'))"
@@ -89,7 +85,7 @@ jobs:
           # `project.version` holds the semantic-release placeholder, which is
           # not a PEP 440 version, so setuptools refuses to build the metadata
           # while it is there. A publish job substitutes the released value in
-          # its own workspace (AGENTS.md §3); this job substitutes a valid one in
+          # its own workspace (the release rules); this job substitutes a valid one in
           # the checkout, and the file in the repository keeps its placeholder.
           # The match is asserted: a placeholder written differently fails here
           # rather than quietly installing a version nobody chose.
