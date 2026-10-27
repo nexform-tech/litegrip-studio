@@ -440,7 +440,7 @@ clone 下来什么都不用装就能跑。**不要改它下面的任何文件**�
 **上面这些「为什么」——架构为什么长这样、滑块背后到底在做什么、标定闸门为什么放在那个位置
 ——都在 [DESIGN.md](DESIGN.md)（英文）。本文是使用手册。**
 
-本仓库遵循 NEXFORM ROBOTICS 的共享仓库规范：[AGENTS.md](AGENTS.md) 里的智能体作业规则、
+本仓库遵循 NEXFORM ROBOTICS 的共享仓库规范：[`.nexform-standards.json`](.nexform-standards.json) 里的智能体作业规则、
 Conventional Commits，以及自动化的 semantic-release 版本号。
 
 ---
