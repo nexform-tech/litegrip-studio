@@ -493,7 +493,7 @@ actually doing, why the calibration gate sits where it does — are in [DESIGN.m
 file is the manual.
 
 This repository follows the shared NEXFORM ROBOTICS standards: the agent operating rules in
-[AGENTS.md](AGENTS.md), Conventional Commits, and automated semantic-release versioning.
+[`.nexform-standards.json`](.nexform-standards.json), Conventional Commits, and automated semantic-release versioning.
 
 ---
 
