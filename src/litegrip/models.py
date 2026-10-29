@@ -155,24 +155,26 @@ class GripperConfig:
     def close_sign(self) -> float:
         """Which way the motor counts when the jaws close.
 
-        ``+1.0`` when closing means increasing radians (the usual mounting),
-        ``-1.0`` for a reverse mount.  Derived from the ordering of the two
-        calibrated limits, so direction is data, not a separate switch — and
-        it is only meaningful once :attr:`calibrated` is True.
+        ``+1.0`` when closing means increasing radians (the shipped
+        mounting), ``-1.0`` when the limits run the other way.  Derived from
+        the ordering of the two calibrated limits, so direction is data, not
+        a separate switch — and it is only meaningful once :attr:`calibrated`
+        is True.
         """
         return 1.0 if self.pos_closed_rad >= self.pos_open_rad else -1.0
 
     @property
     def mount(self) -> Optional[str]:
-        """``"normal"`` / ``"reverse"`` — the name the limits spell out.
+        """Legacy mount label (``"normal"`` / ``"reverse"``), or ``None``.
+
+        **Deprecated.**  Kept for backward compatibility.  Shipped grippers
+        have one mounting; on a calibrated unit this reports ``"normal"``.
+        Read ``pos_closed_rad`` / ``pos_open_rad`` directly when you need the
+        travel.
 
         ``None`` while :attr:`calibrated` is False: the placeholder defaults
         also happen to order close above open, so reporting ``"normal"``
         before a calibration has been loaded would be a claim, not a reading.
-        Handy for a caller that has to show the operator which way this unit
-        is mounted.  Compare with the ``mount=`` argument of
-        :class:`~litegrip.LiteGrip`, which *declares* a mount by loading a
-        template rather than reading one back.
         """
         if not self.calibrated:
             return None

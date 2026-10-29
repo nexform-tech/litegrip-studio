@@ -42,6 +42,7 @@ from .actions import (
     MotionConfig,
     MoveProgress,
     MoveResult,
+    ReleaseResult,
     WriteZeroResult,
     _check_calibrated,
     clamp_to_travel,
@@ -65,7 +66,7 @@ def _zenoh_transport(role: str, key: str, port: int, host: Optional[str],
     except ImportError as e:
         raise ImportError(
             "the zenoh teleoperation link needs the optional zenoh dependency — "
-            "install it with `pip install litegrip[zenoh]`") from e
+            "install it with `pip install litegrip-python[zenoh]`") from e
     return ZenohTeleopTransport(role, key, port=port, host=host,
                                 ready_key=ready_key)
 
@@ -73,23 +74,21 @@ def _zenoh_transport(role: str, key: str, port: int, host: Optional[str],
 # The calibration the SDK ships for the unit it ships with.  This is the
 # *standard* value: a no-argument load_calibration() reads it and nothing else.
 # A calibration measured on the buyer's machine is never picked up by accident
-# — name it with ``path=``, ``template=`` or ``LITEGRIP_CALIB``.
+# — name it with ``path=`` or ``LITEGRIP_CALIB``.
 _FACTORY_CALIB = _os.path.join(_os.path.dirname(__file__), "factory_calibration.json")
 
-# Pre-made calibration templates shipped with the package.  Each is a pair of
-# nominal limits whose *ordering* declares the mounting direction: "normal"
-# closes at the larger rad value, "reverse" at the smaller one.  They are a
-# labelling seed, not a per-unit calibration — the limits are nominal, so run
-# zero() to measure the real travel.  Pick one by eye after watching which way
-# the jaws move::
-#
-#     gripper.load_calibration(CALIB_TEMPLATES["reverse"])   # by path
-#     gripper.load_template("reverse")                       # or by name
+# Calibration templates kept for backward compatibility.  They are
+# **deprecated**: shipped grippers have one mounting, which the factory
+# calibration already describes, so new code uses a no-argument
+# load_calibration() or an explicit ``path=``.  Each template is a pair of
+# nominal limits whose *ordering* still declares a direction (the "normal" one
+# closes at the larger rad value); they are a labelling seed, not a per-unit
+# calibration, so run zero() to measure the real travel.
 #
 # They deliberately carry no `channel`, `can_id`, `mst_id` or gain values: a
 # template declares a *direction*, and adopting a device identity or a tuned
-# kp/kd from it would silently rewrite what the caller set.  Use
-# :func:`list_templates` to enumerate the names for a UI.
+# kp/kd from it would silently rewrite what the caller set.  list_templates()
+# is likewise deprecated and kept only so existing callers keep working.
 CALIB_TEMPLATES = {
     "normal": _os.path.join(_os.path.dirname(__file__), "calibration_normal.json"),
     "reverse": _os.path.join(_os.path.dirname(__file__), "calibration_reverse.json"),
@@ -179,9 +178,11 @@ def default_calib_path(channel: str = DefaultParams.CAN_CHANNEL) -> str:
 
 
 def list_templates() -> List[str]:
-    """The calibration template names, in declaration order (normal first).
+    """The legacy calibration template names, in declaration order.
 
-    For a UI that has to offer the mount as a choice.
+    **Deprecated.**  Kept for backward compatibility; shipped grippers have
+    one mounting and the factory calibration already describes it.  Returns
+    the historical names so existing callers keep working.
     """
     return list(CALIB_TEMPLATES)
 
@@ -280,13 +281,10 @@ class LiteGrip:
         so the gripper goes limp when the object is released.  Set ``False``
         to leave the motor enabled after disconnecting.
     mount:
-        Template name declaring which way this unit is mounted —
-        ``"normal"`` or ``"reverse"`` (see :data:`CALIB_TEMPLATES` and
-        :func:`list_templates`).  Loads that template immediately, so
-        ``LiteGrip("can1", mount="reverse")`` is all a two-gripper setup
-        needs.  ``None`` (default) loads nothing; call
-        :meth:`load_calibration` yourself.  This *declares* the mount; read
-        the resulting direction back from :attr:`GripperConfig.mount`.
+        **Deprecated.**  Kept for backward compatibility.  Shipped grippers
+        have one mounting, which the factory calibration already describes;
+        leave this ``None`` (the default) and call :meth:`load_calibration`
+        yourself.
 
     The gripper works as a context manager::
 
@@ -384,12 +382,11 @@ class LiteGrip:
 
     @property
     def mount(self) -> Optional[str]:
-        """``"normal"`` / ``"reverse"``, or ``None`` while uncalibrated.
+        """The legacy mount label, or ``None`` while uncalibrated.
 
-        Read back from the loaded limits (see
-        :attr:`~litegrip.GripperConfig.mount`) — not necessarily the name
-        that was *declared*, since a calibration run keeps the direction but
-        rewrites the travel.
+        **Deprecated.**  Kept for backward compatibility.  Shipped grippers
+        have one mounting, so a calibrated unit reports ``"normal"``.  Read
+        the limits from :attr:`GripperConfig` when you need the travel.
         """
         return self._config.mount
 
@@ -937,7 +934,7 @@ class LiteGrip:
         print("  夹爪将自动缓慢移动。到达极限时按 Enter 确认。")
 
         s = self._config.close_sign
-        print(f"  方向：{'正向' if s > 0 else '反装'}（由当前配置的限位顺序推出）")
+        print(f"  方向：闭合时 rad {'增大' if s > 0 else '减小'}（由当前标定限位推出）")
         print()
 
         def _step_to_limit(direction: str, sign: float, label: str) -> float:
@@ -1118,15 +1115,13 @@ class LiteGrip:
 
         Three ways to say which file, and they are mutually exclusive:
 
-        * ``template="reverse"`` — a name from :data:`CALIB_TEMPLATES`
-          (:func:`list_templates`).  Strict: if that template cannot be read
-          this raises instead of falling back, because the fallback would be
-          the factory file, and that file is a *normal* mount — answering a
-          request for reverse with normal is the one failure the name exists
-          to prevent.
+        * ``template=...`` — **deprecated**, kept for backward compatibility.
+          A name from :data:`CALIB_TEMPLATES` (:func:`list_templates`).
+          Strict: if that template cannot be read this raises instead of
+          falling back to the factory file.
         * ``path=...`` — an explicit file, which may be anywhere (including a
           template's path).  Falls back to the built-in factory calibration
-          if it cannot be read.
+          if it cannot be read, and may still return True when it does.
         * neither — the factory calibration the SDK ships, and nothing else.
           A calibration measured on this machine is never picked up by
           accident: name it with ``path=``, or point ``LITEGRIP_CALIB`` at it
@@ -1134,8 +1129,8 @@ class LiteGrip:
 
           The factory file declares ``channel: can0``, so a ``can1`` unit gets
           nothing from a no-argument load — it fails loudly rather than
-          silently adopting ``can0``'s direction.  Give it a calibration with
-          ``mount=``, ``path=`` or ``LITEGRIP_CALIB``.
+          silently adopting ``can0``'s calibration.  Give it a calibration
+          with ``path=`` or ``LITEGRIP_CALIB``.
 
           Any file in ``~/.litegrip`` that this load passed over is named in a
           warning, with the call that would use it.
@@ -1143,9 +1138,8 @@ class LiteGrip:
         Call this after :meth:`connect` but before :meth:`enable`.
 
         The limits in the file decide the direction: whichever of the two is
-        numerically larger is the closed side.  Loading a template is how a
-        reverse-mounted gripper is declared, and the direction a file implies
-        is logged.
+        numerically larger is the closed side, and the direction a file
+        implies is logged.
 
         Args:
             path: JSON file path.
@@ -1209,9 +1203,9 @@ class LiteGrip:
             if strict:
                 raise CommandError(
                     f"标定模板 {template!r} 读不出来（{sources[0]}）。不作出厂"
-                    f"回退 —— 出厂文件是正装，用它会静默把方向换成正装。")
+                    f"回退 —— 出厂文件的限位方向未必与所点名的模板一致。")
             log.warning("No calibration found (tried: %s). "
-                        "Run zero() first, or load a template.",
+                        "Run zero() first, or restore the factory calibration.",
                         ", ".join(sources))
             return False
 
@@ -1262,16 +1256,19 @@ class LiteGrip:
                  loaded_from,
                  abs(self._config.pos_open_rad - self._config.pos_closed_rad)
                  * self._config.rad_to_mm,
-                 "正向（rad 增大 = 闭合）" if s > 0 else "反装（rad 减小 = 闭合）")
+                 "闭合时 rad 增大" if s > 0 else "闭合时 rad 减小")
         return True
 
     def load_template(self, name: str) -> bool:
-        """Load a pre-made calibration template by name, declaring the mount.
+        """Load a legacy calibration template by name.
 
-        Names come from :func:`list_templates` (``"normal"`` / ``"reverse"``).
+        **Deprecated.**  Kept for backward compatibility; shipped grippers
+        have one mounting and the factory calibration describes it.  New code
+        uses :meth:`load_calibration` with no arguments or ``path=``.
+
         Thin wrapper over ``load_calibration(template=name)`` so the name is
-        resolved in one place; see that method for why a template never falls
-        back to the factory file.
+        resolved in one place; see that method for the template's strict
+        fallback behavior.
 
         Args:
             name: Template name.
@@ -1385,17 +1382,92 @@ class LiteGrip:
 
         Args:
             force_n: Gripping force in N; ``None`` = ``MotionConfig.force_n``.
-            hold_s: Hold time in seconds; ``0`` = hold until a fault or
-                Ctrl+C.
+            hold_s: Hold time in seconds; ``0`` = hold until a fault,
+                Ctrl+C, or a :meth:`release` / :meth:`request_release` from
+                another thread.
             progress: Optional progress callback.
 
         Returns:
             :class:`~litegrip.actions.GraspResult` — truthy when the hold
             ended normally.  ``stalled=True`` with ``reached=False`` means
             it closed onto an object, which is the expected outcome.
+            ``released=True`` means the grasp ended because a release was
+            requested: ``ok=True`` for a normal release, ``ok=False`` for
+            an abort.
         """
         self._check_connected()
         return self._actions.grasp(force_n, hold_s, progress=progress)
+
+    def release(
+        self,
+        clearance_mm: float = 10.0,
+        *,
+        abort: bool = False,
+        timeout_s: Optional[float] = None,
+    ) -> ReleaseResult:
+        """End an in-progress :meth:`grasp` and open the jaws — thread-safe.
+
+        Call it from any thread, including while ``grasp(hold_s=0)`` is blocked
+        in another one.  The grasp thread owns the CAN frames, so this method
+        never sends any itself while a grasp is running: it records the request
+        and waits for the grasp thread to finish releasing, then returns that
+        outcome.
+
+        With no grasp running it performs the release in the calling thread.
+
+        The jaws open from the pose where the grip was **declared** (the end of
+        the force-carrying approach), not from where the set force pressed them
+        to: a 20 N grip drives a few millimetres further in, and opening from
+        there would free that much less.  The target is
+        ``max(current, grip) + clearance_mm``, clamped to the calibrated open
+        limit, reached by the same bounded position ramp as every other move —
+        never a step command.
+
+        ``abort=True`` is the E-stop form: it drops the torque and sends no
+        opening move, returning as soon as the grasp thread has done so.
+
+        Calling it twice is safe: a second call during the same grasp joins the
+        first and returns its outcome instead of opening again.
+
+        Args:
+            clearance_mm: Extra opening beyond the grip pose, in mm; must be a
+                non-negative finite number.
+            abort: E-stop: torque off only, no opening move.
+            timeout_s: How long to wait for the grasp thread; ``None`` =
+                :attr:`MotionConfig.release_wait_s` (10 s).  On timeout the
+                result is ``ok=False`` and a warning is logged.
+
+        Returns:
+            :class:`~litegrip.actions.ReleaseResult`.
+
+        Raises:
+            CommandError: ``clearance_mm`` is not a non-negative finite number,
+                or no grasp is running and the config is uncalibrated.
+            NotInitializedError: no grasp is running and the gripper is not
+                connected/enabled.
+        """
+        self._check_connected()
+        return self._actions.release(clearance_mm, abort=abort,
+                                     timeout_s=timeout_s)
+
+    def request_release(self, clearance_mm: float = 10.0, *,
+                        abort: bool = False) -> bool:
+        """Non-blocking form of :meth:`release`; never touches the CAN bus.
+
+        Records the request if a grasp is running and returns ``True``; returns
+        ``False`` when there is no grasp to release.  Safe for a UI thread, a
+        signal handler or an E-stop callback: it takes only the release lock,
+        never ``_io_lock``, and sends no frame.  The grasp thread performs the
+        release before its next frame (within 5 ms).
+
+        Args:
+            clearance_mm: Extra opening beyond the grip pose, in mm.
+            abort: E-stop: torque off only, no opening move.
+
+        Returns:
+            True if a grasp was active and the request was recorded.
+        """
+        return self._actions.request_release(clearance_mm, abort=abort)
 
     def zero(self) -> CalibrationData:
         """Full calibration: probe both mechanical limits and save.
@@ -1756,8 +1828,8 @@ class LiteGrip:
 
         A stall only says "something stopped me", never *which* end was hit —
         both ends are hard stops.  So the direction is not discovered here: it
-        comes from :attr:`GripperConfig.close_sign` (load a calibration
-        template first for a reverse mount), and this routine preserves it.
+        comes from :attr:`GripperConfig.close_sign`, and this routine
+        preserves it.
 
         Safety: at a hard stop the encoder keeps creeping (backlash, elastic
         deformation, micro-slip), so the position-based stall test alone can
@@ -1792,7 +1864,7 @@ class LiteGrip:
         self._can.update_state(timeout_s=0.1)
         init_pos = self._can.get_position()
         print(f"标定开始  初始位置: {init_pos:.4f} rad  "
-              f"（方向：{'正向' if s > 0 else '反装'}）")
+              f"（方向：闭合时 rad {'增大' if s > 0 else '减小'}）")
 
         def _find_limit(direction: str) -> float:
             sign = s if direction == "close" else -s
@@ -2141,7 +2213,7 @@ class LiteGrip:
                 by this class.
             link: ``"zenoh"`` (default) builds the point-to-point zenoh link
                 used by the field teleoperation — see
-                :mod:`litegrip.zenoh_link`, needs ``pip install litegrip[zenoh]``.
+                :mod:`litegrip.zenoh_link`, needs ``pip install litegrip-python[zenoh]``.
                 ``"udp"`` builds the plain-UDP transport, for a trusted LAN.
             host: The peer's address.  Required for a ``slave``; the master only
                 listens, so it needs no host.

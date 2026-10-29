@@ -22,14 +22,14 @@ Subpackages
   Use directly if you need fine-grained control or multi-motor setups.
 """
 
-# Version reported when no ``litegrip`` distribution is installed in reach at all —
+# Version reported when no ``litegrip-python`` distribution is installed in reach at all —
 # no wheel, no editable install, nothing in ``site-packages``/``dist-packages``.
 # The ``+`` local segment keeps it valid PEP 440 and makes it obvious in a bug
 # report that nobody is looking at an official build.
 _VERSION_SOURCE_TREE = "0.0.0+source"
 
 
-def _detect_version(dist_name: str = "litegrip") -> str:
+def _detect_version(dist_name: str = "litegrip-python") -> str:
     """Report the installed distribution's version, or a marker for a bare machine.
 
     The repository never commits a version back (AGENTS.md §3): semantic-release
@@ -41,7 +41,7 @@ def _detect_version(dist_name: str = "litegrip") -> str:
 
     Returns:
         The installed distribution version, or ``"0.0.0+source"`` when no
-        ``litegrip`` distribution is installed at all.  The marker is about what
+        ``litegrip-python`` distribution is installed at all.  The marker is about what
         is installed, not about where this file came from: a module loaded out of
         the source tree still reports an installed copy's version, and the two
         spells of "not the released build" are told apart by the module path, not
@@ -75,6 +75,7 @@ from .actions import (
     MoveProgress,
     MoveResult,
     GraspResult,
+    ReleaseResult,
     HoldResult,
     EnableResult,
     WriteZeroResult,
@@ -177,7 +178,7 @@ from . import can
 # The zenoh link needs the optional ``zenoh`` dependency, so it is resolved on
 # first access rather than at import time: ``import litegrip`` must work on a
 # bare robot controller that will never teleoperate.  Install the extra with
-# ``pip install litegrip[zenoh]``.
+# ``pip install litegrip-python[zenoh]``.
 _ZENOH_EXPORTS = frozenset(
     {"ZenohTeleopTransport", "Listener", "Connector", "LatestSlot"})
 
@@ -189,7 +190,7 @@ def __getattr__(name: str):
         except ImportError as e:
             raise ImportError(
                 f"litegrip.{name} needs the optional zenoh dependency — install "
-                "it with `pip install litegrip[zenoh]`") from e
+                "it with `pip install litegrip-python[zenoh]`") from e
         return getattr(zenoh_link, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
@@ -210,6 +211,7 @@ __all__ = [
     "MoveProgress",
     "MoveResult",
     "GraspResult",
+    "ReleaseResult",
     "HoldResult",
     "EnableResult",
     "WriteZeroResult",
@@ -274,7 +276,7 @@ __all__ = [
     "decode_ready_frame",
     "teleop_topic",
     "ready_topic",
-    # Teleoperation — zenoh link (resolved lazily; needs litegrip[zenoh])
+    # Teleoperation — zenoh link (resolved lazily; needs litegrip-python[zenoh])
     "ZenohTeleopTransport",
     "Listener",
     "Connector",

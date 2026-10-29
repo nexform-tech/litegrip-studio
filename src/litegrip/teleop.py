@@ -71,7 +71,7 @@ Safety notes
   calling :meth:`~litegrip.LiteGrip.teleop_start`.
 * :class:`UdpTeleopTransport` is plain, unauthenticated UDP.  Use it only on a
   trusted network.  For real deployments use the point-to-point zenoh link in
-  :mod:`litegrip.zenoh_link` (``pip install litegrip[zenoh]``), which is what the
+  :mod:`litegrip.zenoh_link` (``pip install litegrip-python[zenoh]``), which is what the
   field-validated litearm teleoperation runs on.
 """
 
@@ -543,7 +543,7 @@ def check_ready(cfg: Any) -> None:
         raise TeleopNotReady(
             "gripper is not calibrated: pos_closed_rad / pos_open_rad are still "
             "placeholder defaults and the direction is a guess. Run "
-            "load_calibration() / load_template(), or zero() first.")
+            "load_calibration(), or zero() first.")
     if abs(float(cfg.pos_closed_rad) - float(cfg.pos_open_rad)) <= 1e-6:
         raise TeleopNotReady(
             "zero travel: pos_closed_rad equals pos_open_rad — recalibrate.")
