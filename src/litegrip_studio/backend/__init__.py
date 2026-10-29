@@ -16,10 +16,17 @@ unusable here for a concrete reason:
 ``goto``/``move_to``/``goto_rad``/``home``
     The same blocking ramp, entered through a duration rather than a speed, and
     with no abort hook.  ``home`` is ``move_to(pos_closed_rad, duration=1.0)``.
-``open``/``close``/``grasp``
+``open``/``close``
     Run the SDK's motion engine (``GripperActions``): a blocking frame loop
-    with no abort hook, so an E-stop could not interrupt it — least of all a
-    ``grasp``'s hold phase, which can last as long as the caller asked.
+    with no abort hook, so an E-stop could not interrupt it.
+
+``grasp`` is the one high-level motion method the console now uses, and it is
+run on the dedicated action thread described in :meth:`GripperBackend._claim`
+— never inline in a tick.  It is safe to interrupt there because the SDK exposes
+``request_release()``, which the worker and the E-stop call from any thread; the
+grasp's own frame loop notices within one frame and stops.  The console's own
+force-carrying approach is still what the simulator runs, so the FSM path stays
+tested and the two implementations can be compared on the same bench.
 ``calibrate_guided``/``calibrate_manual``
     Read stdin / rely on Ctrl+C and print to stdout — unreachable from a worker
     thread.  Reimplemented in :mod:`litegrip_studio.core.calibration_fsm`.
@@ -125,8 +132,14 @@ class GripperBackend(ABC):
     reproducible failure.
     """
 
+    #: Whether a grip is carried out by the SDK's blocking ``grasp()`` rather
+    #: than by the console's own motion FSM.  The real backend sets it; the
+    #: simulator keeps the FSM, because there is no SDK behind it.
+    uses_sdk_grasp: bool = False
+
     def __init__(self) -> None:
         self._owner_tid: int | None = None
+        self._action_tids: set[int] = set()
         self._claim_lock = threading.Lock()
 
     def _claim(self) -> None:
@@ -134,12 +147,32 @@ class GripperBackend(ABC):
         with self._claim_lock:
             if self._owner_tid is None:
                 self._owner_tid = tid
-            elif tid != self._owner_tid:
+            elif tid != self._owner_tid and tid not in self._action_tids:
                 raise RuntimeError(
                     "backend used from two threads: "
                     f"owner={self._owner_tid} caller={tid}. The SDK is not "
                     "thread-safe; all access must go through one worker."
                 )
+
+    def action_thread_enter(self) -> None:
+        """Register the one thread allowed to run a blocking SDK action.
+
+        The SDK's public motion methods block inside their own frame loop, so a
+        grip cannot be driven by the worker's tick: the tick would stop while
+        the grip could last indefinitely.  The worker therefore runs exactly one
+        such call on a thread of its own and registers it here.  That is the
+        only exemption from :meth:`_claim`; the tick still owns ``poll`` and
+        ``read``, and the SDK serialises every CAN operation behind its own
+        ``_io_lock``.
+        """
+        tid = threading.get_ident()
+        with self._claim_lock:
+            self._action_tids.add(tid)
+
+    def action_thread_exit(self) -> None:
+        tid = threading.get_ident()
+        with self._claim_lock:
+            self._action_tids.discard(tid)
 
     @property
     def owner_tid(self) -> int | None:

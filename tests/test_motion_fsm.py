@@ -39,6 +39,14 @@ DT = constants.CTRL_DT
 #: defaults because these tests are about the motion law, and a limit that moved
 #: with the travel setting would move the numbers they assert on with it.
 BENCH = Limits(1.775959, -0.064279, 65.21, 120.0)
+#: The lowest setpoint the console's own FSM can serve on these plants.
+#: The window now offers 2 N, but a real grip at that setpoint runs through the
+#: SDK's force-budgeted ``grasp()`` (``RealBackend.uses_sdk_grasp``).  The FSM is
+#: the simulator's stand-in, and its contact detector still needs the ~6 N budget
+#: this suite was written against to tell a slow approach from a stall.  Tests
+#: about the FSM keep using this number; tests about the floor use
+#: ``constants.FORCE_MIN_N``.
+FSM_FLOOR_N = 6.0
 
 
 class Frame(NamedTuple):
@@ -1429,21 +1437,19 @@ class TestAForceApproachDoesNotPressPastItsSetpoint:
         assert fsm.profile.speed_mm_s == constants.SPEED_MAX_MM_S
         assert fsm._kd_servo == fsm.params.kd
 
-    def test_the_ticks_own_press_slows_no_setpoint_the_console_serves(self) -> None:
-        """The speed lever is the slider's for every setpoint on offer.
+    def test_the_ticks_own_press_caps_the_fsm_at_the_new_floor(self) -> None:
+        """At 2 N the FSM's approach slows down instead of out-pressing itself.
 
         ``kp·v·dt`` is not the console's to withhold, so a setpoint whose budget
         cannot cover the tick's own step at the speed asked for has to be
-        honoured by slowing down — and that is the only lever that ever moved
-        the speed, so it is worth knowing exactly where it bites.  It bites
-        *below* the setpoint floor: the cap is ``budget/(kp·dt)``, which at
-        :data:`constants.FORCE_MIN_N` and this bench's own millimetres per rad is
-        202 mm/s, above the top of the slider.  Every setpoint from the floor up
-        therefore travels at whatever the operator asked for, and the whole of
-        the press is carried by the damping and the lead.
+        honoured by slowing down.  That cap is ``budget/(kp·dt)`` and at
+        :data:`constants.FORCE_MIN_N` it is about 67 mm/s, below the slider.
 
-        Measured before the floor existed, at 1 N: the cap was 33.6 mm/s and the
-        approach ran at that speed instead.
+        This is the simulator's path.  A real grip no longer runs through this
+        FSM at all — it runs through the SDK's force-budgeted ``grasp()`` (see
+        ``RealBackend.uses_sdk_grasp``) — so the console's 2 N floor does not
+        put a 2 N force approach on this code path.  The FSM still has to be
+        honest when the simulator asks for one.
         """
         rig = Rig(config=PlantConfig(contact_k=500.0))
         rig.fsm.set_speed(constants.SPEED_MAX_MM_S)
@@ -1451,9 +1457,9 @@ class TestAForceApproachDoesNotPressPastItsSetpoint:
         rig.fsm.grasp(constants.FORCE_MIN_N)
 
         cap = self.tick_cap_mm_s(rig.fsm, constants.FORCE_MIN_N)
-        assert cap > constants.SPEED_MAX_MM_S, "the floor no longer clears the slider"
+        assert cap < constants.SPEED_MAX_MM_S
         assert rig.fsm.profile is not None
-        assert rig.fsm.profile.speed_mm_s == constants.SPEED_MAX_MM_S
+        assert rig.fsm.profile.speed_mm_s == pytest.approx(cap)
 
         # And the setpoint below the floor is served as the floor, so it is the
         # floor's cap that governs it — the same one, not a smaller one.
@@ -1463,7 +1469,7 @@ class TestAForceApproachDoesNotPressPastItsSetpoint:
         rig.fsm.grasp(1.0)
 
         assert rig.fsm.profile is not None
-        assert rig.fsm.profile.speed_mm_s == constants.SPEED_MAX_MM_S
+        assert rig.fsm.profile.speed_mm_s == pytest.approx(cap)
         assert rig.fsm._tick_press_cap_mm_s() == pytest.approx(cap)
 
     def test_a_fast_grasp_does_not_press_past_its_setpoint(self) -> None:
@@ -1510,15 +1516,17 @@ class TestAForceApproachDoesNotPressPastItsSetpoint:
             f"the grasp ended in {rig.fsm.state.value}, not on contact: {rig.fsm.note}"
         )
 
-    def test_the_smallest_setpoint_still_reaches_the_object(self) -> None:
-        """The floor is a floor because below it the grasp does not travel.
+    def test_the_fsm_floor_still_reaches_the_object(self) -> None:
+        """The FSM's own floor is 6 N, and it has to be able to *get there*.
 
-        The smallest setpoint the console serves is the one an operator picks
-        for something delicate, and it has to be able to *get there*: the
-        approach crosses the free travel from the open stop and stops at the
-        object, pressing no more than its own budget on the way in.
+        The window's floor is 2 N now, but a real grip at that setpoint runs
+        through the SDK's force-budgeted ``grasp()``; the FSM only serves the
+        simulator, where the contact detector needs the ~6 N budget this suite
+        was written against.  At its floor the approach crosses the free travel
+        from the open stop and stops at the object, pressing no more than its
+        own budget on the way in.
 
-        Measured before the floor existed: a 1 N setpoint ran at 33.6 mm/s,
+        Measured before the FSM floor existed: a 1 N setpoint ran at 33.6 mm/s,
         handed over 44.9 mm short of the object on an approach that had barely
         left the stop, and the force phase then drove the rest of the way — a
         grip declared at 84.9 mm against an object at 40.
@@ -1527,7 +1535,7 @@ class TestAForceApproachDoesNotPressPastItsSetpoint:
         rig.fsm.set_speed(constants.SPEED_MAX_MM_S)
         assert rig.open()
         rig.sim.inject(obj_mm=40.0)
-        rig.fsm.grasp(constants.FORCE_MIN_N)
+        rig.fsm.grasp(FSM_FLOOR_N)
         rig.peak_force = 0.0
 
         assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=30.0), rig.fsm.note
@@ -1535,29 +1543,25 @@ class TestAForceApproachDoesNotPressPastItsSetpoint:
         assert rig.fsm.grip_mm == pytest.approx(40.0, abs=2.0), (
             f"the grip froze at {rig.fsm.grip_mm:.2f} mm, not at the object"
         )
-        budget_n = constants.FORCE_MIN_N * constants.PRESS_CAP_SAFETY
+        budget_n = FSM_FLOOR_N * constants.PRESS_CAP_SAFETY
         assert rig.peak_force <= budget_n + 0.3, (
-            f"a {constants.FORCE_MIN_N:.0f} N setpoint pressed {rig.peak_force:.2f} N"
+            f"a {FSM_FLOOR_N:.0f} N setpoint pressed {rig.peak_force:.2f} N"
         )
 
     def test_a_setpoint_under_the_floor_is_served_as_the_floor(self) -> None:
-        """What the floor does with the setpoint that used to break the grasp.
+        """The clamp still raises a sub-floor request instead of pressing it.
 
-        A setpoint below the floor is raised to it rather than pressed with —
-        the console serves the floor and says so, because the number on the
-        screen and the number pressed have to be the same one.  Nothing in the
-        window can ask for less than the floor; a file that still holds an older
-        value can, and this is what happens to it: a grasp that travels and
-        grips like the floor, instead of the false grip the sub-floor budget
-        used to produce.
+        The floor itself moved to 2 N, so the number served is smaller — but the
+        rule is unchanged: the number on the screen and the number pressed have
+        to be the same one.  A file or a caller holding an older value is raised
+        to :data:`constants.FORCE_MIN_N`, and the FSM's speed cap follows that
+        served setpoint (at 2 N the tick's own step spends the whole budget at
+        about 67 mm/s, below the slider).
 
-        Measured before the floor existed, at the maximum slider speed: a 0.1 N
-        grasp handed over on the *stillness* channel with the jaws still against
-        the open stop at 85.01 mm — nothing there, and the grip was declared
-        anyway — while a 1 N one handed over on the lost-motion gap at 84.90 mm,
-        44.9 mm short of the object.  Both are a ``放开`` measured from a pose
-        the object is nowhere near, which is the operator's "one tap opens it
-        wide".
+        This path is now the simulator's; the real grip is the SDK's.  That is
+        why the assertions here are about the clamp and the cap, not about a
+        grip at the object 40 mm in — 2 N is below the FSM's own detector floor,
+        and the SDK's approach is the one that has to make that grip.
         """
         rig = Rig(config=PlantConfig(contact_k=500.0))
         rig.fsm.set_speed(constants.SPEED_MAX_MM_S)
@@ -1568,13 +1572,12 @@ class TestAForceApproachDoesNotPressPastItsSetpoint:
 
         assert rig.fsm._force_n == constants.FORCE_MIN_N
         assert rig.fsm.profile is not None
-        assert rig.fsm.profile.speed_mm_s == constants.SPEED_MAX_MM_S
-
-        assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=5.0), rig.fsm.note
-        assert rig.fsm.grip_channel != "接触：静止", "the jaws were read as held still"
-        assert rig.fsm.grip_mm == pytest.approx(40.0, abs=2.0), (
-            f"the grip froze at {rig.fsm.grip_mm:.2f} mm, not at the object"
+        assert rig.fsm.profile.speed_mm_s == pytest.approx(
+            rig.fsm._tick_press_cap_mm_s()
         )
+        assert rig.fsm.profile.speed_mm_s < constants.SPEED_MAX_MM_S
+
+        assert rig.run_until(MotionState.HOLD_FORCE, timeout_s=30.0), rig.fsm.note
         assert rig.fsm.force_setpoint() == pytest.approx(constants.FORCE_MIN_N), (
             "the console must hold the force it says it will"
         )
@@ -1680,34 +1683,33 @@ class TestTheTwoRisesAGraspPutsOnThePlot:
 
     OBJECT_MM = 40.0
 
-    def test_the_smallest_setpoint_s_grasp_is_a_single_rise(self) -> None:
+    def test_the_fsm_floor_s_grasp_is_a_single_rise(self) -> None:
         """The delicate case: no spike, then a climb to the setpoint.
 
-        A :data:`constants.FORCE_MIN_N` approach hands over at 4.9 N on this
-        plant — near its own budget rather than far past it — so the curve the
-        plot draws — transit, contact, and the short climb after it — rises once
-        and holds.  Measured before the press was bounded at 25 mm/s, a 5 N
-        grasp peaked at 12.8 N and fell to 5.
+        A :data:`FSM_FLOOR_N` approach hands over near its own budget rather
+        than far past it, so the curve the plot draws — transit, contact, and
+        the short climb after it — rises once and holds.  Measured before the
+        press was bounded at 25 mm/s, a 5 N grasp peaked at 12.8 N and fell to 5.
         """
         rig = Rig(config=PlantConfig(contact_k=500.0))
         rig.fsm.set_speed(constants.SPEED_MAX_MM_S)
         assert rig.open()
         rig.sim.inject(obj_mm=self.OBJECT_MM)
-        rig.fsm.grasp(constants.FORCE_MIN_N)
+        rig.fsm.grasp(FSM_FLOOR_N)
 
         forces: list[float] = []
         for _ in range(int(30.0 / DT)):
             rig.tick()
             forces.append(rig.force_n)
             if rig.fsm.state is MotionState.HOLD_FORCE and rig.force_n >= (
-                constants.FORCE_MIN_N - 0.05
+                FSM_FLOOR_N - 0.05
             ):
                 break
 
         # ``forces[:40]`` is the free-travel acceleration transient every move
         # has, force-carrying or not; the claim is about the grasp's own shape.
         body = forces[40:]
-        ceiling = constants.FORCE_MIN_N
+        ceiling = FSM_FLOOR_N
         assert max(body) <= ceiling, (
             f"a {ceiling:.0f} N grasp rose to {max(body):.2f} N"
         )
@@ -1818,8 +1820,8 @@ class TestAGraspAtTheSlidersSlowEnd:
     #: Twenty times the plant's own free-travel friction; see ``test_plant``.
     FRICTION_NM = 0.2
     SPEED_MM_S = 10.0
-    #: The smallest setpoint the console serves; see the class docstring.
-    SETPOINT_N = constants.FORCE_MIN_N
+    #: The FSM's own floor; see :data:`FSM_FLOOR_N`.
+    SETPOINT_N = FSM_FLOOR_N
     OBJECT_MM = 40.0
 
     def _grasp(self, coulomb: float | None = None) -> Rig:

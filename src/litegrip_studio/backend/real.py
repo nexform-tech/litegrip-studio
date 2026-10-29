@@ -83,6 +83,10 @@ def _same_file(a: str | Path, b: str | Path) -> bool:
 class RealBackend(GripperBackend):
     """The gripper on the other end of the CAN bus."""
 
+    #: The grip is the SDK's own, run on the worker's action thread.  See
+    #: :meth:`GripperBackend.action_thread_enter`.
+    uses_sdk_grasp = True
+
     def __init__(
         self,
         *,
@@ -391,6 +395,53 @@ class RealBackend(GripperBackend):
             self._gripper.stop()
         except LiteGripError as exc:
             raise BackendError(f"零力矩指令失败: {exc}") from exc
+
+    # ── the SDK grip ────────────────────────────────────────────────────────
+    def grasp(self, force_n: float, *, hold_s: float = 0.0) -> Any:
+        """Run the SDK's blocking grip.  Called on the action thread only.
+
+        ``hold_s=0`` means hold until released.  The SDK's ``grasp`` checks its
+        own release request every frame, so :meth:`request_release` from the
+        worker or the E-stop path ends this call promptly; that, and not a tick
+        timeout, is what keeps the console interruptible while the call blocks.
+        """
+        self._claim()
+        self._require_connected()
+        return self._gripper.grasp(force_n=force_n, hold_s=hold_s)
+
+    def request_release(
+        self,
+        clearance_mm: float = constants.RELEASE_OPEN_MM,
+        *,
+        abort: bool = False,
+    ) -> bool:
+        """Ask a running grip to end.  Callable from any thread; sends nothing.
+
+        Deliberately outside :meth:`_claim`: this only sets an event inside the
+        SDK, and the thread that owns the grip is the one that performs the
+        release move.  Calling it from the GUI thread is what lets 放开 and the
+        E-stop reach a grasp that is blocked in its hold phase.
+        """
+        return bool(
+            self._gripper.request_release(clearance_mm=clearance_mm, abort=abort)
+        )
+
+    def release(
+        self,
+        clearance_mm: float = constants.RELEASE_OPEN_MM,
+        *,
+        abort: bool = False,
+    ) -> Any:
+        """Open ``clearance_mm`` from the grip pose, or abort without opening.
+
+        Run on the action thread, and used for the 放开 that is *not* ending a
+        live grip.  When a grip is live the worker goes through
+        :meth:`request_release` instead, so the move is made by the thread that
+        already owns the hold.
+        """
+        self._claim()
+        self._require_connected()
+        return self._gripper.release(clearance_mm=clearance_mm, abort=abort)
 
     # ── calibration ─────────────────────────────────────────────────────────
     def load_calibration(self, path: str | None = None) -> bool:

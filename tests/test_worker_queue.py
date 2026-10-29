@@ -17,6 +17,7 @@ import logging
 import math
 import threading
 import time
+from types import SimpleNamespace
 from typing import Callable
 
 import pytest
@@ -3327,3 +3328,190 @@ class TestTheAlertGoesWhenTheReasonDoes:
 
         assert not bench.signals.alerts()
         assert not bench.signals.has("alert_cleared")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# The SDK grip
+# ═══════════════════════════════════════════════════════════════════════════
+class SdkGripBackend(RecordingBackend):
+    """A recorder that blocks inside ``grasp`` the way the SDK does.
+
+    ``request_release`` is the only thing that ends the hold, exactly as on the
+    real SDK: a grip with ``hold_s=0`` may last for ever, so the worker cannot
+    wait for it inside a tick.  What these tests are about is the ownership of
+    the axis while that call is in flight, not the physics.
+    """
+
+    uses_sdk_grasp = True
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.grasp_entered = threading.Event()
+        self.grasp_release = threading.Event()
+        self.release_requests: list[tuple[float, bool]] = []
+        self.release_calls: list[tuple[float, bool]] = []
+        #: What a grip reports after it is released.  ``False`` is a hold that
+        #: ended some other way (fault, travel guard).
+        self.released = True
+
+    def grasp(self, force_n, *, hold_s: float = 0.0):
+        self._claim()
+        self._record("grasp", force_n, hold_s)
+        self.grasp_entered.set()
+        assert self.grasp_release.wait(2.0), "the test never released the grip"
+        return SimpleNamespace(
+            ok=True,
+            released=self.released,
+            state=SimpleNamespace(position_mm=self._limits.to_mm(self.q_rad)),
+        )
+
+    def request_release(
+        self,
+        clearance_mm: float = constants.RELEASE_OPEN_MM,
+        *,
+        abort: bool = False,
+    ) -> bool:
+        self._record("request_release", clearance_mm, abort)
+        self.release_requests.append((clearance_mm, abort))
+        self.grasp_release.set()
+        return True
+
+    def release(
+        self,
+        clearance_mm: float = constants.RELEASE_OPEN_MM,
+        *,
+        abort: bool = False,
+    ):
+        self._claim()
+        self.release_calls.append((clearance_mm, abort))
+        return SimpleNamespace(ok=not abort, aborted=abort, opened_mm=clearance_mm)
+
+
+class TestTheSdkGrip:
+    """A grip that blocks must not take the tick, the E-stop, or a button with it."""
+
+    def _bench(self) -> Bench:
+        bench = Bench(SdkGripBackend())
+        bench.bring_up()
+        bench.tick(4)
+        assert bench.loop.gate is GateState.READY
+        assert bench.loop.enabled
+        return bench
+
+    @staticmethod
+    def _wait_for_action(bench: Bench, timeout_s: float = 2.0) -> None:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline and bench.loop._action_thread is not None:
+            bench.tick()
+            time.sleep(0.001)
+        assert bench.loop._action_thread is None, "the action thread did not end"
+
+    def test_a_grip_keeps_the_tick_polling_and_publishing(self) -> None:
+        bench = self._bench()
+        backend = bench.backend
+        sent_before = backend.names().count("stream_frame")
+
+        bench.loop.submit(cmd.Grasp(force_n=12.0))
+        bench.tick()
+        assert backend.grasp_entered.wait(1.0), "the grip never started"
+        polls_before = backend.names().count("poll")
+
+        frame = bench.frame(4)
+
+        assert backend.names().count("poll") > polls_before, (
+            "the tick stopped polling while the SDK held the grip"
+        )
+        assert frame.grasped is True
+        assert frame.motion_state == "GRASP"
+        assert bench.loop.motion.state is MotionState.IDLE
+        assert backend.names().count("stream_frame") == sent_before, (
+            "the FSM streamed a second frame beside the SDK's grip"
+        )
+
+    def test_back_off_asks_the_live_grip_to_release(self) -> None:
+        bench = self._bench()
+        backend = bench.backend
+        bench.loop.submit(cmd.Grasp(force_n=12.0))
+        bench.tick()
+        assert backend.grasp_entered.wait(1.0)
+
+        bench.loop.submit(cmd.BackOff())
+        bench.tick()
+
+        assert backend.release_requests == [(constants.RELEASE_OPEN_MM, False)]
+        assert backend.release_calls == [], (
+            "the worker ran a second open move beside the grip's own release"
+        )
+
+        self._wait_for_action(bench)
+        frame = bench.frame()
+        assert frame.grasped is False
+        assert bench.loop.motion.state is MotionState.HOLD
+
+    def test_back_off_without_a_grip_runs_the_sdk_release(self) -> None:
+        bench = self._bench()
+
+        bench.send(cmd.BackOff())
+
+        assert bench.backend.release_calls == [(constants.RELEASE_OPEN_MM, False)]
+        self._wait_for_action(bench)
+        assert bench.loop.motion.state is MotionState.HOLD
+        assert "已放开" in bench.signals.logs()[-1]
+
+    def test_estop_reaches_a_blocked_grip_and_then_disables(self) -> None:
+        bench = self._bench()
+        backend = bench.backend
+        bench.loop.submit(cmd.Grasp(force_n=12.0))
+        bench.tick()
+        assert backend.grasp_entered.wait(1.0)
+
+        bench.loop.estop("测试急停")
+
+        # The UI thread's first call reaches the SDK: this is the whole reason
+        # the grip runs on its own thread rather than inside the tick.
+        assert backend.release_requests == [(constants.RELEASE_OPEN_MM, True)]
+
+        for _ in range(100):
+            bench.tick()
+            if not bench.loop.enabled:
+                break
+            time.sleep(0.001)
+
+        assert bench.loop.enabled is False
+        assert "disable" in backend.names()
+        assert backend.names().index("disable") > backend.names().index("grasp")
+        assert bench.loop.estopped
+
+    def test_disable_ends_the_grip_before_touching_the_motor(self) -> None:
+        bench = self._bench()
+        backend = bench.backend
+        bench.loop.submit(cmd.Grasp(force_n=12.0))
+        bench.tick()
+        assert backend.grasp_entered.wait(1.0)
+
+        bench.loop.submit(cmd.Disable())
+        bench.tick()
+
+        assert backend.release_requests == [(constants.RELEASE_OPEN_MM, True)]
+        assert "disable" in backend.names()
+        assert backend.names().index("request_release") < backend.names().index(
+            "disable"
+        )
+        assert bench.loop.enabled is False
+
+    def test_a_grasp_with_no_force_uses_the_console_setpoint(self) -> None:
+        bench = self._bench()
+        bench.send(cmd.SetForce(12.0))
+
+        bench.loop.submit(cmd.Grasp())
+        bench.tick()
+        assert bench.backend.grasp_entered.wait(1.0)
+
+        assert bench.backend.names().count("grasp") == 1
+        assert bench.backend.calls[
+            bench.backend.names().index("grasp")
+        ][1][0] == pytest.approx(12.0)
+
+        bench.loop.submit(cmd.BackOff())
+        bench.tick()
+        self._wait_for_action(bench)
