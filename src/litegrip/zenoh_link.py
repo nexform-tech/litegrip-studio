@@ -30,7 +30,7 @@ link — a litearm peer simply never declares it.  It is only wired when a
 ``ready_key`` is passed, so an endpoint built without one is one-way, exactly as
 before.
 
-zenoh is an optional dependency: install it with ``pip install litegrip[zenoh]``.
+zenoh is an optional dependency: install it with ``pip install litegrip-python[zenoh]``.
 This module is imported lazily so the base SDK still works without it.
 """
 

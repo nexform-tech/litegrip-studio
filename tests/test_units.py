@@ -294,17 +294,23 @@ class TestForceScaling:
 
 class TestTheSetpointFloor:
     """The other end of the same clamp, and the one an operator meets on the
-    bench: a setpoint whose whole budget is smaller than what the mechanism
-    spends getting its jaws moving is a grip that cannot travel.
+    bench: a setpoint the console does not offer must still be served as the
+    same number it shows.
 
     ``clamp_force`` leaves zero alone — it is the mode a plain move carries, not
     a small press — so the floor is its own function rather than a new lower
-    bound inside it.
+    bound inside it.  The floor is 2 N: a real grip now runs through the SDK's
+    force-budgeted ``grasp()``, so it no longer has to clear the FSM's breakaway
+    cost (see ``constants.FORCE_MIN_N``).
     """
 
     def test_a_setpoint_below_the_floor_comes_back_as_the_floor(self) -> None:
-        assert clamp_force_setpoint(1.0) == constants.FORCE_MIN_N
-        assert clamp_force_setpoint(5.99) == constants.FORCE_MIN_N
+        assert clamp_force_setpoint(0.5) == constants.FORCE_MIN_N
+        assert clamp_force_setpoint(1.99) == constants.FORCE_MIN_N
+
+    def test_a_setpoint_between_the_old_and_new_floor_is_served_as_asked(self) -> None:
+        """5.99 N used to be raised to 6 N; it is a real setpoint now."""
+        assert clamp_force_setpoint(5.99) == pytest.approx(5.99)
 
     def test_the_floor_itself_is_left_alone(self) -> None:
         assert clamp_force_setpoint(constants.FORCE_MIN_N) == constants.FORCE_MIN_N

@@ -76,12 +76,15 @@ def _sdk_link_error(fault_code: int | None = None) -> LiteGripError:
 # ``control_mit_stream`` (no abort hook), ``move_at_speed`` appends a ~100 ms
 # hold per call, ``home`` uses a hardcoded closed angle, and the calibration
 # methods read stdin or wait for Ctrl+C.
+#
+# ``grasp`` and ``release`` are no longer on this list.  They run on the worker's
+# dedicated action thread, and the SDK now exposes ``request_release`` as the
+# abort hook the other methods lack — see ``RealBackend.uses_sdk_grasp`` and
+# ``WorkerLoop._start_action``.  The tick keeps polling while they block.
 FORBIDDEN = frozenset(
     {
         "open",
         "close",
-        "grasp",
-        "release",
         "move_to",
         "move_at_speed",
         "goto",
@@ -368,6 +371,9 @@ class TestSdkSurface:
             "load_calibration",
             "save_calibration",
             "write_zero",
+            "grasp",
+            "release",
+            "request_release",
         } <= attributes
 
     def test_only_public_sdk_names_are_imported(self, tree: ast.Module) -> None:

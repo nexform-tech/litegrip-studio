@@ -352,6 +352,18 @@ class WorkerLoop:
         #: That distance is what separates a grasp from a mechanism that had not
         #: broken away from rest yet — see :meth:`_log_hand_over`.
         self._force_from_mm: float | None = None
+        #: The one blocking SDK action in flight — a grip, or the 放开 that
+        #: follows one — and the thread running it.  A grip may last for ever,
+        #: so it cannot run inside a tick: the tick would stop polling and the
+        #: display would freeze at the moment the operator most wants to watch
+        #: it.  The action thread is registered with the backend (see
+        #: ``action_thread_enter``); the tick keeps ``poll``/``read`` and the
+        #: E-stop reaches the grip through ``request_release(abort=True)``.
+        self._action_thread: threading.Thread | None = None
+        self._action_kind: str | None = None
+        self._action_done = threading.Event()
+        self._action_result: Any = None
+        self._action_error: BaseException | None = None
         #: The 标零 warning in force, or ``""``.  Held here rather than on the
         #: page because the page cannot know whether the write went through, and
         #: because it has to outlive a repaint: see :meth:`_write_zero`.
@@ -417,6 +429,21 @@ class WorkerLoop:
             return
         self._torn_down = True
 
+        # A grip may still be inside the SDK's hold loop.  Abort it and let it
+        # leave before the motor is touched: the sequence below is what turns
+        # the motor off, and a second frame stream beside it is exactly what
+        # teardown exists to end.
+        if self._action_thread is not None:
+            self._quietly(
+                "撤销 SDK 动作",
+                lambda: self.backend.request_release(abort=True),
+            )
+            self._action_done.wait(constants.ACTION_ABORT_WAIT_S)
+            self._action_thread = None
+            self._action_kind = None
+            self._action_result = None
+            self._action_error = None
+
         if self._enabled and self._connected:
             self._quietly("零力矩", self.backend.zero_torque)
         if self._connected:
@@ -457,6 +484,7 @@ class WorkerLoop:
         """
         started = self._clock()
         self._service_commands()
+        self._service_action()
         self._service_watchdog()
 
         if self._connected:
@@ -489,10 +517,24 @@ class WorkerLoop:
         self._evaluate_gate()
 
         if self._estop.is_set():
-            self._engage_estop()
+            if self._action_thread is None:
+                self._engage_estop()
+            else:
+                # The grip is in the SDK's frame loop.  Asking it to abort is
+                # what stops the torque; the latch and the disable happen on the
+                # tick after that thread has returned, so two threads never
+                # drive the motor at once.
+                self._request_action_abort()
             out = FrameOut(None, 0.0, None, 0.0, 0.0, 0.0, False, "急停")
         elif self._probe is not None:
             out = self._tick_probe(tele, dt)
+        elif self._action_thread is not None:
+            # The SDK owns the axis.  The tick still polls and publishes, but it
+            # must not stream a second MIT frame beside the SDK's loop.
+            out = FrameOut(
+                None, 0.0, None, 0.0, 0.0, 0.0, False,
+                f"SDK {self._action_kind} 进行中",
+            )
         elif self._enabled:
             refusal = self._refusal()
             out = self._motion.tick(
@@ -544,7 +586,10 @@ class WorkerLoop:
             error_code=tele.error_code,
             enabled=self._enabled,
             moving=abs(tele.velocity_rad_s) > 0.01,
-            grasped=self._motion.state is MotionState.HOLD_FORCE,
+            grasped=(
+                self._motion.state is MotionState.HOLD_FORCE
+                or self._sdk_grasp_active()
+            ),
             rx_frames=self._rx_frames,
             rx_hz=self._rx_hz(),
             stale_ms=self._stale_ms(),
@@ -599,7 +644,13 @@ class WorkerLoop:
             return self._probe.phase.value
         if self._estop.is_set():
             return "ESTOP"
+        if self._action_thread is not None:
+            return "GRASP" if self._action_kind == "grasp" else "RELEASE"
         return self._motion.state.value
+
+    def _sdk_grasp_active(self) -> bool:
+        """True while an SDK grip owns the axis.  (A 放开 is not a grip.)"""
+        return self._action_thread is not None and self._action_kind == "grasp"
 
     # ── link health ─────────────────────────────────────────────────────────
     def _track_link(self, fresh: bool) -> None:
@@ -906,6 +957,16 @@ class WorkerLoop:
         """Trip the latch.  Callable from any thread; takes effect within a tick."""
         self._estop_reason = reason
         self._estop.set()
+        # A grip is inside the SDK's frame loop, which the tick cannot reach
+        # until it returns — and with ``hold_s=0`` it may never return on its
+        # own.  Asking it to abort from here is what makes the E-stop take
+        # effect in milliseconds rather than at the end of the grip.  The call
+        # only sets an event; it sends nothing.
+        if self._action_thread is not None:
+            try:
+                self.backend.request_release(abort=True)
+            except Exception:  # noqa: BLE001 - the tick will report it
+                pass
 
     @property
     def estopped(self) -> bool:
@@ -923,6 +984,19 @@ class WorkerLoop:
 
     def _apply(self, command: AnyCommand) -> None:  # noqa: C901 - a dispatch table
         self._log("debug", f"命令: {command.describe()}")
+
+        # An SDK action owns the axis while it runs.  Any command that would
+        # touch it has to end that action first: the FSM sending frames beside
+        # the SDK's loop is the interleaving the backend's one-thread claim
+        # exists to prevent.  BackOff and Grasp are the exceptions because their
+        # handlers decide how to end or replace it; SetSpeed/SetForce only change
+        # the console's own parameters.
+        if self._action_thread is not None and not isinstance(
+            command,
+            (cmd.BackOff, cmd.Grasp, cmd.Heartbeat, cmd.SetSpeed, cmd.SetForce),
+        ):
+            if not self._end_action(command.describe()):
+                return
 
         # ── link and power ──────────────────────────────────────────────────
         if isinstance(command, cmd.Connect):
@@ -956,7 +1030,19 @@ class WorkerLoop:
                 self._motion.close(command.source, force_n=command.force_n)
             else:
                 self._force_from_mm = self._measured_mm()
-                self._motion.grasp(command.force_n, command.source)
+                if self.backend.uses_sdk_grasp:
+                    # The SDK's grip is the force-carrying close and the hold;
+                    # the FSM must not run beside it.  A grip with no explicit
+                    # force uses the setpoint the console already holds.
+                    if command.force_n is not None:
+                        self._motion.set_force(command.force_n)
+                    force = self._motion.params.force_n
+                    self._start_action(
+                        "grasp",
+                        lambda force=force: self.backend.grasp(force),
+                    )
+                else:
+                    self._motion.grasp(command.force_n, command.source)
         elif isinstance(command, cmd.BackOff):
             # Gated exactly like the moves above, and for the same reason: it is
             # a millimetre command derived from the travel.  The way to let go of
@@ -964,6 +1050,33 @@ class WorkerLoop:
             # 停止, both of which are ungated — not this.
             self._end_probe_on_interrupt(command.describe())
             if not self._require_motion(command.describe()):
+                return
+            if self.backend.uses_sdk_grasp:
+                if self._action_thread is not None:
+                    if self._action_kind == "grasp":
+                        # A live grip owns the wire.  Asking it to release is
+                        # what makes the open move happen, from the pose the
+                        # grip was declared at — the same rule the FSM path
+                        # below applies by hand.
+                        try:
+                            self.backend.request_release(
+                                clearance_mm=command.delta_mm
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            self._alert("error", f"放开失败: {exc}")
+                            return
+                        self._log(
+                            "info",
+                            f"放开：已请求 SDK 从夹取点张开 "
+                            f"{command.delta_mm:.1f} mm",
+                        )
+                    else:
+                        self._log("info", "放开已在进行中")
+                    return
+                self._start_action(
+                    "release",
+                    lambda: self.backend.release(clearance_mm=command.delta_mm),
+                )
                 return
             measured = self._measured_mm()
             # ``_refusal`` will not let a command through without a measurement,
@@ -1071,6 +1184,139 @@ class WorkerLoop:
             self._stop.set()
         else:  # pragma: no cover - the union covers every command
             self._log("warn", f"未知命令已忽略: {command!r}")
+
+    # ── SDK actions ─────────────────────────────────────────────────────────
+    def _start_action(self, kind: str, call: Callable[[], Any]) -> None:
+        """Run one blocking SDK motion on a thread of its own.
+
+        Called on the worker thread.  ``call`` is the SDK method; it runs on a
+        dedicated thread that registers itself with the backend, so the tick
+        keeps polling and the E-stop keeps a way in (see
+        :meth:`~litegrip_studio.backend.GripperBackend.action_thread_enter`).
+        The FSM is idled first: two frame streams on one motor is the
+        interleaving the backend's thread claim exists to prevent.
+        """
+        if self._action_thread is not None and not self._end_action("开始新的动作"):
+            return
+        self._motion.idle()
+        self._action_kind = kind
+        self._action_done = threading.Event()
+        self._action_result = None
+        self._action_error = None
+
+        def run() -> None:
+            self.backend.action_thread_enter()
+            try:
+                self._action_result = call()
+            except BaseException as exc:  # noqa: BLE001 - reported on the tick
+                self._action_error = exc
+            finally:
+                self.backend.action_thread_exit()
+                self._action_done.set()
+
+        self._action_thread = threading.Thread(
+            target=run, name=f"litegrip-{kind}", daemon=True
+        )
+        self._action_thread.start()
+        self._signals.motion_state.emit(
+            "GRASP" if kind == "grasp" else "RELEASE"
+        )
+
+    def _service_action(self) -> None:
+        """Join a finished action and hand the axis back to the FSM."""
+        thread = self._action_thread
+        if thread is None or thread.is_alive():
+            return
+        thread.join(timeout=0.0)
+        kind = self._action_kind
+        result = self._action_result
+        error = self._action_error
+        self._action_thread = None
+        self._action_kind = None
+        self._action_result = None
+        self._action_error = None
+        self._force_from_mm = None
+
+        if error is not None:
+            self._alert(
+                "error",
+                f"SDK {'夹取' if kind == 'grasp' else '放开'}失败: {error}",
+            )
+        elif kind == "grasp":
+            self._report_grasp(result)
+        else:
+            self._report_release(result)
+
+        # The SDK's loop has stopped, so its last frame is already ageing.  A DM
+        # drive faults about 100 ms after the frames stop; take the pose back
+        # with the console's own stream, in whichever units the gate allows.
+        if self._enabled and self._connected and not self._estop.is_set():
+            self._hold_measured("SDK 动作结束后保持")
+        else:
+            self._motion.idle()
+
+    def _end_action(
+        self,
+        what: str,
+        timeout_s: float = constants.ACTION_ABORT_WAIT_S,
+    ) -> bool:
+        """Abort the running action and wait briefly for the SDK loop to return.
+
+        False means the thread did not stop in time.  The caller must then leave
+        the axis to it rather than sending frames of its own; the alert tells the
+        operator the button did not take effect.
+        """
+        thread = self._action_thread
+        if thread is None:
+            return True
+        self._request_action_abort()
+        if not self._action_done.wait(timeout_s):
+            self._alert("error", f"「{what}」未能中止 SDK 动作；请按急停")
+            return False
+        thread.join(timeout=0.0)
+        self._action_thread = None
+        self._action_kind = None
+        self._action_result = None
+        self._action_error = None
+        return True
+
+    def _request_action_abort(self) -> None:
+        """Ask a running SDK action to stop.  Sends nothing itself."""
+        if self._action_thread is None:
+            return
+        try:
+            self.backend.request_release(abort=True)
+        except Exception as exc:  # noqa: BLE001 - reported, never fatal
+            self._log("error", f"撤销 SDK 动作失败: {exc!r}")
+
+    def _report_grasp(self, result: Any) -> None:
+        if result is None:
+            self._alert("warn", "SDK 夹取没有返回结果")
+            return
+        state = getattr(result, "state", None)
+        position_mm = getattr(state, "position_mm", None)
+        where = (
+            f"，停在 {position_mm:+.1f} mm"
+            if isinstance(position_mm, float) and math.isfinite(position_mm)
+            else ""
+        )
+        if bool(getattr(result, "released", False)):
+            self._log("info", f"夹取已松开{where}")
+        elif bool(getattr(result, "ok", False)):
+            self._log("info", f"夹取保持结束{where}")
+        else:
+            self._alert("warn", f"夹取未完成{where}")
+
+    def _report_release(self, result: Any) -> None:
+        if result is None:
+            return
+        if bool(getattr(result, "aborted", False)):
+            self._log("info", "放开已中止，未张开")
+        elif bool(getattr(result, "ok", False)):
+            opened = float(getattr(result, "opened_mm", 0.0))
+            self._log("info", f"已放开 {opened:.1f} mm")
+        else:
+            self._alert("warn", "放开未完成")
 
     # ── link and power ──────────────────────────────────────────────────────
     def _connect(self) -> None:
@@ -1895,6 +2141,11 @@ class WorkerLoop:
             f"上位机心跳已中断 {self._watchdog_s:.0f} s，视为上位机已退出："
             "已零力矩并失能",
         )
+        # The SDK's loop has to be out of the way before the safe stop touches
+        # the same motor.  A wedged loop is still disabled below: the safe
+        # direction is worth the overlap on a path that only runs when nobody
+        # is talking to the console.
+        self._end_action("上位机心跳中断")
         self._safe_stop()
         self._stop.set()
 

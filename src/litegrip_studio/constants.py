@@ -95,19 +95,18 @@ NM_TO_N = 10.0
 N_TO_NM = 1.0 / NM_TO_N
 
 FORCE_MAX_N = 40.0  # mechanical rating — hard UI cap
-# The smallest setpoint the console will serve.  A force-carrying approach
-# presses, at most, its own setpoint's torque (``motion._press_budget_nm``), and
-# the mechanism spends about 0.6 N·m of that merely getting its jaws moving —
-# so below roughly 6 N the whole budget is gone before the approach has travelled
-# anywhere, and the shortfall is what the contact detectors read: the jaws are
-# dragged far below the reference, ``_jaws_have_stopped`` calls that "stopped",
-# and the lost-motion gap is taken for an obstruction.  The grip is then declared
-# at millimetres of travel and 放开 opens from that pose, which is the low-force
-# defect the operator reported happening *fast* and *far* rather than not at all.
-# A setpoint under the floor is served as the floor rather than as asked, and the
-# window does not offer one; either way the number on screen is the number
-# pressed.  Raising this is the one lever if a floor still false-triggers.
-FORCE_MIN_N = 6.0
+# The smallest setpoint the console will offer.  It used to be 6 N because the
+# console's own force-carrying approach presses with no more than the setpoint's
+# torque, and roughly 0.6 N·m of that went on breaking the mechanism away — so a
+# lower setpoint was spent before the approach had travelled anywhere and the
+# stall detector read the lost motion as an obstruction.  The grip now runs
+# through the SDK's ``grasp()``, whose approach is force-budgeted (see
+# ``force_approach_terms`` upstream) and was validated on this bench down to
+# 2 N, so that floor no longer applies.  What is left is a bound that keeps the
+# number meaningful: zero is a mode ("no force limit"), not a grip.  A setpoint
+# under the floor is served as the floor rather than as asked, and the window
+# does not offer one; either way the number on screen is the number pressed.
+FORCE_MIN_N = 2.0
 FORCE_SOFT_WARN_N = 35.0
 FORCE_DEFAULT_N = 12.0
 # tau_max 10 Nm × NM_TO_N.  Display only, as a grey unselectable annotation —
@@ -569,6 +568,11 @@ SIM_MAX_STEP_S = 0.05
 
 COMMAND_QUEUE_MAX = 256
 GUI_WATCHDOG_S = 3.0
+#: How long the worker waits for a blocking SDK action (a grip or a 放开) to
+#: stop after it is asked to abort.  The SDK checks the request on every frame,
+#: so a real abort takes milliseconds; the bound is here so a wedged CAN send
+#: cannot freeze the control tick.
+ACTION_ABORT_WAIT_S = 1.0
 # Ceiling on the interval one control tick will integrate.  A process that was
 # descheduled, or a tick that spent ten seconds inside a blocking SDK call, must
 # not hand the profile a step it would read as "the jaws have not moved for ten

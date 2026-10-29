@@ -159,7 +159,7 @@ class ControlPage(QWidget):
         self._force.setSuffix(" N")
         self._force.setToolTip(
             f"夹持力 {constants.FORCE_MIN_N:.0f}–{constants.FORCE_MAX_N:.0f} N"
-            f"（{constants.FORCE_MIN_N:.0f} N 是能推动夹爪的下限，"
+            f"（{constants.FORCE_MIN_N:.0f} N 是控制台允许的最小设定，"
             f"{constants.FORCE_MAX_N:.0f} N 是机械额定）；"
             f"超过 {constants.FORCE_SOFT_WARN_N:.0f} N 会持续告警"
         )

@@ -12,14 +12,15 @@ that has nothing but this repository.
 | | |
 | --- | --- |
 | Upstream | <https://github.com/nexform-tech/litegrip-python> |
-| Commit | `cacf392b61d669ae811c1dc9bf4ef519b7a9003b` (2026-10-14) |
+| Commit | `ffa0827458b52e20a48252206ce1bb86ed30d2fb` (2026-10-29) |
 | License | Apache-2.0 — `LICENSE` is that commit's file, copied verbatim |
 
 `src/litegrip/` holds the modules, the `can/` and `protocols/` subpackages, `py.typed`, and the
 three JSON data files the code resolves through `dirname(__file__)`: `factory_calibration.json`,
 `calibration_normal.json`, `calibration_reverse.json`. The last two are not decoration — the public
 `load_calibration(template="normal" | "reverse")` resolves them by name (see `gripper.py`'s
-`CALIB_TEMPLATES`), so they must travel with the code.
+`CALIB_TEMPLATES`; upstream deprecates the template path but keeps shipping the files), so they must
+travel with the code.
 
 Upstream's `tests/`, `.github/`, `.releaserc.json`, `AGENTS.md`, `README*`, `examples/`,
 `pyproject.toml`, and `__pycache__/` are deliberately **not** copied. Its tests are upstream's
@@ -30,6 +31,49 @@ drift cannot go unnoticed.
 Every file here is that commit's byte for byte, with no exception left: the factory calibration this
 repository used to override went upstream, so the tree hash below covers the whole tree. **Local
 override** records that file and where it went.
+
+## What the `cacf392` → `ffa0827` move changed
+
+Eight upstream commits. The one that matters here is the release API, which this console now calls;
+the rest is packaging, CI and deprecation and changes no motion.
+
+- **`ffa0827` is where the console stopped being a pure `send_mit_frame` client.** It is one squash
+  merge (upstream PR #77) of three commits: the release API ("feat: add thread-safe release api for
+  ending a grasp"), the README section documenting it, and the removal of two internal bench scripts
+  from upstream's `tests/` — the last only matters because `tests/` is not vendored, so it cannot
+  reach this console. The release API adds
+  `LiteGrip.release(clearance_mm=10.0, *, abort=False, timeout_s=None)` and
+  `LiteGrip.request_release(clearance_mm=10.0, *, abort=False)`, a `ReleaseResult`, and
+  `GraspResult.released`. `grasp(hold_s=0)` still holds indefinitely; the hold now also ends on a
+  release request, which the grasp thread checks before every frame (5 ms). Because only the grasp
+  thread may send frames, `release()` from another thread queues the request and waits for that
+  thread to do the opening; `request_release()` is the non-blocking form and never touches the bus —
+  that is the abort hook the console's action thread needs, and the reason `grasp` and `release` left
+  `FORBIDDEN` in `tests/test_real_backend_api.py`. The opening pose is the one the grip was
+  *declared* at, `max(current, grip) + clearance_mm`, clamped to the calibrated open stop — the same
+  rule this console's BackOff applies, since the console's BackOff now calls it. `abort=True` drops
+  the torque without an opening move, for E-stops. **`MotionConfig.release_wait_s` (10 s) is new**:
+  how long `release()` waits for the grasp thread before returning `ok=False`.
+- **The distribution is named `litegrip-python`, not `litegrip`** (`7f98ef5`). This reaches every
+  `importlib.metadata.version()` call and every `pip install litegrip[zenoh]` hint in the tree, and it
+  moves what `litegrip.__version__` answers — see **Known divergence: the reported version** below.
+  No console code reads that, and the console never pip-installs the SDK. `5b16220` then requires
+  Python 3.10 and completes the PyPI metadata (`pyproject.toml` and both READMEs, no code).
+- **`21e8981` retires the reverse-mount guidance, comments and docstrings only.** `LiteGrip(mount=...)`,
+  `GripperConfig.mount`, `load_template`, `list_templates` and `load_calibration(template=...)` are
+  now marked deprecated in favour of the one shipped mounting and a named calibration file; every one
+  of them still works, and no runtime behaviour changes. The console never called any of them; its
+  only contact with `CALIB_TEMPLATES` is reading the two shipped template files by path
+  (`tests/test_units.py`, `src/litegrip_studio/selftest.py`), and those files did not move.
+- **`a2902fa` (repository standards) removes upstream's `AGENTS.md`** and its CI check for it;
+  `25ecacd`, `0d46d6d` and `35e0bc8` are CI and README changes (PyPI publishing, the
+  `README.zh-CN.md` rename, the PyPI link targets). None of these files is vendored.
+- **The same squash deletes two internal bench scripts from upstream's `tests/`**
+  (`torque_guard_check.py`, `trajectory_check.py`) — that part is not vendored, so it cannot reach
+  this console, and it is named here only so the next re-vendor does not go looking for it.
+
+Step 5 of the recipe below is a no-op for this move: no shipped calibration file changed, and apart
+from the release API no motion did either.
 
 ## What the `9180117` → `cacf392` move changed
 
@@ -124,7 +168,7 @@ any file the SDK ships moves it.
 ## Tree hash
 
 ```text
-a4e978ec444e940eba99c0d5a7de722c36f14e4292348861bc3b9d26ff44f7c9
+56f014cee55197fd6673271b802e4f1eecb52f7f313363e5f6cfde138e120276
 ```
 
 The recipe, so it can be recomputed without reading the test: take every file under `src/litegrip/`
@@ -206,9 +250,11 @@ to the mechanical stop instead of the 6 mm-short work stroke that was chosen del
 
 **That key never reaches this console, in any file.** `work_stroke_mm` changes a motion in exactly
 one place in the SDK, `Gripper.open`, through `work_limit_target`, and the console does not
-call `Gripper.open` — or `close`, or `grasp`, or any other SDK convenience method. It streams its own
-MIT frames from `send_mit_frame` / `poll` / `get_state` / `stop`; the reasons are structural and
-listed in `backend/real.py` and `backend/__init__.py`. The console's own `open` drives to
+call `Gripper.open` — or `close`, or any other SDK motion method. It streams its own MIT frames from
+`send_mit_frame` / `poll` / `get_state` / `stop`, with `grasp` / `release` / `request_release` as the
+one exception: those run on the worker's dedicated action thread, which is what makes them
+interruptible, and neither reads `work_limit_target`. The reasons are structural and listed in
+`backend/real.py` and `backend/__init__.py`. The console's own `open` drives to
 `Limits.max_stroke_mm`, which is the travel measured with calipers, and `load_calibration` never
 writes that field (`backend/real.py`).
 
@@ -268,10 +314,10 @@ Then, in one commit:
 ## Known divergence: the reported version
 
 `litegrip.__version__` reads the *installed* distribution's metadata through
-`importlib.metadata.version("litegrip")`, so it reports the version of whichever `litegrip`
-distribution is installed in the interpreter — which is not necessarily this code. A machine with
-no such installation reports `0.0.0+source`; a machine where an unrelated `litegrip` is installed
-reports that distribution's number.
+`importlib.metadata.version("litegrip-python")`, so it reports the version of whichever
+`litegrip-python` distribution is installed in the interpreter — which is not necessarily this code.
+A machine with no such installation reports `0.0.0+source`; a machine where an unrelated
+`litegrip-python` is installed reports that distribution's number.
 
 This is upstream's design, and it is copied unchanged rather than patched, so that a re-vendor stays
 a plain file copy. Nothing in the console reads `litegrip.__version__`; the version a running console
