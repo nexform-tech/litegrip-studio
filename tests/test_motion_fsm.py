@@ -40,7 +40,7 @@ DT = constants.CTRL_DT
 #: with the travel setting would move the numbers they assert on with it.
 BENCH = Limits(1.775959, -0.064279, 65.21, 120.0)
 #: The lowest setpoint the console's own FSM can serve on these plants.
-#: The window now offers 2 N, but a real grip at that setpoint runs through the
+#: The window now offers 3 N, but a real grip at that setpoint runs through the
 #: SDK's force-budgeted ``grasp()`` (``RealBackend.uses_sdk_grasp``).  The FSM is
 #: the simulator's stand-in, and its contact detector still needs the ~6 N budget
 #: this suite was written against to tell a slow approach from a stall.  Tests
@@ -1438,18 +1438,18 @@ class TestAForceApproachDoesNotPressPastItsSetpoint:
         assert fsm._kd_servo == fsm.params.kd
 
     def test_the_ticks_own_press_caps_the_fsm_at_the_new_floor(self) -> None:
-        """At 2 N the FSM's approach slows down instead of out-pressing itself.
+        """At the floor the FSM's approach slows down instead of out-pressing itself.
 
         ``kp·v·dt`` is not the console's to withhold, so a setpoint whose budget
         cannot cover the tick's own step at the speed asked for has to be
         honoured by slowing down.  That cap is ``budget/(kp·dt)`` and at
-        :data:`constants.FORCE_MIN_N` it is about 67 mm/s, below the slider.
+        :data:`constants.FORCE_MIN_N` it is about 101 mm/s, below the slider.
 
         This is the simulator's path.  A real grip no longer runs through this
         FSM at all — it runs through the SDK's force-budgeted ``grasp()`` (see
-        ``RealBackend.uses_sdk_grasp``) — so the console's 2 N floor does not
-        put a 2 N force approach on this code path.  The FSM still has to be
-        honest when the simulator asks for one.
+        ``RealBackend.uses_sdk_grasp``) — so the console's floor does not
+        put a floor-sized force approach on this code path.  The FSM still has
+        to be honest when the simulator asks for one.
         """
         rig = Rig(config=PlantConfig(contact_k=500.0))
         rig.fsm.set_speed(constants.SPEED_MAX_MM_S)
@@ -1519,7 +1519,7 @@ class TestAForceApproachDoesNotPressPastItsSetpoint:
     def test_the_fsm_floor_still_reaches_the_object(self) -> None:
         """The FSM's own floor is 6 N, and it has to be able to *get there*.
 
-        The window's floor is 2 N now, but a real grip at that setpoint runs
+        The window's floor is 3 N now, but a real grip at that setpoint runs
         through the SDK's force-budgeted ``grasp()``; the FSM only serves the
         simulator, where the contact detector needs the ~6 N budget this suite
         was written against.  At its floor the approach crosses the free travel
@@ -1551,17 +1551,17 @@ class TestAForceApproachDoesNotPressPastItsSetpoint:
     def test_a_setpoint_under_the_floor_is_served_as_the_floor(self) -> None:
         """The clamp still raises a sub-floor request instead of pressing it.
 
-        The floor itself moved to 2 N, so the number served is smaller — but the
+        The floor itself moved to 3 N, so the number served is larger — but the
         rule is unchanged: the number on the screen and the number pressed have
         to be the same one.  A file or a caller holding an older value is raised
         to :data:`constants.FORCE_MIN_N`, and the FSM's speed cap follows that
-        served setpoint (at 2 N the tick's own step spends the whole budget at
-        about 67 mm/s, below the slider).
+        served setpoint (at the floor the tick's own step spends the whole
+        budget at about 101 mm/s, below the slider).
 
         This path is now the simulator's; the real grip is the SDK's.  That is
         why the assertions here are about the clamp and the cap, not about a
-        grip at the object 40 mm in — 2 N is below the FSM's own detector floor,
-        and the SDK's approach is the one that has to make that grip.
+        grip at the object 40 mm in — the floor is below the FSM's own detector
+        floor, and the SDK's approach is the one that has to make that grip.
         """
         rig = Rig(config=PlantConfig(contact_k=500.0))
         rig.fsm.set_speed(constants.SPEED_MAX_MM_S)

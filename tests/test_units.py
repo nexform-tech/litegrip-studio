@@ -299,9 +299,10 @@ class TestTheSetpointFloor:
 
     ``clamp_force`` leaves zero alone — it is the mode a plain move carries, not
     a small press — so the floor is its own function rather than a new lower
-    bound inside it.  The floor is 2 N: a real grip now runs through the SDK's
-    force-budgeted ``grasp()``, so it no longer has to clear the FSM's breakaway
-    cost (see ``constants.FORCE_MIN_N``).
+    bound inside it.  The floor is 3 N: a real grip runs through the SDK's
+    force-budgeted ``grasp()``, whose approach spends only 0.9 x the setpoint,
+    and on this bench the jaws do not break away below a 2 N setpoint's share of
+    it (see ``constants.FORCE_MIN_N``).
     """
 
     def test_a_setpoint_below_the_floor_comes_back_as_the_floor(self) -> None:
@@ -332,6 +333,20 @@ class TestTheSetpointFloor:
     def test_the_floor_is_below_the_default_and_the_warning(self) -> None:
         assert constants.FORCE_MIN_N < constants.FORCE_DEFAULT_N
         assert constants.FORCE_MIN_N < constants.FORCE_SOFT_WARN_N
+
+    def test_the_floor_is_above_the_setpoint_that_stood_still(self) -> None:
+        """2 N was measured standing still on this bench, so 2 cannot be the floor.
+
+        A grip's approach spends 0.9 x its setpoint, so a 2 N grasp approaches
+        at 1.8 N — below the breakaway, so the jaws never move, the approach's
+        own stall detector reads the standstill as contact, and the pure-torque
+        hold closes the rest of the travel under the full setpoint.  Measured
+        2026-10-29: the grip declared 19-39 mm short of the object, then a fast
+        close.  The floor has to be a setpoint whose approach does move the
+        jaws; on this bench that makes it 3 N.
+        """
+        stood_still_n = 2.0
+        assert constants.FORCE_MIN_N > stood_still_n
 
 
 class TestErrorText:

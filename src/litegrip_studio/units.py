@@ -260,10 +260,10 @@ def clamp_force_setpoint(force_n: float) -> float:
     zero is a *mode*, not a small press — it is what a plain move carries to say
     "no force limit" — while a positive value is a setpoint the operator asked
     for and is held to :data:`constants.FORCE_MIN_N`.  A setpoint under the floor
-    comes back as the floor rather than being served as asked.  The floor is a
-    bound on what the console offers, not a property of the SDK engine: a grip
-    is carried out by the SDK's ``grasp()``, whose approach is force-budgeted
-    and works below the console's old 6 N floor (see ``FORCE_MIN_N``).
+    comes back as the floor rather than being served as asked.  The floor is set
+    by what the approach can actually move: it spends 0.9 x the setpoint, and
+    below the mechanism's breakaway the jaws stand still and the grip is
+    declared in free travel (see :data:`constants.FORCE_MIN_N`).
     Substituting is safe because this is the same number the window shows and the
     same one the log carries; the window goes further and does not let such a
     setpoint be entered at all.

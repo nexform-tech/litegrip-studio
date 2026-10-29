@@ -209,14 +209,25 @@ tells those apart after the run, and the log is the only place that survives it.
 Do not lower `FORCE_MIN_N` or `SPEED_MIN_MM_S` to chase a very small setpoint. `FORCE_MIN_N` is the
 one that decides what the console serves: `clamp_force_setpoint` turns a setpoint under it into the
 floor rather than serving it as asked, and the spinbox does not offer one at all, so the number on
-the screen is the number pressed either way. The floor is there because the approach's entire press
-budget *is* its own setpoint's torque, this mechanism spends about 0.6 N·m of that getting its jaws
-moving, and a budget under that presses with less than the friction it has to overcome. The jaws then
-never leave the open stop and the stillness channel reads that rest as contact. Measured on the plant
-at the maximum slider speed, with no floor: a 0.1 N grasp handed over at 85.01 mm — the open stop,
-without having travelled — and a 1 N one at 84.90 mm, 44.9 mm short of an object at 40 mm, after
-which force mode drew the jaws the rest of the way and **Let go**, which measures from the pose the
-grip was made at, opened 45 mm further than it promises.
+the screen is the number pressed either way. The floor has to be a setpoint whose approach actually
+gets the jaws moving, because whatever the approach spends goes first on breaking them away from
+rest — and a budget under that friction moves nothing, stands still, and every stillness channel
+reads that standstill as contact.
+
+The floor was 6 N while the console's own FSM made the grip, because its approach pressed with the
+setpoint's *whole* torque and this mechanism spends about 0.6 N·m of that getting its jaws moving.
+Measured on the plant at the maximum slider speed, with no floor: a 0.1 N grasp handed over at
+85.01 mm — the open stop, without having travelled — and a 1 N one at 84.90 mm, 44.9 mm short of an
+object at 40 mm, after which force mode drew the jaws the rest of the way and **Let go**, which
+measures from the pose the grip was made at, opened 45 mm further than it promises.
+
+With the grip moved to the SDK's `grasp()` the band moved rather than closed, because that approach
+spends only 0.9 x the setpoint. Measured 2026-10-29: a 2 N setpoint (approach 1.8 N) stood still,
+its own stall detector read the standstill as contact, and the pure-torque hold that took over
+closed the rest of the travel under the full setpoint — grips declared 19–39 mm from the object,
+then a fast close. A 3 N setpoint (approach 2.7 N) travels and reaches it. So the floor is 3 N, not
+6: it could be lowered exactly as far as the approach's own share of the setpoint still clears the
+breakaway, and no further.
 
 `SPEED_MIN_MM_S` is the other half of the same rule: the slowest speed that breaks the jaws away from
 rest, and lowering it trades the one case it covers for a stall that every contact detector reads as
@@ -224,10 +235,11 @@ an obstruction. The speed a setpoint still decides is the one whose tick's own s
 spend the whole budget — one term of the press is not the console's to withhold, since the command
 leads the measurement by the tick's own travel whatever damping or lead it carries — so a setpoint
 whose budget cannot cover that step at the speed asked for has the approach slowed until it can
-(`MotionFSM._tick_press_cap_mm_s`). With the floor in place that lever no longer bites anywhere the
-slider reaches: the cap at 6 N is 317 mm/s at the bench file's 73.46 mm/rad, and 202 mm/s on the
-simulated unit's 46.73, against a slider that stops at 150. A gripper with more millimetres per rad,
-or a lowered floor, puts it back in play.
+(`MotionFSM._tick_press_cap_mm_s`). At the 3 N floor the cap is 158 mm/s at the bench file's
+73.46 mm/rad and 101 mm/s on the simulated unit's 46.73, against a slider that stops at 150 — so it
+bites again on the simulator, which is where the FSM tests exercise it, and a gripper with fewer
+millimetres per rad brings it back onto the bench. That is the one lever left that lets the FSM be
+asked for a floor-sized approach and still travel.
 
 ### The ends of the range and Let go
 

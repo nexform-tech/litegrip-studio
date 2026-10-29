@@ -95,18 +95,23 @@ NM_TO_N = 10.0
 N_TO_NM = 1.0 / NM_TO_N
 
 FORCE_MAX_N = 40.0  # mechanical rating — hard UI cap
-# The smallest setpoint the console will offer.  It used to be 6 N because the
-# console's own force-carrying approach presses with no more than the setpoint's
-# torque, and roughly 0.6 N·m of that went on breaking the mechanism away — so a
-# lower setpoint was spent before the approach had travelled anywhere and the
-# stall detector read the lost motion as an obstruction.  The grip now runs
-# through the SDK's ``grasp()``, whose approach is force-budgeted (see
-# ``force_approach_terms`` upstream) and was validated on this bench down to
-# 2 N, so that floor no longer applies.  What is left is a bound that keeps the
-# number meaningful: zero is a mode ("no force limit"), not a grip.  A setpoint
-# under the floor is served as the floor rather than as asked, and the window
-# does not offer one; either way the number on screen is the number pressed.
-FORCE_MIN_N = 2.0
+# The smallest setpoint the console will offer.  A grip is the SDK's ``grasp()``,
+# whose force-carrying approach spends at most ``0.9 x setpoint`` — and whatever
+# it spends goes first on breaking the mechanism away from static friction
+# before any of it moves the jaws.  On this bench the breakaway lies between the
+# two ends of that band: a 3 N grasp (approach 2.7 N) travels and reaches the
+# object, while a 2 N one (approach 1.8 N) stands still, its own stall detector
+# reads the standstill as "stopped against the workpiece", and the pure-torque
+# hold that takes over then
+# drives the jaws in under the full setpoint with no position or speed limit —
+# the operator sees a fast close and a grip declared tens of millimetres from
+# the object (2026-10-29).  So the window offers 3 N until the approach can carry
+# the setpoint itself in the 2-3 N band; 2 N is a promise the mechanism does not
+# keep.  A setpoint under the floor is served as the floor rather than as asked,
+# and the window does not offer one; either way the number on screen is the
+# number pressed.  Zero is not a setpoint at all: it is the mode that says "no
+# force limit".
+FORCE_MIN_N = 3.0
 FORCE_SOFT_WARN_N = 35.0
 FORCE_DEFAULT_N = 12.0
 # tau_max 10 Nm × NM_TO_N.  Display only, as a grey unselectable annotation —
