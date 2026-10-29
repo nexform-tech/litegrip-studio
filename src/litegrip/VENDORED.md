@@ -12,12 +12,8 @@ that has nothing but this repository.
 | | |
 | --- | --- |
 | Upstream | <https://github.com/nexform-tech/litegrip-python> |
-| Commit | `78b8766c920cb0b7f0b35584c70b8ff33186272a` (2026-10-29, head of upstream's `feat/release-api` branch) |
+| Commit | `ffa0827458b52e20a48252206ce1bb86ed30d2fb` (2026-10-29) |
 | License | Apache-2.0 — `LICENSE` is that commit's file, copied verbatim |
-
-That commit is on upstream's release-API branch, not on `main`: the tree is PR
-<https://github.com/nexform-tech/litegrip-python/pull/77>. Re-vendor from `main` once it is merged —
-the squash merge keeps this tree, so the hash below does not move.
 
 `src/litegrip/` holds the modules, the `can/` and `protocols/` subpackages, `py.typed`, and the
 three JSON data files the code resolves through `dirname(__file__)`: `factory_calibration.json`,
@@ -36,13 +32,16 @@ Every file here is that commit's byte for byte, with no exception left: the fact
 repository used to override went upstream, so the tree hash below covers the whole tree. **Local
 override** records that file and where it went.
 
-## What the `cacf392` → `78b8766` move changed
+## What the `cacf392` → `ffa0827` move changed
 
-Ten upstream commits. The one that matters here is the release API, which this console now calls;
+Eight upstream commits. The one that matters here is the release API, which this console now calls;
 the rest is packaging, CI and deprecation and changes no motion.
 
-- **`d8cf393` is where the console stopped being a pure `send_mit_frame` client.**
-  `d8cf393` ("feat: add thread-safe release api for ending a grasp") adds
+- **`ffa0827` is where the console stopped being a pure `send_mit_frame` client.** It is one squash
+  merge (upstream PR #77) of three commits: the release API ("feat: add thread-safe release api for
+  ending a grasp"), the README section documenting it, and the removal of two internal bench scripts
+  from upstream's `tests/` — the last only matters because `tests/` is not vendored, so it cannot
+  reach this console. The release API adds
   `LiteGrip.release(clearance_mm=10.0, *, abort=False, timeout_s=None)` and
   `LiteGrip.request_release(clearance_mm=10.0, *, abort=False)`, a `ReleaseResult`, and
   `GraspResult.released`. `grasp(hold_s=0)` still holds indefinitely; the hold now also ends on a
@@ -69,8 +68,9 @@ the rest is packaging, CI and deprecation and changes no motion.
 - **`a2902fa` (repository standards) removes upstream's `AGENTS.md`** and its CI check for it;
   `25ecacd`, `0d46d6d` and `35e0bc8` are CI and README changes (PyPI publishing, the
   `README.zh-CN.md` rename, the PyPI link targets). None of these files is vendored.
-- **`78b8766` deletes two internal bench scripts from upstream's `tests/`** (`torque_guard_check.py`,
-  `trajectory_check.py`). `tests/` is not vendored, so it cannot reach this console.
+- **The same squash deletes two internal bench scripts from upstream's `tests/`**
+  (`torque_guard_check.py`, `trajectory_check.py`) — that part is not vendored, so it cannot reach
+  this console, and it is named here only so the next re-vendor does not go looking for it.
 
 Step 5 of the recipe below is a no-op for this move: no shipped calibration file changed, and apart
 from the release API no motion did either.
