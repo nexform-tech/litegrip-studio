@@ -334,6 +334,50 @@ class TestTheSetpointFloor:
         assert constants.FORCE_MIN_N < constants.FORCE_SOFT_WARN_N
 
 
+class TestTheNoBiteFloor:
+    """The setpoint the console names when the SDK refuses a grip.
+
+    The refusal is the SDK's (``GraspResult.no_bite``), and so is the bound that
+    decides it: the approach budget ``force × 0.1 N·m/N × press_safety`` has to
+    clear the measured breakaway.  The console repeats that bound as a literal
+    so the message can name a number, and this is where the literal is held to
+    the vendored SDK's own ``MotionConfig`` — a re-vendor that moves the
+    breakaway fails here instead of leaving the operator with stale advice.
+    """
+
+    def test_it_clears_the_budget_below_which_the_sdk_refuses(self) -> None:
+        """Normalised per newton, so the SDK's coefficients are the source."""
+        import litegrip
+
+        motion = litegrip.MotionConfig()
+        floor_n = motion.breakaway_nm / (
+            litegrip.UnitConversion.N_TO_NM * motion.press_safety
+        )
+
+        assert constants.GRASP_NO_BITE_FLOOR_N > floor_n, (
+            "控制台提示的力度低于 SDK 判拒夹的门槛，照着提示调还是会被拒"
+        )
+
+    def test_it_is_the_smallest_half_newton_above_the_bound(self) -> None:
+        """Rounded up to a number the setpoint box can hold, and no further:
+        advice that overshoots the bound squeezes a delicate part harder than
+        the SDK's own rule requires."""
+        import litegrip
+
+        motion = litegrip.MotionConfig()
+        floor_n = motion.breakaway_nm / (
+            litegrip.UnitConversion.N_TO_NM * motion.press_safety
+        )
+
+        assert constants.GRASP_NO_BITE_FLOOR_N == math.ceil(floor_n * 2) / 2
+
+    def test_the_console_minimum_is_below_it(self) -> None:
+        """The reason the refusal is reachable at all: 2 N, the console's own
+        floor, is inside the band the SDK refuses.  If this ever stops being
+        true the message becomes unreachable and should go."""
+        assert constants.FORCE_MIN_N < constants.GRASP_NO_BITE_FLOOR_N
+
+
 class TestErrorText:
     """The fault strings the operator reads after a motor trips.
 
