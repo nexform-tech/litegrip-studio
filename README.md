@@ -433,11 +433,13 @@ The simulated backend refuses it outright, reporting 本后端不支持标零.
 - **The smallest force you can ask for is 3 N**, in `constants.FORCE_MIN_N`. A grip is the SDK's
   force-budgeted `grasp()`, and its approach spends only 0.9 × the setpoint, all of which goes
   first on breaking the jaws away from static friction before any of it moves them. The breakaway
-  on this bench sits between the two ends of that band: 2 N of setpoint approaches at 1.8 N and
-  stands still, the approach's own stall detector reads the standstill as contact, and the
-  pure-torque hold that follows closes the rest of the travel under the full setpoint — measured
-  2026-10-29 as a grip declared 19–39 mm short of the object followed by a fast close. 3 N
-  approaches at 2.7 N and reaches it, so 3 N is the floor. The console's floor only keeps zero
+  on this bench is between 1.8 and 2.0 N, read off the gripper's own log on 2026-10-29: the 2 N
+  approach presses 0.18 N·m and moved 0.0004 rad in its whole 0.25 s stall window, while the 2 N
+  hold that then took over presses 0.20 N·m steady and walked the jaws 19 mm. So a 2 N grasp
+  stands still, its approach's stall detector reads the standstill as contact, and the pure-torque
+  hold closes the rest of the travel under the full setpoint — measured as a grip declared 19–39 mm
+  short of the object followed by a fast close. 3 N approaches at 2.7 N, a third clear of the
+  breakaway, and reaches the object, so 3 N is the floor. The console's floor only keeps zero
   from meaning "a very light grip" — zero is the mode that says "no force limit". The simulator
   still runs the console's own FSM, and its contact detector needs about 6 N, so a simulated 3 N
   grip may declare contact late. That limitation does not apply to the real gripper.

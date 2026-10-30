@@ -222,12 +222,17 @@ object at 40 mm, after which force mode drew the jaws the rest of the way and **
 measures from the pose the grip was made at, opened 45 mm further than it promises.
 
 With the grip moved to the SDK's `grasp()` the band moved rather than closed, because that approach
-spends only 0.9 x the setpoint. Measured 2026-10-29: a 2 N setpoint (approach 1.8 N) stood still,
-its own stall detector read the standstill as contact, and the pure-torque hold that took over
-closed the rest of the travel under the full setpoint — grips declared 19–39 mm from the object,
-then a fast close. A 3 N setpoint (approach 2.7 N) travels and reaches it. So the floor is 3 N, not
-6: it could be lowered exactly as far as the approach's own share of the setpoint still clears the
-breakaway, and no further.
+spends only 0.9 x the setpoint. The breakaway was then bracketed to within 0.2 N by the gripper's
+own log (2026-10-29): the 2 N approach presses 0.18 N·m and moved 0.0004 rad in its whole 0.25 s
+stall window, while the 2 N hold that took over presses 0.20 N·m steady and walked the jaws 19 mm.
+So the breakaway is between 1.8 and 2.0 N. A 2 N setpoint (approach 1.8 N) sits on the near side of
+it: the jaws stand still, the stall detector reads the standstill as contact, and the pure-torque
+hold closes the rest of the travel under the full setpoint — grips declared 19–39 mm from the
+object, then a fast close. A 3 N setpoint (approach 2.7 N) is a third clear of it and travels and
+reaches the object. So the floor is 3 N, not 6: it could be lowered exactly as far as the approach's
+own share of the setpoint still clears the breakaway, and no further. Sitting *on* the breakaway is
+not enough even then: at exactly that torque the jaws creep at near zero speed, and the 0.25 s
+window reads the creep as a stall — the floor has to clear it, not touch it.
 
 `SPEED_MIN_MM_S` is the other half of the same rule: the slowest speed that breaks the jaws away from
 rest, and lowering it trades the one case it covers for a stall that every contact detector reads as

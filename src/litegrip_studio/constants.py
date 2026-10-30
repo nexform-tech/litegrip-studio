@@ -98,17 +98,19 @@ FORCE_MAX_N = 40.0  # mechanical rating — hard UI cap
 # The smallest setpoint the console will offer.  A grip is the SDK's ``grasp()``,
 # whose force-carrying approach spends at most ``0.9 x setpoint`` — and whatever
 # it spends goes first on breaking the mechanism away from static friction
-# before any of it moves the jaws.  On this bench the breakaway lies between the
-# two ends of that band: a 3 N grasp (approach 2.7 N) travels and reaches the
-# object, while a 2 N one (approach 1.8 N) stands still, its own stall detector
-# reads the standstill as "stopped against the workpiece", and the pure-torque
-# hold that takes over then
-# drives the jaws in under the full setpoint with no position or speed limit —
-# the operator sees a fast close and a grip declared tens of millimetres from
-# the object (2026-10-29).  So the window offers 3 N until the approach can carry
-# the setpoint itself in the 2-3 N band; 2 N is a promise the mechanism does not
-# keep.  A setpoint under the floor is served as the floor rather than as asked,
-# and the window does not offer one; either way the number on screen is the
+# before any of it moves the jaws.  On this bench that breakaway sits between
+# 1.8 and 2.0 N, read off the gripper's own log (2026-10-29): the 2 N approach
+# frame presses 0.18 N·m and moved 0.0004 rad in its whole 0.25 s stall window,
+# while the 2 N hold that then took over presses 0.20 N·m steady and walked the
+# jaws 19 mm.  So a 3 N grasp (approach 2.7 N) travels and reaches the object,
+# while a 2 N one (approach 1.8 N) stands still, its own stall detector reads
+# the standstill as "stopped against the workpiece", and the pure-torque hold
+# that takes over then drives the jaws in under the full setpoint with no
+# position or speed limit — the operator sees a fast close and a grip declared
+# tens of millimetres from the object.  So the window offers 3 N: 2 N is a
+# promise the mechanism does not keep, and 3 N clears the breakaway by a third
+# rather than sitting on it.  A setpoint under the floor is served as the floor
+# rather than as asked, and the window does not offer one; either way the number on screen is the
 # number pressed.  Zero is not a setpoint at all: it is the mode that says "no
 # force limit".
 FORCE_MIN_N = 3.0
