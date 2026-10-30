@@ -3353,6 +3353,10 @@ class SdkGripBackend(RecordingBackend):
         #: What a grip reports after it is released.  ``False`` is a hold that
         #: ended some other way (fault, travel guard).
         self.released = True
+        #: The SDK's refusal: the approach never left its start and the budget
+        #: could not have moved it.  ``ok`` is ``False`` with it, as upstream
+        #: reports it, and the grip returns at once rather than holding.
+        self.no_bite = False
 
     def grasp(self, force_n, *, hold_s: float = 0.0):
         self._claim()
@@ -3360,7 +3364,8 @@ class SdkGripBackend(RecordingBackend):
         self.grasp_entered.set()
         assert self.grasp_release.wait(2.0), "the test never released the grip"
         return SimpleNamespace(
-            ok=True,
+            ok=not self.no_bite,
+            no_bite=self.no_bite,
             released=self.released,
             state=SimpleNamespace(position_mm=self._limits.to_mm(self.q_rad)),
         )
@@ -3426,6 +3431,43 @@ class TestTheSdkGrip:
         assert bench.loop.motion.state is MotionState.IDLE
         assert backend.names().count("stream_frame") == sent_before, (
             "the FSM streamed a second frame beside the SDK's grip"
+        )
+
+    def test_a_refused_grip_is_reported_as_a_refusal_not_an_unfinished_hold(self) -> None:
+        """``no_bite`` is the SDK saying "I could not tell whether anything was
+        there", and the remedy is more force.  Reported as a plain failed grip
+        it reads as a hardware problem and the operator retries at the same
+        setpoint that was refused."""
+        bench = self._bench()
+        backend = bench.backend
+        backend.no_bite = True
+        # A refusal returns at once — there is no hold for the test to end.
+        backend.grasp_release.set()
+
+        bench.send(cmd.Grasp(force_n=constants.FORCE_MIN_N))
+        self._wait_for_action(bench)
+
+        said = "".join(bench.signals.alerts())
+        assert "拒" in said, f"the refusal was not named: {bench.signals.alerts()}"
+        assert f"{constants.GRASP_NO_BITE_FLOOR_N:.1f} N" in said, (
+            "the refusal has to name a force that would not be refused"
+        )
+        assert "夹取未完成" not in said, (
+            "a refusal is not an unfinished grip — nothing was held to finish"
+        )
+
+    def test_a_grip_that_bit_is_still_reported_as_a_finished_hold(self) -> None:
+        bench = self._bench()
+        backend = bench.backend
+        backend.released = False  # ended without a release request
+        backend.grasp_release.set()
+
+        bench.send(cmd.Grasp(force_n=12.0))
+        self._wait_for_action(bench)
+
+        assert "夹取保持结束" in "".join(bench.signals.logs())
+        assert not bench.signals.alerts(), (
+            "a hold that ended normally is not something to warn about"
         )
 
     def test_back_off_asks_the_live_grip_to_release(self) -> None:

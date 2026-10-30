@@ -1300,7 +1300,18 @@ class WorkerLoop:
             if isinstance(position_mm, float) and math.isfinite(position_mm)
             else ""
         )
-        if bool(getattr(result, "released", False)):
+        if bool(getattr(result, "no_bite", False)):
+            # A refusal, not a fault.  The jaws never left where they started
+            # and the force budget could not have moved them, so "the grip did
+            # not finish" would point the operator at the wrong thing: nothing
+            # was held, nothing is between the jaws that this budget can prove,
+            # and the remedy is more force, not a retry.
+            self._alert(
+                "warn",
+                f"夹取被拒：夹爪没能从起点挪动，力度不足以离开静摩擦{where}；"
+                f"把夹持力调到 {constants.GRASP_NO_BITE_FLOOR_N:.1f} N 以上再试",
+            )
+        elif bool(getattr(result, "released", False)):
             self._log("info", f"夹取已松开{where}")
         elif bool(getattr(result, "ok", False)):
             self._log("info", f"夹取保持结束{where}")

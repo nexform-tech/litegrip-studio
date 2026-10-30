@@ -12,7 +12,7 @@ that has nothing but this repository.
 | | |
 | --- | --- |
 | Upstream | <https://github.com/nexform-tech/litegrip-python> |
-| Commit | `ffa0827458b52e20a48252206ce1bb86ed30d2fb` (2026-10-29) |
+| Commit | `4ce8482e10f5ca12a12e90db2a7222f814b07cea` (2026-10-30) |
 | License | Apache-2.0 — `LICENSE` is that commit's file, copied verbatim |
 
 `src/litegrip/` holds the modules, the `can/` and `protocols/` subpackages, `py.typed`, and the
@@ -74,6 +74,40 @@ the rest is packaging, CI and deprecation and changes no motion.
 
 Step 5 of the recipe below is a no-op for this move: no shipped calibration file changed, and apart
 from the release API no motion did either.
+
+## What the `ffa0827` → `4ce8482` move changed
+
+One upstream commit — the squash merge of upstream PR #78, "fix: refuse the handover when the
+approach never moved", which is two commits: the refusal, then the breakaway gate on it. Two files
+under `src/litegrip/` changed, no calibration file and no example shipped here.
+
+- **A force-carrying approach that never moves is no longer handed over as contact.** The grip's
+  approach segment presses with a force budget (`force_approach_terms`); on this bench the jaws do
+  not leave static friction until roughly 0.2 N·m of it, so a setpoint near that spends its whole
+  travel budget without moving and the hold that follows reads as "the part is here". The hold is
+  entered with pure torque at 1.0× the setpoint while the approach pressed at 0.9×, so that gap is
+  free stroke — the jaws then walked the full 19 mm of travel on this bench (`no_bite` on the
+  README's terms, and the bench report behind upstream PR #78). `MotionConfig.no_bite_mm` (0.5 mm)
+  is the displacement below which the approach counts as never having moved; `MotionConfig.breakaway_nm`
+  (0.2 N·m, the measured breakaway — 0.18 N·m could not move the jaw, 0.20 N·m walked 19 mm) is the
+  budget below which "it did not move" proves nothing. Both hold, and the grip returns
+  `ok=False`, `no_bite=True`, `cycles=0`, with the torque dropped and no hold entered. Above the
+  breakaway a zero-displacement stop is still read as contact, so a 3 N or 20 N grip on a part that
+  sits at the open jaw behaves as before.
+- **`MoveResult.no_bite` and `GraspResult.no_bite` are new fields**, appended, and documented in the
+  README's result tables rather than added to a config comment only.
+- **This console reads it.** `_report_grasp` in `core/worker.py` names the refusal and the force that
+  would not be refused (`constants.GRASP_NO_BITE_FLOOR_N`, 2.5 N, the smallest half newton whose
+  0.9× budget clears the breakaway). The console's own minimum setpoint, `FORCE_MIN_N = 2.0`, is
+  *inside* the refused band: a grip there still works whenever the approach travels, but a part
+  already against the open jaw, or a re-grasp in place after `release(abort=True)` (which sends no
+  opening move), is refused rather than reported as a hold. That is the intended trade — the
+  alternative was the fast close — and the message says what to do. `tests/test_units.py` recomputes
+  the bound from the vendored `MotionConfig`, so a re-vendor that moves the breakaway fails there
+  rather than leaving stale advice on screen.
+- Upstream's `examples/grasp_test.py` and `README*` changes in the same commit are not vendored.
+
+Step 5 of the recipe below is a no-op for this move: no shipped calibration file changed.
 
 ## What the `9180117` → `cacf392` move changed
 
@@ -168,7 +202,7 @@ any file the SDK ships moves it.
 ## Tree hash
 
 ```text
-56f014cee55197fd6673271b802e4f1eecb52f7f313363e5f6cfde138e120276
+0a085f3259227688ff5da535ba1079b3d02efe73f7c5aa56d3caf63d113cd029
 ```
 
 The recipe, so it can be recomputed without reading the test: take every file under `src/litegrip/`

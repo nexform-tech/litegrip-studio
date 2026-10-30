@@ -1393,7 +1393,12 @@ class LiteGrip:
             it closed onto an object, which is the expected outcome.
             ``released=True`` means the grasp ended because a release was
             requested: ``ok=True`` for a normal release, ``ok=False`` for
-            an abort.
+            an abort.  ``no_bite=True`` (with ``ok=False``, ``cycles=0``)
+            means the approach never moved the jaws and its torque budget
+            was below the breakaway: the hold was **not** entered, because
+            handing a jaw with a free stroke ahead of it to the torque-only
+            hold would power it across the gap.  See
+            ``MotionConfig.no_bite_mm`` and ``.breakaway_nm``.
         """
         self._check_connected()
         return self._actions.grasp(force_n, hold_s, progress=progress)
