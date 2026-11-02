@@ -299,9 +299,9 @@ class TestTheSetpointFloor:
 
     ``clamp_force`` leaves zero alone — it is the mode a plain move carries, not
     a small press — so the floor is its own function rather than a new lower
-    bound inside it.  The floor is 2 N: a real grip now runs through the SDK's
-    force-budgeted ``grasp()``, so it no longer has to clear the FSM's breakaway
-    cost (see ``constants.FORCE_MIN_N``).
+    bound inside it.  The floor is 3 N: a real grip goes through the SDK's
+    force-budgeted ``grasp()``, and below 3 N the bench took a marginal grip
+    (see ``constants.FORCE_MIN_N``).
     """
 
     def test_a_setpoint_below_the_floor_comes_back_as_the_floor(self) -> None:
@@ -335,18 +335,19 @@ class TestTheSetpointFloor:
 
 
 class TestTheNoBiteFloor:
-    """The setpoint the console names when the SDK refuses a grip.
+    """The console's floor has to clear the band the SDK refuses.
 
     The refusal is the SDK's (``GraspResult.no_bite``), and so is the bound that
     decides it: the approach budget ``force × 0.1 N·m/N × press_safety`` has to
-    clear the measured breakaway.  The console repeats that bound as a literal
-    so the message can name a number, and this is where the literal is held to
-    the vendored SDK's own ``MotionConfig`` — a re-vendor that moves the
-    breakaway fails here instead of leaving the operator with stale advice.
+    beat the measured breakaway, or a grip whose approach never moved is refused
+    rather than handed over.  At 2 N the console's floor sat *inside* that band
+    — a part already against the open jaw was refused — so the floor now clears
+    it.  This is where the two are held together: recomputed from the vendored
+    SDK's own ``MotionConfig``, so a re-vendor that moves the breakaway fails
+    here rather than on the bench.
     """
 
-    def test_it_clears_the_budget_below_which_the_sdk_refuses(self) -> None:
-        """Normalised per newton, so the SDK's coefficients are the source."""
+    def test_the_console_floor_clears_the_budget_the_sdk_refuses_below(self) -> None:
         import litegrip
 
         motion = litegrip.MotionConfig()
@@ -354,28 +355,16 @@ class TestTheNoBiteFloor:
             litegrip.UnitConversion.N_TO_NM * motion.press_safety
         )
 
-        assert constants.GRASP_NO_BITE_FLOOR_N > floor_n, (
-            "控制台提示的力度低于 SDK 判拒夹的门槛，照着提示调还是会被拒"
+        assert constants.FORCE_MIN_N > floor_n, (
+            "控制台的力度下限落在 SDK 判拒夹的区间里：工件贴住张开侧时会被拒"
         )
 
-    def test_it_is_the_smallest_half_newton_above_the_bound(self) -> None:
-        """Rounded up to a number the setpoint box can hold, and no further:
-        advice that overshoots the bound squeezes a delicate part harder than
-        the SDK's own rule requires."""
-        import litegrip
-
-        motion = litegrip.MotionConfig()
-        floor_n = motion.breakaway_nm / (
-            litegrip.UnitConversion.N_TO_NM * motion.press_safety
-        )
-
-        assert constants.GRASP_NO_BITE_FLOOR_N == math.ceil(floor_n * 2) / 2
-
-    def test_the_console_minimum_is_below_it(self) -> None:
-        """The reason the refusal is reachable at all: 2 N, the console's own
-        floor, is inside the band the SDK refuses.  If this ever stops being
-        true the message becomes unreachable and should go."""
-        assert constants.FORCE_MIN_N < constants.GRASP_NO_BITE_FLOOR_N
+    def test_the_floor_is_three_newtons(self) -> None:
+        """The bench asked for it: 2 N and then 2.5 N both still took a
+        marginal grip on this unit (2026-11-02), so the floor is 3 N.  A
+        literal rather than a derivation — the margin over the SDK's 2.22 N
+        bound is the bench's, not the formula's."""
+        assert constants.FORCE_MIN_N == 3.0
 
 
 class TestErrorText:

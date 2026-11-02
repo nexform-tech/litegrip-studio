@@ -101,16 +101,23 @@ FORCE_MAX_N = 40.0  # mechanical rating — hard UI cap
 # lower setpoint was spent before the approach had travelled anywhere and the
 # stall detector read the lost motion as an obstruction.  The grip now runs
 # through the SDK's ``grasp()``, whose approach is force-budgeted (see
-# ``force_approach_terms`` upstream) and was validated on this bench down to
-# 2 N, so that floor no longer applies.  What is left is a bound that keeps the
-# number meaningful: zero is a mode ("no force limit"), not a grip.  A setpoint
-# under the floor is served as the floor rather than as asked, and the window
-# does not offer one; either way the number on screen is the number pressed.
-# One case is below the SDK's own floor and is refused rather than served: a
-# grip whose approach never moves (a part already against the open jaw, or a
-# re-grasp in place after ``release(abort=True)``) needs a budget above the
-# breakaway, and 2 N's 0.18 N·m is not — see ``GRASP_NO_BITE_FLOOR_N``.
-FORCE_MIN_N = 2.0
+# ``force_approach_terms`` upstream), so that floor no longer applies.  What is
+# left is a bound that keeps the number meaningful — zero is a mode ("no force
+# limit"), not a grip — and one the bench has a say in: 2 N was tried after the
+# SDK change and is marginal, and 2.5 N still took a marginal grip on this unit
+# (2026-11-02), so the floor is 3 N.  A setpoint under the floor is served as the
+# floor rather than as asked, and the window does not offer one; either way the
+# number on screen is the number pressed.
+#
+# The floor also has to stay clear of the SDK's own refusal: a grip whose
+# approach never moves (a part already against the open jaw, or a re-grasp in
+# place after ``release(abort=True)``) is refused rather than handed over when
+# its approach budget — ``force × 0.1 N·m/N × 0.9`` — cannot beat the measured
+# breakaway, 0.2 N·m, which is 2.22 N of setpoint.  3 N clears that with margin,
+# so the console cannot ask for a grip the SDK will refuse.  ``tests/test_units.py``
+# recomputes the bound from the vendored ``MotionConfig``, so a re-vendor that
+# moves the breakaway fails there rather than at the bench.
+FORCE_MIN_N = 3.0
 FORCE_SOFT_WARN_N = 35.0
 FORCE_DEFAULT_N = 12.0
 # tau_max 10 Nm × NM_TO_N.  Display only, as a grey unselectable annotation —
@@ -118,17 +125,6 @@ FORCE_DEFAULT_N = 12.0
 FORCE_THEORETICAL_MAX_N = 100.0
 
 GRASP_STALL_CYCLES = 20
-
-# The setpoint above which a grip whose approach never moved is read as contact
-# rather than refused.  The SDK refuses that case (``GraspResult.no_bite``) when
-# the approach budget — ``force × 0.1 N·m/N × 0.9`` — is under the measured
-# breakaway, 0.2 N·m: 0.2 / (0.1 × 0.9) = 2.22 N.  Rounded up, because the
-# setpoint the operator asks for should clear the floor rather than sit on it.
-# It is the number the refusal message names, and the one case where
-# ``FORCE_MIN_N`` does not produce a grip.  ``tests/test_units.py`` recomputes
-# the bound from the vendored SDK's own ``MotionConfig``, so a re-vendor that
-# moves the breakaway fails there rather than at the bench.
-GRASP_NO_BITE_FLOOR_N = 2.5
 
 # How far 放开 opens, to let go of what the jaws are holding.  The distance is
 # the *clearance* the object gets, which is what fixes what it is measured from.

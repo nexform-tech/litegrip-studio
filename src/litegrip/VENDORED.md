@@ -96,15 +96,16 @@ under `src/litegrip/` changed, no calibration file and no example shipped here.
   sits at the open jaw behaves as before.
 - **`MoveResult.no_bite` and `GraspResult.no_bite` are new fields**, appended, and documented in the
   README's result tables rather than added to a config comment only.
-- **This console reads it.** `_report_grasp` in `core/worker.py` names the refusal and the force that
-  would not be refused (`constants.GRASP_NO_BITE_FLOOR_N`, 2.5 N, the smallest half newton whose
-  0.9× budget clears the breakaway). The console's own minimum setpoint, `FORCE_MIN_N = 2.0`, is
-  *inside* the refused band: a grip there still works whenever the approach travels, but a part
-  already against the open jaw, or a re-grasp in place after `release(abort=True)` (which sends no
-  opening move), is refused rather than reported as a hold. That is the intended trade — the
-  alternative was the fast close — and the message says what to do. `tests/test_units.py` recomputes
-  the bound from the vendored `MotionConfig`, so a re-vendor that moves the breakaway fails there
-  rather than leaving stale advice on screen.
+- **This console reads it.** `_report_grasp` in `core/worker.py` names the refusal and the force to
+  use (`constants.FORCE_MIN_N`), raised as a `grasp_refusal` alert that the next command retires
+  rather than a sticky one, because it reports the attempt that just ended. The console's minimum
+  setpoint was 2 N and that sat *inside* the refused band — a part already against the open jaw, or
+  a re-grasp in place after `release(abort=True)` (which sends no opening move), was refused — so
+  the floor is now 3 N: 2 N and 2.5 N both still took a marginal grip on this unit (2026-11-02), and
+  3 N's 0.27 N·m budget clears the 0.2 N·m breakaway with margin, which makes the refusal
+  unreachable from the console's own setpoint box. `tests/test_units.py` recomputes the refusal
+  bound from the vendored `MotionConfig` and holds `FORCE_MIN_N` above it, so a re-vendor that moves
+  the breakaway fails there rather than leaving a console that can ask for a refused grip.
 - Upstream's `examples/grasp_test.py` and `README*` changes in the same commit are not vendored.
 
 Step 5 of the recipe below is a no-op for this move: no shipped calibration file changed.
