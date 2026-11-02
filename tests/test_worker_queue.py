@@ -3449,11 +3449,60 @@ class TestTheSdkGrip:
 
         said = "".join(bench.signals.alerts())
         assert "拒" in said, f"the refusal was not named: {bench.signals.alerts()}"
-        assert f"{constants.GRASP_NO_BITE_FLOOR_N:.1f} N" in said, (
+        assert f"{constants.FORCE_MIN_N:.1f} N" in said, (
             "the refusal has to name a force that would not be refused"
         )
         assert "夹取未完成" not in said, (
             "a refusal is not an unfinished grip — nothing was held to finish"
+        )
+
+    def test_the_refusal_banner_goes_when_the_operator_does_anything_else(self) -> None:
+        """It reports the grip that just ended, not a state the gripper is in.
+        Left sticky until the next alert replaced it, the banner went on telling
+        the operator to raise the force after they already had."""
+        bench = self._bench()
+        backend = bench.backend
+        backend.no_bite = True
+        backend.grasp_release.set()
+        bench.send(cmd.Grasp(force_n=constants.FORCE_MIN_N))
+        self._wait_for_action(bench)
+
+        assert "拒" in bench.signals.alerts()[-1]
+        assert not bench.signals.has("alert_cleared")
+
+        bench.send(cmd.BackOff())
+        self._wait_for_action(bench)
+
+        assert bench.signals.has("alert_cleared"), (
+            "the banner outlived the command that answered it"
+        )
+
+    def test_a_heartbeat_is_not_the_operator_and_retires_nothing(self) -> None:
+        """The window's heartbeat is a timer.  If it could clear the banner the
+        refusal would vanish a few hundred milliseconds after it appeared."""
+        bench = self._bench()
+        bench.loop._alert("warn", "夹取被拒：测试", kind="grasp_refusal")
+
+        bench.send(cmd.Heartbeat())
+
+        assert not bench.signals.has("alert_cleared")
+
+    def test_a_second_refusal_replaces_the_first_and_stays(self) -> None:
+        bench = self._bench()
+        backend = bench.backend
+        backend.no_bite = True
+        backend.grasp_release.set()
+
+        bench.send(cmd.Grasp(force_n=constants.FORCE_MIN_N))
+        self._wait_for_action(bench)
+        clears = len(bench.signals.of("alert_cleared"))
+
+        bench.send(cmd.Grasp(force_n=constants.FORCE_MIN_N))
+        self._wait_for_action(bench)
+
+        assert "拒" in bench.signals.alerts()[-1]
+        assert len(bench.signals.of("alert_cleared")) == clears + 1, (
+            "the banner the second attempt replaced should have been retired once"
         )
 
     def test_a_grip_that_bit_is_still_reported_as_a_finished_hold(self) -> None:

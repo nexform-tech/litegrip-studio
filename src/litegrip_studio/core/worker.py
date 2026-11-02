@@ -985,6 +985,15 @@ class WorkerLoop:
     def _apply(self, command: AnyCommand) -> None:  # noqa: C901 - a dispatch table
         self._log("debug", f"命令: {command.describe()}")
 
+        # A refused grip reports the attempt that just ended, not a state the
+        # gripper is still in, so the operator asking for anything else is what
+        # makes it stale.  Left to the banner's default rule — sticky until
+        # another alert replaces it — a console that had already been told to
+        # raise the force went on saying so.  The heartbeat is a timer rather
+        # than the operator, so it cannot retire anything.
+        if self._alert_kind == "grasp_refusal" and not isinstance(command, cmd.Heartbeat):
+            self._clear_alert()
+
         # An SDK action owns the axis while it runs.  Any command that would
         # touch it has to end that action first: the FSM sending frames beside
         # the SDK's loop is the interleaving the backend's one-thread claim
@@ -1305,11 +1314,14 @@ class WorkerLoop:
             # and the force budget could not have moved them, so "the grip did
             # not finish" would point the operator at the wrong thing: nothing
             # was held, nothing is between the jaws that this budget can prove,
-            # and the remedy is more force, not a retry.
+            # and the remedy is more force, not a retry.  Tagged because it is
+            # about the attempt that just ended rather than a state of the
+            # gripper: the next command retires it (see ``_apply``).
             self._alert(
                 "warn",
                 f"夹取被拒：夹爪没能从起点挪动，力度不足以离开静摩擦{where}；"
-                f"把夹持力调到 {constants.GRASP_NO_BITE_FLOOR_N:.1f} N 以上再试",
+                f"把夹持力调到 {constants.FORCE_MIN_N:.1f} N 以上再试",
+                kind="grasp_refusal",
             )
         elif bool(getattr(result, "released", False)):
             self._log("info", f"夹取已松开{where}")
@@ -2237,11 +2249,14 @@ class WorkerLoop:
         saying something that stopped being true (see :meth:`_track_alert`).
         ``"refusal"`` is for an alert whose whole content is "the console will
         not move, and why"; ``"fault"`` is set by :meth:`_service_faults`, which
-        alerts through its own signal.  Everything else — a command that raised,
-        a save that failed, a probe that ended — reports an *event*, which never
-        becomes untrue, and stays on the banner until the next alert replaces
-        it.  That is the default, so a new alert is sticky until someone decides
-        otherwise in so many words.
+        alerts through its own signal; ``"grasp_refusal"`` is an event the
+        console can still retire, because it reports the grip that just ended
+        and the operator acting again is the answer to it (see :meth:`_apply`).
+        Everything else — a command that raised, a save that failed, a probe
+        that ended — reports an *event*, which never becomes untrue, and stays
+        on the banner until the next alert replaces it.  That is the default,
+        so a new alert is sticky until someone decides otherwise in so many
+        words.
         """
         self._note_alert(kind)
         self._signals.alert.emit(level, text)
@@ -2293,6 +2308,10 @@ class WorkerLoop:
         * ``refusal`` — the reason motion is refused changes, which includes it
           going away.  Compared by clause, not by sentence: see
           :meth:`_refusal_clause`.
+
+        ``grasp_refusal`` has no edge here: it is about the attempt that just
+        ended, and nothing on the tick says the operator has read it.  The next
+        command does, so :meth:`_apply` retires it.
         """
         if self._alert_kind == "fault":
             if not tele.is_error:
