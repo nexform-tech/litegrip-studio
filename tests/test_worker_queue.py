@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import threading
 import time
 from types import SimpleNamespace
@@ -3353,6 +3354,10 @@ class SdkGripBackend(RecordingBackend):
         #: What a grip reports after it is released.  ``False`` is a hold that
         #: ended some other way (fault, travel guard).
         self.released = True
+        #: The SDK's refusal: the approach never left its start and the budget
+        #: could not have moved it.  ``ok`` is ``False`` with it, as upstream
+        #: reports it, and the grip returns at once rather than holding.
+        self.no_bite = False
 
     def grasp(self, force_n, *, hold_s: float = 0.0):
         self._claim()
@@ -3360,7 +3365,8 @@ class SdkGripBackend(RecordingBackend):
         self.grasp_entered.set()
         assert self.grasp_release.wait(2.0), "the test never released the grip"
         return SimpleNamespace(
-            ok=True,
+            ok=not self.no_bite,
+            no_bite=self.no_bite,
             released=self.released,
             state=SimpleNamespace(position_mm=self._limits.to_mm(self.q_rad)),
         )
@@ -3426,6 +3432,96 @@ class TestTheSdkGrip:
         assert bench.loop.motion.state is MotionState.IDLE
         assert backend.names().count("stream_frame") == sent_before, (
             "the FSM streamed a second frame beside the SDK's grip"
+        )
+
+    def test_a_refused_grip_is_reported_as_a_refusal_not_an_unfinished_hold(self) -> None:
+        """``no_bite`` is the SDK saying "I could not tell whether anything was
+        there", and the remedy is more force.  Reported as a plain failed grip
+        it reads as a hardware problem and the operator retries at the same
+        setpoint that was refused."""
+        bench = self._bench()
+        backend = bench.backend
+        backend.no_bite = True
+        # A refusal returns at once — there is no hold for the test to end.
+        backend.grasp_release.set()
+
+        bench.send(cmd.Grasp(force_n=constants.FORCE_MIN_N))
+        self._wait_for_action(bench)
+
+        said = "".join(bench.signals.alerts())
+        assert "拒" in said, f"the refusal was not named: {bench.signals.alerts()}"
+        assert "调大夹取力" in said, (
+            "the refusal has to say what to do about it"
+        )
+        assert not re.search(r"\d+(?:\.\d+)?\s*N", said), (
+            "the banner names a setpoint again: it moves with the floor, and the"
+            " operator reading it is already looking at the setpoint box"
+        )
+        assert "夹取未完成" not in said, (
+            "a refusal is not an unfinished grip — nothing was held to finish"
+        )
+
+    def test_the_refusal_banner_goes_when_the_operator_does_anything_else(self) -> None:
+        """It reports the grip that just ended, not a state the gripper is in.
+        Left sticky until the next alert replaced it, the banner went on telling
+        the operator to raise the force after they already had."""
+        bench = self._bench()
+        backend = bench.backend
+        backend.no_bite = True
+        backend.grasp_release.set()
+        bench.send(cmd.Grasp(force_n=constants.FORCE_MIN_N))
+        self._wait_for_action(bench)
+
+        assert "拒" in bench.signals.alerts()[-1]
+        assert not bench.signals.has("alert_cleared")
+
+        bench.send(cmd.BackOff())
+        self._wait_for_action(bench)
+
+        assert bench.signals.has("alert_cleared"), (
+            "the banner outlived the command that answered it"
+        )
+
+    def test_a_heartbeat_is_not_the_operator_and_retires_nothing(self) -> None:
+        """The window's heartbeat is a timer.  If it could clear the banner the
+        refusal would vanish a few hundred milliseconds after it appeared."""
+        bench = self._bench()
+        bench.loop._alert("warn", "夹取被拒：测试", kind="grasp_refusal")
+
+        bench.send(cmd.Heartbeat())
+
+        assert not bench.signals.has("alert_cleared")
+
+    def test_a_second_refusal_replaces_the_first_and_stays(self) -> None:
+        bench = self._bench()
+        backend = bench.backend
+        backend.no_bite = True
+        backend.grasp_release.set()
+
+        bench.send(cmd.Grasp(force_n=constants.FORCE_MIN_N))
+        self._wait_for_action(bench)
+        clears = len(bench.signals.of("alert_cleared"))
+
+        bench.send(cmd.Grasp(force_n=constants.FORCE_MIN_N))
+        self._wait_for_action(bench)
+
+        assert "拒" in bench.signals.alerts()[-1]
+        assert len(bench.signals.of("alert_cleared")) == clears + 1, (
+            "the banner the second attempt replaced should have been retired once"
+        )
+
+    def test_a_grip_that_bit_is_still_reported_as_a_finished_hold(self) -> None:
+        bench = self._bench()
+        backend = bench.backend
+        backend.released = False  # ended without a release request
+        backend.grasp_release.set()
+
+        bench.send(cmd.Grasp(force_n=12.0))
+        self._wait_for_action(bench)
+
+        assert "夹取保持结束" in "".join(bench.signals.logs())
+        assert not bench.signals.alerts(), (
+            "a hold that ended normally is not something to warn about"
         )
 
     def test_back_off_asks_the_live_grip_to_release(self) -> None:

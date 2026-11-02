@@ -207,11 +207,12 @@ read as a move that has gone badly wrong.
 
 **速度** is the travel speed, 5–150 mm/s and 50 mm/s by default.
 
-**夹持力** is the force limit for a grasp, 2–40 N. The box turns orange above 35 N and red at 40 N,
+**夹持力** is the force limit for a grasp, 3–40 N. The box turns orange above 35 N and red at 40 N,
 which is the mechanism's rating rather than a target to aim at. The lower end is the smallest
-setpoint the console offers. A grip now runs through the SDK's force-budgeted `grasp()`, which
-works down to 2 N on this bench, so the console no longer holds a request at the old 6 N floor.
-Ask for less and the box stops you at 2 N. Two buttons sit with it:
+setpoint the console offers. A grip runs through the SDK's force-budgeted `grasp()`, so the old 6 N
+floor no longer applies; the floor is 3 N because 2 N and 2.5 N both still took a marginal grip on
+this unit (2026-11-02), and because the SDK refuses a grip whose approach never moves below 2.2 N of
+setpoint. Ask for less and the box stops you at 3 N. Two buttons sit with it:
 
 | Button | What it does |
 | --- | --- |
@@ -428,11 +429,13 @@ The simulated backend refuses it outright, reporting 本后端不支持标零.
   that constant and re-probing — there is no flag, setting or widget for it.
 - **The force limit is the 40 N mechanical rating**, in `constants.FORCE_MAX_N`. The theoretical
   100 N appears only as a greyed-out comment.
-- **The smallest force you can ask for is 2 N**, in `constants.FORCE_MIN_N`. The grip is the SDK's
-  force-budgeted `grasp()`, which was validated on this bench at 2 N; the console's floor only
-  keeps zero from meaning "a very light grip" — zero is the mode that says "no force limit". The
-  simulator still runs the console's own FSM, and its contact detector needs about 6 N, so a
-  simulated 2 N grip may declare contact late. That limitation does not apply to the real gripper.
+- **The smallest force you can ask for is 3 N**, in `constants.FORCE_MIN_N`. The grip is the SDK's
+  force-budgeted `grasp()`, and 2 N then 2.5 N each still took a marginal grip on this unit
+  (2026-11-02), so the floor is 3 N; it also has to clear the 2.2 N of setpoint below which the SDK
+  refuses a grip whose approach never moved. The floor keeps zero from meaning "a very light grip" —
+  zero is the mode that says "no force limit". The simulator still runs the console's own FSM, and
+  its contact detector needs about 6 N, so a simulated grip near the floor may declare contact late.
+  That limitation does not apply to the real gripper.
 - **The top of the range stops 1 mm inside the recorded open limit.** The probe presses the open
   stop out under 40 N and the linkage gives about 1 mm under that force, so commanding the recorded
   limit directly would press the stop on every full opening. The closed end is not inset: 0 is the

@@ -218,6 +218,12 @@ without having travelled — and a 1 N one at 84.90 mm, 44.9 mm short of an obje
 which force mode drew the jaws the rest of the way and **Let go**, which measures from the pose the
 grip was made at, opened 45 mm further than it promises.
 
+The floor is **3 N** today, and its reason is measured rather than derived. The grip goes through the
+SDK's force-budgeted `grasp()`, and on this unit 2 N and then 2.5 N both still took a marginal grip
+(2026-11-02). The SDK also refuses, rather than hands over, a grip whose approach never moves when
+its budget cannot beat the measured breakaway — 0.2 N·m at 0.9× is 2.22 N of setpoint — which is
+what a part already against the open jaw needs. 3 N clears both.
+
 `SPEED_MIN_MM_S` is the other half of the same rule: the slowest speed that breaks the jaws away from
 rest, and lowering it trades the one case it covers for a stall that every contact detector reads as
 an obstruction. The speed a setpoint still decides is the one whose tick's own step `kp·v·dt` would
