@@ -96,9 +96,10 @@ under `src/litegrip/` changed, no calibration file and no example shipped here.
   sits at the open jaw behaves as before.
 - **`MoveResult.no_bite` and `GraspResult.no_bite` are new fields**, appended, and documented in the
   README's result tables rather than added to a config comment only.
-- **This console reads it.** `_report_grasp` in `core/worker.py` names the refusal and the force to
-  use (`constants.FORCE_MIN_N`), raised as a `grasp_refusal` alert that the next command retires
-  rather than a sticky one, because it reports the attempt that just ended. The console's minimum
+- **This console reads it.** `_report_grasp` in `core/worker.py` names the refusal and asks for a
+  larger grip force — no number, since the floor it would quote moves — raised as a `grasp_refusal`
+  alert that the next command retires rather than a sticky one, because it reports the attempt that
+  just ended. The console's minimum
   setpoint was 2 N and that sat *inside* the refused band — a part already against the open jaw, or
   a re-grasp in place after `release(abort=True)` (which sends no opening move), was refused — so
   the floor is now 3 N: 2 N and 2.5 N both still took a marginal grip on this unit (2026-11-02), and

@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import threading
 import time
 from types import SimpleNamespace
@@ -3449,8 +3450,12 @@ class TestTheSdkGrip:
 
         said = "".join(bench.signals.alerts())
         assert "拒" in said, f"the refusal was not named: {bench.signals.alerts()}"
-        assert f"{constants.FORCE_MIN_N:.1f} N" in said, (
-            "the refusal has to name a force that would not be refused"
+        assert "调大夹取力" in said, (
+            "the refusal has to say what to do about it"
+        )
+        assert not re.search(r"\d+(?:\.\d+)?\s*N", said), (
+            "the banner names a setpoint again: it moves with the floor, and the"
+            " operator reading it is already looking at the setpoint box"
         )
         assert "夹取未完成" not in said, (
             "a refusal is not an unfinished grip — nothing was held to finish"

@@ -1320,7 +1320,7 @@ class WorkerLoop:
             self._alert(
                 "warn",
                 f"夹取被拒：夹爪没能从起点挪动，力度不足以离开静摩擦{where}；"
-                f"把夹持力调到 {constants.FORCE_MIN_N:.1f} N 以上再试",
+                "请调大夹取力后再试",
                 kind="grasp_refusal",
             )
         elif bool(getattr(result, "released", False)):
