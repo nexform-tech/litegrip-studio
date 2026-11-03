@@ -135,16 +135,16 @@ Unplug the adapter and plug it back in, or run `sudo modprobe -r gs_usb && sudo 
 which does the same thing without touching the cable — and which takes every `gs_usb` interface on
 the machine down with it. The console does this by itself when 连接 hits it.
 
-## 4. Calibrate before you move anything
+## 4. Calibration (usually not needed)
 
-The console starts on the **factory calibration file bundled with the SDK**, which was recorded on
-the unit it ships with. Another gripper of the same design is not a different machine: the readings
-are the right order of magnitude and the ends of the travel are roughly where you expect them. What
-differs between two units is their manufacturing tolerance — the jaws, the linkage, the encoder
-zero — so a reading can be a little off, and removing that is what a calibration is for.
+The console starts on the **factory calibration file bundled with the SDK**. It ships with the
+gripper and was recorded against the measured travel, so **you can connect, enable and use the
+gripper directly — no recalibration is required by default.**
 
-So on real hardware, run 自动标定 from the 标定 tab before you rely on the numbers. Until a
-calibration belongs to *your* gripper, treat what is on screen as close rather than exact.
+If the gripper does not feel right in use — the position reading disagrees with a caliper across the
+jaws, the ends of the travel are out of reach, the motion stutters, or grasps are inconsistently
+tight — run 自动标定 from the 标定 tab once to replace the factory numbers with ones belonging to
+*your* gripper. Until then, treat what is on screen as close rather than exact.
 
 If the calibration page shows 运动闸门：已阻断 (`BLOCKED`), nothing will move until you deal with it.
 That is the design: the console refuses motion rather than driving by numbers it cannot vouch for.
