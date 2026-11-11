@@ -29,6 +29,7 @@ from litegrip_studio.core.commands import (
     RecordOpenLimit,
     Release,
     SaveCalibration,
+    SelectChannel,
     SetForce,
     SetSpeed,
     StartGuidedCalibration,
@@ -81,6 +82,8 @@ class TestDescribe:
         "cmd",
         [
             Connect(),
+            SelectChannel("can1"),
+            SelectChannel("can1", "/tmp/can1.json"),
             Open(),
             Close(),
             Close(force_n=12.0),

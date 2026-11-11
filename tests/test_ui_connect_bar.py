@@ -225,3 +225,82 @@ class TestWhatItSends:
 
         assert "仿真" in bar._target.text()
         assert "已连接" in bar._conn_label.text()
+
+
+class TestTheChannelPicker:
+    """The CAN interface dropdown, which is how the bus is chosen now.
+
+    It is hidden until a backend has an interface to name — the simulator has
+    none, and a dropdown with one entry that never changes is furniture.
+    """
+
+    def test_it_is_hidden_until_someone_names_an_interface(self, bar) -> None:
+        assert bar._channel_row.isHidden()
+
+        bar.set_channels("can0", ["can0", "can1"])
+
+        assert not bar._channel_row.isHidden()
+
+    def test_the_current_interface_leads_and_the_rest_follow(self, bar) -> None:
+        """It leads because it is what the console is already running on, and it
+        is offered even when sysfs does not list it — ``--can-channel`` may name
+        an adapter whose driver has not loaded yet."""
+        bar.set_channels("can1", ["can0", "can1", "can2"])
+
+        texts = [bar._channel.itemText(i) for i in range(bar._channel.count())]
+        assert texts == ["can1", "can0", "can2"]
+
+    def test_a_machine_with_no_interfaces_still_shows_the_current_one(self, bar) -> None:
+        bar.set_channels("can0", [])
+
+        assert bar._channel.currentText() == "can0"
+        assert not bar._channel_row.isHidden()
+
+    def test_choosing_one_submits_the_switch_with_its_own_file(self, qapp) -> None:
+        recorder = Recorder()
+        bar = ConnectBar(recorder, path_for=lambda channel: f"/tmp/{channel}.json")
+        bar.set_channels("can0", ["can0", "can1"])
+
+        bar._channel.setCurrentText("can1")
+
+        assert recorder.last() == cmd.SelectChannel("can1", "/tmp/can1.json")
+
+    def test_filling_the_list_is_not_a_choice(self, qapp) -> None:
+        """Opening the window must not look like the operator picked the
+        interface it already had."""
+        recorder = Recorder()
+        bar = ConnectBar(recorder)
+
+        bar.set_channels("can0", ["can0", "can1"])
+
+        assert recorder.commands == []
+
+    def test_syncing_the_selection_sends_nothing(self, qapp) -> None:
+        """The worker says what is in force; echoing that back as a command
+        would be a loop of switch requests."""
+        recorder = Recorder()
+        bar = ConnectBar(recorder)
+        bar.set_channels("can0", ["can0"])
+
+        bar.sync_channel("can5")
+
+        assert bar._channel.currentText() == "can5"
+        assert recorder.commands == []
+
+    @pytest.mark.parametrize("state", [CONN_CONNECTED, CONN_CONNECTING])
+    def test_it_is_not_offered_under_a_live_link(self, bar, state: str) -> None:
+        """Switching mid-session would move the next connection to another bus
+        without saying so; the operator disconnects first."""
+        bar.set_channels("can0", ["can0", "can1"])
+
+        bar.set_conn_state(state)
+
+        assert not bar._channel.isEnabled()
+
+    def test_it_comes_back_once_disconnected(self, bar) -> None:
+        bar.set_channels("can0", ["can0", "can1"])
+        bar.set_conn_state(CONN_CONNECTED)
+
+        bar.set_conn_state(CONN_DISCONNECTED)
+
+        assert bar._channel.isEnabled()

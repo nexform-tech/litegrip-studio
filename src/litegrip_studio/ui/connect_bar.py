@@ -16,8 +16,11 @@ interesting part is the thresholds, not the widget.
 
 from __future__ import annotations
 
+from typing import Sequence
+
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
+    QComboBox,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -111,9 +114,13 @@ def fault_state(frame: TelemetryFrame) -> tuple[str, str]:
 class ConnectBar(QWidget):
     """Connection, power and fault controls, plus the two status dots."""
 
-    def __init__(self, submit, parent: QWidget | None = None) -> None:
+    def __init__(self, submit, path_for=None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._submit = submit
+        #: The remembered calibration path for a channel, or None.  The window
+        #: owns the settings and hands the question over; the bar only carries
+        #: the answer with the command.
+        self._path_for = path_for or (lambda _channel: None)
         self._frame = EMPTY_FRAME
         self._conn = "DISCONNECTED"
         self._conn_detail = ""
@@ -126,6 +133,21 @@ class ConnectBar(QWidget):
 
         self._conn_label = QLabel()
         self._conn_label.setTextFormat(Qt.RichText)
+
+        # Hidden until a backend says it has interfaces to choose from: the
+        # simulator has none, and a dropdown with one entry that never changes
+        # is furniture.
+        self._channel = QComboBox()
+        self._channel.setMinimumWidth(96)
+        self._channel.currentTextChanged.connect(self._on_channel_chosen)
+        self._channel_row = QWidget()
+        channel_layout = QHBoxLayout(self._channel_row)
+        channel_layout.setContentsMargins(0, 0, 0, 0)
+        channel_layout.setSpacing(8)
+        channel_layout.addWidget(QLabel("CAN 口"))
+        channel_layout.addWidget(self._channel)
+        channel_layout.addStretch(1)
+        self._channel_row.hide()
 
         self._link_dot = StatusDot("idle", "未使能")
         self._fault_dot = StatusDot("ok", "无故障")
@@ -177,9 +199,18 @@ class ConnectBar(QWidget):
         chips.addWidget(self._fault_dot, 0)
         chips.addStretch(1)
 
+        # The picker sits beside the link description rather than on a line of
+        # its own: it is about *which* link, the same question the description
+        # answers, and a separate row costs height on a window that already has
+        # a minimum height worth keeping (see ``test_ui_smoke``).
+        target_row = QHBoxLayout()
+        target_row.setSpacing(8)
+        target_row.addWidget(self._target, 1)
+        target_row.addWidget(self._channel_row)
+
         status = QVBoxLayout()
         status.setSpacing(6)
-        status.addWidget(self._target)
+        status.addLayout(target_row)
         status.addWidget(self._conn_label)
         status.addLayout(chips)
         status.addStretch(1)
@@ -199,6 +230,46 @@ class ConnectBar(QWidget):
     def set_backend_description(self, text: str) -> None:
         self._description = text
         self.restyle()
+
+    def set_channels(self, current: str, available: Sequence[str] = ()) -> None:
+        """Offer *current* first, then the interfaces found on this machine.
+
+        The current one leads because it is the answer the console is already
+        running on, and it has to be offered even when it is not in the list:
+        ``--can-channel`` may name an adapter whose driver has not loaded yet,
+        and the operator still has to be able to see what it is pointed at.
+        """
+        names = [current] if current else []
+        names += [name for name in available if name and name != current]
+        self._channel.blockSignals(True)
+        self._channel.clear()
+        self._channel.addItems(names)
+        if current:
+            self._channel.setCurrentText(current)
+        self._channel.blockSignals(False)
+        self._channel_row.setVisible(bool(names))
+        self._refresh()
+
+    def sync_channel(self, channel: str) -> None:
+        """Show *channel* as the selection without asking for a switch."""
+        if not channel:
+            return
+        self._channel.blockSignals(True)
+        if self._channel.findText(channel) < 0:
+            self._channel.addItem(channel)
+        self._channel.setCurrentText(channel)
+        self._channel.blockSignals(False)
+        self._refresh()
+
+    def _on_channel_chosen(self, channel: str) -> None:
+        if not channel:
+            return
+        self._submit(
+            cmd.SelectChannel(
+                channel=channel,
+                calibration_path=self._path_for(channel),
+            )
+        )
 
     def set_conn_state(self, state: str, detail: str = "") -> None:
         """``state`` is one of the worker's ``CONN_*`` values."""
@@ -246,6 +317,9 @@ class ConnectBar(QWidget):
 
         self._connect.setEnabled(not connected and not busy)
         self._connect.setText("连接中…" if busy else "连接")
+        # Switching under a live link would move the next connection to another
+        # bus without saying so; the operator disconnects first.
+        self._channel.setEnabled(not connected and not busy)
         self._disconnect.setEnabled(connected)
         self._enable.setEnabled(connected and not frame.enabled and not estopped)
         self._disable.setEnabled(connected and frame.enabled)

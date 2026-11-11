@@ -40,6 +40,7 @@ palette moved.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QKeySequence
@@ -86,10 +87,15 @@ class MainWindow(QMainWindow):
     """Tabs, the E-stop, the log dock and the wiring between worker and pages."""
 
     def __init__(self, worker, settings: Settings | None = None,
+                 channels: Sequence[str] = (),
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.worker = worker
         self._settings = settings
+        #: The SocketCAN interfaces found at launch.  The window only offers a
+        #: picker when the backend has a channel to switch; the simulator has
+        #: none and the list is empty for it.
+        self._channels = tuple(channels)
         self._estopped = False
         self._gate: GateState | None = None
         self._lines: list[tuple[str, str]] = []
@@ -99,7 +105,7 @@ class MainWindow(QMainWindow):
         self.status_page = StatusPage(worker.submit)
         self.plots_page = PlotsPage()
         self.calibration_page = CalibrationPage(worker.submit, settings)
-        self.connect_bar = ConnectBar(worker.submit)
+        self.connect_bar = ConnectBar(worker.submit, path_for=self._calibration_path_for)
 
         self.alert_banner = Banner()
         self.estop_banner = Banner()
@@ -292,6 +298,7 @@ class MainWindow(QMainWindow):
         worker.telemetry.connect(self._on_telemetry)
         worker.motion_state.connect(self._on_motion_state)
         worker.conn_state.connect(self._on_conn_state)
+        worker.channel_changed.connect(self._on_channel_changed)
         worker.fault.connect(self._on_fault)
         worker.gate_state.connect(self._on_gate_state)
         worker.calib_info.connect(self._on_calib_info)
@@ -327,6 +334,27 @@ class MainWindow(QMainWindow):
 
     def start(self) -> None:
         """Show what the backend is, before a single frame has arrived."""
+        description = getattr(self.worker.backend, "describe", None)
+        if callable(description):
+            self.connect_bar.set_backend_description(description())
+        channel = str(getattr(self.worker.backend, "channel", "") or "")
+        if channel:
+            self.connect_bar.set_channels(channel, self._channels)
+
+    def _calibration_path_for(self, channel: str) -> str | None:
+        """The file *channel* remembers, for a switch the operator asks for."""
+        if self._settings is None:
+            return None
+        return self._settings.calibration_path_for(channel)
+
+    def _on_channel_changed(self, channel: str) -> None:
+        """Follow the interface the worker actually ended up on.
+
+        The dropdown cannot know the answer when it posts the command, and a
+        refused switch has to put the old value back rather than leave the
+        window claiming a bus the backend never moved to.
+        """
+        self.connect_bar.sync_channel(channel)
         description = getattr(self.worker.backend, "describe", None)
         if callable(description):
             self.connect_bar.set_backend_description(description())

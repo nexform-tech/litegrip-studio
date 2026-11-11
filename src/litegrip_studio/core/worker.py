@@ -1012,6 +1012,8 @@ class WorkerLoop:
             self._connect()
         elif isinstance(command, cmd.Disconnect):
             self._disconnect()
+        elif isinstance(command, cmd.SelectChannel):
+            self._select_channel(command.channel, command.calibration_path)
         elif isinstance(command, cmd.Enable):
             self._enable()
         elif isinstance(command, cmd.Disable):
@@ -1398,6 +1400,34 @@ class WorkerLoop:
         self._log("warn" if outcome.needs_attention else "info", outcome.detail)
         if outcome.needs_attention:
             self._alert("warn", outcome.detail)
+
+    def _select_channel(self, channel: str, calibration_path: str | None) -> None:
+        """Move the console to another CAN interface, before a connection.
+
+        Only the interface identity moves.  What is on the other end is what
+        the calibration file says, and the gate stays shut until one has been
+        loaded there — so the switch resets the calibration display rather than
+        carrying numbers measured on another bus across with it.
+        """
+        if self._connected:
+            self._alert("warn", "请先断开连接，再切换 CAN 口")
+            self._signals.channel_changed.emit(self.backend.channel)
+            return
+        try:
+            self.backend.set_channel(channel, calibration_path=calibration_path)
+        except Exception as exc:  # noqa: BLE001 - reported, never fatal
+            self._alert("error", f"切换 CAN 口失败: {exc}")
+            self._signals.channel_changed.emit(self.backend.channel)
+            return
+        if self._can_link is not None:
+            # The connect-time preparation follows the same interface the SDK
+            # will open; a link left on the old bus would configure can0 and
+            # then have the SDK fail on can1.
+            self._can_link.channel = channel
+        self._motion.set_limits(self.backend.limits())
+        self._refresh_calibration()
+        self._signals.channel_changed.emit(str(getattr(self.backend, "channel", channel)))
+        self._log("info", f"CAN 口已切换为 {channel}；连接前请确认对应夹爪的标定文件")
 
     def _disconnect(self) -> None:
         if not self._connected:
@@ -2420,6 +2450,10 @@ class GripperWorker(QThread):
     motion_state = pyqtSignal(str)
     #: (state, detail) — see the ``CONN_*`` constants.
     conn_state = pyqtSignal(str, str)
+    #: The CAN interface the console is now pointed at.  Emitted after a
+    #: successful switch, and with the unchanged interface when one was refused,
+    #: so the window can retitle the target line and resync its dropdown.
+    channel_changed = pyqtSignal(str)
     #: (code, message, hint)
     fault = pyqtSignal(int, str, str)
     #: (state, reason) — see :class:`GateState`.

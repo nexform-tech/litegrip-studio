@@ -58,6 +58,7 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Sequence
 
 from . import constants
@@ -450,6 +451,50 @@ def manual_hint(device: str, bitrate: int, *, restart_ms: bool = True) -> str:
         f"sudo ip link set {device} down && "
         f"sudo ip link set {device} type can {options} fd off && "
         f"sudo ip link set {device} up"
+    )
+
+
+#: The names a SocketCAN interface can have.  ``vcan`` is the virtual bus the
+#: SDK's own tests and a bench without hardware use, and it is a perfectly real
+#: choice in the window.
+SOCKETCAN_PREFIXES = ("vcan", "can")
+
+#: Where the kernel keeps one directory per network interface.
+_SYS_NET = Path("/sys/class/net")
+
+
+def _interface_sort_key(name: str) -> list[tuple[int, object]]:
+    """Sort ``can2`` before ``can10``, which plain text order gets backwards."""
+    return [
+        (1, int(part)) if part.isdigit() else (0, part)
+        for part in re.split(r"(\d+)", name)
+    ]
+
+
+def socketcan_interfaces(root: str | Path = _SYS_NET) -> list[str]:
+    """The SocketCAN interfaces this machine has, naturally sorted.
+
+    Read from sysfs because it is a directory listing rather than a command:
+    nothing here needs privilege, and a console that asked ``ip`` would have to
+    cope with its absence on the one machine where the question is most useful.
+    An unreadable directory answers ``[]`` — the caller still shows the
+    interface it was launched with, so a board without sysfs loses the list, not
+    the control.
+    """
+    try:
+        entries = list(Path(root).iterdir())
+    except OSError:
+        return []
+    # Each interface is a directory in sysfs (through a symlink), so a stray
+    # file named ``can0`` is not one — offering it would make the combo promise
+    # a bus the kernel does not have.
+    return sorted(
+        (
+            entry.name
+            for entry in entries
+            if entry.name.startswith(SOCKETCAN_PREFIXES) and entry.is_dir()
+        ),
+        key=_interface_sort_key,
     )
 
 

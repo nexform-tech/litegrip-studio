@@ -53,6 +53,23 @@ class Disconnect(Command):
 
 
 @dataclass(frozen=True)
+class SelectChannel(Command):
+    """Point the console at another CAN interface.
+
+    ``calibration_path`` is the file the chosen channel remembers, resolved by
+    the window that holds the settings: the worker must not import them, and a
+    switch that left the previous interface's path in place would save the next
+    probe result over the wrong gripper's calibration.
+    """
+
+    channel: str
+    calibration_path: str | None = None
+
+    def describe(self) -> str:
+        return f"切换 CAN 口到 {self.channel}"
+
+
+@dataclass(frozen=True)
 class Enable(Command):
     def describe(self) -> str:
         return "使能"
@@ -427,6 +444,7 @@ class Shutdown(Command):
 AnyCommand = Union[
     Connect,
     Disconnect,
+    SelectChannel,
     Enable,
     Disable,
     ClearFault,
