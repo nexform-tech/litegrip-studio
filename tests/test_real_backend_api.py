@@ -916,6 +916,38 @@ class TestLoadCalibration:
         assert backend.load_calibration(str(env.user)) is False
         assert any("未能载入" in p for p in backend.calibration_info().problems)
 
+    def test_a_file_for_another_channel_is_refused_before_the_sdk(self, env) -> None:
+        """The SDK applies an explicitly named file without checking the channel
+        in it, and the cross-check compares the file with itself.  The console is
+        the only thing that can see the file belongs to another interface."""
+        stub = StubGripper(GripperConfig(can_channel="can1"))
+        backend = RealBackend(gripper=stub)
+        backend.connect()
+        backend.enable()
+        env.write(env.user, USER_RAW)  # channel: can0
+
+        assert backend.load_calibration(str(env.user)) is False
+
+        assert stub.loaded == [], "the wrong gripper's file reached the SDK"
+        problems = backend.calibration_info().problems
+        assert any("can0" in p and "can1" in p for p in problems)
+        assert backend.stream_frame(1.0, 100.0, 2.0) is False
+
+    def test_the_factory_file_is_allowed_on_another_channel(
+        self, env, monkeypatch
+    ) -> None:
+        """It names can0 because that is the bench it was recorded on; it is
+        still the fallback every gripper is allowed to run on."""
+        monkeypatch.delenv("LITEGRIP_CALIB", raising=False)
+        env.write(env.factory, FACTORY_RAW)
+        stub = StubGripper(GripperConfig(can_channel="can1"))
+        backend = RealBackend(gripper=stub)
+        backend.connect()
+        backend.enable()
+
+        assert backend.load_calibration() is True
+        assert backend.calibration_info().provenance == calibration.PROVENANCE_FACTORY
+
     def test_the_file_may_move_the_can_ids_and_say_so(self, backend, env) -> None:
         """``load_calibration`` overwrites can_id/mst_id/channel/kp/kd from the
         file, so a file describing a different link silently retargets it."""
@@ -948,6 +980,30 @@ class TestSaveCalibration:
         assert after.usable
         assert after.limits == info.limits
         assert backend.stream_frame(1.0, 100.0, 2.0) is True, "the gate is open"
+
+    def test_a_save_with_no_path_lands_on_the_channels_own_file(
+        self, env, monkeypatch
+    ) -> None:
+        """Four instances share a settings file.  A save that falls back to one
+        machine-wide default is how the fourth gripper overwrote the first."""
+        monkeypatch.delenv("LITEGRIP_CALIB", raising=False)
+        monkeypatch.setattr(
+            calibration,
+            "default_user_path",
+            lambda channel="can0": env.dir / f"{channel}_calibration.json",
+        )
+        stub = StubGripper(GripperConfig(can_channel="can1"))
+        backend = RealBackend(gripper=stub)
+        backend.connect()
+        backend.enable()
+        backend.set_calibration_memory(1.775959, -0.064279, 65.21)
+
+        written = backend.save_calibration()
+
+        assert Path(written) == env.dir / "can1_calibration.json"
+        saved = json.loads(Path(written).read_text(encoding="utf-8"))
+        assert saved["channel"] == "can1"
+        assert backend.calibration_info().usable
 
     def test_the_config_carries_our_numbers_before_the_sdk_writes(self, backend, env) -> None:
         """The SDK writes the file from its own config, so anything we forgot to

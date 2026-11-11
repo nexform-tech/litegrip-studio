@@ -9,10 +9,12 @@ to the motor.
 
 These are conveniences rather than interlocks: each one changes what the console
 does, none of them decides whether the motor may move.  The closest is
-:attr:`Settings.calibration_path`, which is not a preference but a record of the
-file the operator loaded — it is what the next start reads instead of the
-default.  Whether that file permits motion is decided from its contents and the
-live reading every time, never from having been chosen once.
+:meth:`Settings.calibration_path_for`, which is not a preference but a record of
+the file the operator loaded — keyed by CAN channel, because one settings file is
+shared by every instance on the machine and the file a can1 gripper loaded must
+not become the target can2 saves to.  Whether that file permits motion is decided
+from its contents and the live reading every time, never from having been chosen
+once.
 """
 
 from __future__ import annotations
@@ -47,7 +49,15 @@ KEY_ALLOW_FACTORY = "safety/allow_factory_calibration"
 KEY_SPEED = "motion/speed_mm_s"
 KEY_FORCE = "motion/force_n"
 KEY_LIVE_FOLLOW = "motion/live_follow"
+#: The single path consoles older than the per-channel keys wrote.  It is still
+#: read once, by :meth:`Settings.calibration_path_for`, so an upgrade does not
+#: forget the bench's file; it is removed as soon as one channel adopts it.
 KEY_CALIBRATION_PATH = "calibration/path"
+
+
+def _calibration_path_key(channel: str) -> str:
+    """The settings key that remembers *channel*'s calibration file."""
+    return f"{KEY_CALIBRATION_PATH}/{channel}"
 #: The measured travel used to be a preference here.  It is a property of the
 #: bench unit rather than a choice, so it is :data:`constants.DEFAULT_TRAVEL_MM`
 #: now — and this key is retired.  Only :data:`RETIRED_KEYS` reads it.
@@ -123,9 +133,8 @@ class Settings:
         self._write(KEY_LIVE_FOLLOW, bool(value))
 
     # ── calibration ─────────────────────────────────────────────────────────
-    @property
-    def calibration_path(self) -> str | None:
-        """The file the operator last loaded, or None to use the default.
+    def calibration_path_for(self, channel: str) -> str | None:
+        """The file *channel* last loaded, or None to use its default.
 
         Written when the operator loads a calibration file and when one is
         applied, and read at startup by
@@ -133,16 +142,42 @@ class Settings:
         so a file that has since gone missing is reported instead of being
         quietly replaced by the factory numbers.  Undone by loading the factory
         file, which is the same as naming nothing.
-        """
-        return self._text(KEY_CALIBRATION_PATH) or None
 
-    @calibration_path.setter
-    def calibration_path(self, value: str | None) -> None:
+        One key per interface.  Four instances share this settings file, and a
+        single key meant the file a can1 gripper loaded also became the target
+        can2's 应用标定 wrote to.
+
+        A console older than the per-channel keys wrote one ``calibration/path``
+        value and it cannot say which interface it belonged to.  The first
+        channel to ask adopts it and the legacy key is removed, so the other
+        channels start from their own defaults instead of inheriting one bench's
+        file.
+        """
+        key = _calibration_path_key(channel)
+        remembered = self._text(key) or None
+        if remembered is not None:
+            return remembered
+
+        legacy = self._text(KEY_CALIBRATION_PATH) or None
+        if legacy is None:
+            return None
+        self._write(key, legacy)
+        self._remove(KEY_CALIBRATION_PATH)
+        return legacy
+
+    def set_calibration_path(self, channel: str, value: str | None) -> None:
+        """Remember *value* for *channel*, or clear it when given None.
+
+        Clearing removes that channel's key only: the other grippers on the
+        machine keep the files they were using.
+        """
         if value:
-            self._write(KEY_CALIBRATION_PATH, str(value))
-        else:
-            self._store.remove(KEY_CALIBRATION_PATH)
-            self._sync()
+            self._write(_calibration_path_key(channel), str(value))
+            return
+        self._remove(_calibration_path_key(channel))
+        # The legacy key outranks every channel's default, so leaving it behind
+        # would re-adopt the file just cleared the next time a channel asks.
+        self._remove(KEY_CALIBRATION_PATH)
 
     # ── view ────────────────────────────────────────────────────────────────
     @property
@@ -267,6 +302,13 @@ class Settings:
         try:
             self._store.setValue(key, value)
         except Exception:  # noqa: BLE001
+            return
+        self._sync()
+
+    def _remove(self, key: str) -> None:
+        try:
+            self._store.remove(key)
+        except Exception:  # noqa: BLE001 - an unreadable store is not fatal
             return
         self._sync()
 

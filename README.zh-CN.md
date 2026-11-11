@@ -80,7 +80,7 @@ PYTHON_BIN=.venv/bin/python3 ./run_litegrip_studio.sh sim
 | 选项 | 默认 | 作用 |
 | --- | --- | --- |
 | `--backend {sim,real}` | `real` | 用仿真被控对象代替真机 |
-| `--can-channel NAME` | `can0` | 用哪个 SocketCAN 接口 |
+| `--can-channel NAME` | `can0` | 用哪个 SocketCAN 接口；同时决定取哪个 can 口记住的标定路径 |
 | `--can-bitrate INT` | `1000000` | 连接时把接口配成这个波特率 |
 | `--no-can-setup` | 关 | 连接时不准备接口，也不弹授权框 |
 | `--can-id INT` | 取自标定文件 | 电机 CAN ID |
@@ -247,10 +247,14 @@ USB 端点表，任何 `ip link` 命令都救不回来。把适配器拔下来�
 
 有两级来源，由上位机自己判断用哪级：
 
-1. **你指定的文件**——`--calibration`、设置文件里记住的路径，或 `$LITEGRIP_CALIB`。**这才是描述
-   你这台夹爪的文件**，也是唯一能离开默认的路。
+1. **你指定的文件**——`--calibration`、设置文件里为当前 can 口记住的路径，或 `$LITEGRIP_CALIB`。
+   **这才是描述你这台夹爪的文件**，也是唯一能离开默认的路。
 2. **SDK 包里带的标定文件**（`litegrip/factory_calibration.json`）——什么都没指定时，上位机跑的
    就是它。
+
+标定按 can 口分开保存。记住的路径是按上位机连接的 can 口分别存的；保存时没给路径，就写到
+`~/.litegrip/<can口>_calibration.json`，所以 `can0`–`can3` 上的夹爪不会互相覆盖。加载的用户标定
+如果声明的是别的 can 口，会被拒绝，闸门一直关着，直到换上正确的那份文件。
 
 本仓库把包内这一份**覆盖成了本机手推记录的那组值**，而不是上游用探针测出来的；这次分叉记在
 `src/litegrip/VENDORED.md` 里，含它自己的哈希。
@@ -402,8 +406,8 @@ USB 端点表，任何 `ip link` 命令都救不回来。把适配器拔下来�
 
 | 路径 | 是什么 |
 | --- | --- |
-| `litegrip_studio.ini` | 设置：上次的速度和力、滑块是否拖动即跟随、记住的标定路径、主题、窗口几何、日志调试开关 |
-| `litegrip_calibration.json` | 标定默认的保存位置——但**放在这里并不会让它生效**。上位机读的是它记住的那个路径 |
+| `litegrip_studio.ini` | 设置：上次的速度和力、滑块是否拖动即跟随、每个 can 口各自记住的标定路径、主题、窗口几何、日志调试开关 |
+| `<can口>_calibration.json` | 该 can 口标定默认的保存位置——但**放在这里并不会让它生效**。上位机读的是它为这个 can 口记住的路径 |
 | `logs/litegrip-studio.log` | 日志，512 KiB 轮转、保留三份，始终按 `DEBUG` 记录 |
 
 环境变量：

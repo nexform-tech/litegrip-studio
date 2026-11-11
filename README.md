@@ -85,7 +85,7 @@ Extra arguments are passed to the program unchanged, for example
 | Option | Default | Effect |
 | --- | --- | --- |
 | `--backend {sim,real}` | `real` | Drive the simulated plant instead of hardware |
-| `--can-channel NAME` | `can0` | SocketCAN interface to use |
+| `--can-channel NAME` | `can0` | SocketCAN interface to use; also selects that channel's remembered calibration path |
 | `--can-bitrate INT` | `1000000` | Bitrate to configure the interface to on connect |
 | `--no-can-setup` | off | Do not prepare the interface on connect, and raise no authorization prompt |
 | `--can-id INT` | from the calibration file | Motor CAN ID |
@@ -268,11 +268,16 @@ which the note under the plots says.
 
 There are two sources, and the console resolves which one applies itself:
 
-1. **A file you named** — `--calibration`, the path remembered in the settings file, or
-   `$LITEGRIP_CALIB`. **This is the file that describes your gripper**, and naming one is the only
-   way off the default.
+1. **A file you named** — `--calibration`, the path the settings file remembers for that CAN
+   channel, or `$LITEGRIP_CALIB`. **This is the file that describes your gripper**, and naming one
+   is the only way off the default.
 2. **The calibration file bundled inside the SDK** (`litegrip/factory_calibration.json`), which is
    what the console runs on when you have named nothing.
+
+Calibration is kept per CAN channel. The remembered path is stored for the channel the console
+connects to, and a save that was given no path lands on `~/.litegrip/<channel>_calibration.json`, so
+grippers on `can0`–`can3` never overwrite one another. A user file that declares a different channel
+is refused when loaded, and the gate stays shut until the right file is chosen.
 
 That bundled file carries **this bench's hand-recorded values**, which upstream adopted into its own
 copy; this repository overrides nothing, and `src/litegrip/VENDORED.md` records where the file comes
@@ -449,8 +454,8 @@ The console keeps everything for one user under `~/.litegrip/`:
 
 | Path | What it is |
 | --- | --- |
-| `litegrip_studio.ini` | Settings: the last speed and force, whether the slider follows while dragging, the remembered calibration path, the theme, the window geometry and the log's debug toggle |
-| `litegrip_calibration.json` | The default place a calibration is saved — but sitting here is not what makes it load. The console reads the path it remembers |
+| `litegrip_studio.ini` | Settings: the last speed and force, whether the slider follows while dragging, the calibration path remembered for each CAN channel, the theme, the window geometry and the log's debug toggle |
+| `<channel>_calibration.json` | The default place a calibration is saved for that channel — but sitting here is not what makes it load. The console reads the path it remembers for the channel |
 | `logs/litegrip-studio.log` | The log, rotated at 512 KiB with three backups, always at `DEBUG` |
 
 Environment variables:

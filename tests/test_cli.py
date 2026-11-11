@@ -44,8 +44,13 @@ class Recorder:
 
 
 class FakeSettings:
-    def __init__(self, calibration_path=None) -> None:
-        self.calibration_path = calibration_path
+    def __init__(self, calibration_path=None, **per_channel) -> None:
+        self.paths = {channel: path for channel, path in per_channel.items()}
+        if calibration_path is not None:
+            self.paths["can0"] = calibration_path
+
+    def calibration_path_for(self, channel: str):
+        return self.paths.get(channel)
 
 
 @pytest.fixture
@@ -213,6 +218,18 @@ class TestWhichCalibrationFileIsChosen:
         assert cli.resolve_calibration_path(
             args, FakeSettings(calibration_path="/tmp/earlier.json")
         ) == "/tmp/earlier.json"
+
+    def test_each_channel_resolves_its_own_remembered_path(self) -> None:
+        """Four instances share the settings file; the file can1 loaded must not
+        be the one can2 starts from."""
+        settings = FakeSettings(can0="/tmp/can0.json", can1="/tmp/can1.json")
+
+        assert cli.resolve_calibration_path(
+            parse("--backend", "real", "--can-channel", "can1"), settings
+        ) == "/tmp/can1.json"
+        assert cli.resolve_calibration_path(
+            parse("--backend", "real", "--can-channel", "can2"), settings
+        ) is None
 
     def test_the_simulator_ignores_the_remembered_path(self) -> None:
         """It is the bench gripper's file.  Letting a simulator run start from it
