@@ -85,7 +85,7 @@ Extra arguments are passed to the program unchanged, for example
 | Option | Default | Effect |
 | --- | --- | --- |
 | `--backend {sim,real}` | `real` | Drive the simulated plant instead of hardware |
-| `--can-channel NAME` | `can0` | SocketCAN interface to use; also selects that channel's remembered calibration path |
+| `--can-channel NAME` | `can0` | SocketCAN interface to start on; the dropdown's initial value, and it selects that channel's remembered calibration path |
 | `--can-bitrate INT` | `1000000` | Bitrate to configure the interface to on connect |
 | `--no-can-setup` | off | Do not prepare the interface on connect, and raise no authorization prompt |
 | `--can-id INT` | from the calibration file | Motor CAN ID |
@@ -116,6 +116,13 @@ intervening only when the interface really is wrong:
 
 If a unit file or a script owns the interface and you do not want the prompt, pass `--no-can-setup`.
 For a bitrate other than 1 Mbit, pass `--can-bitrate`.
+
+**The interface is also chosen in the window.** The CAN 口 dropdown beside the link description lists
+every `can*` and `vcan*` interface on the machine, with the one the console started on first. It is
+enabled only while disconnected — disconnect, choose, then press 连接 — and the switch also brings
+that channel's remembered calibration path with it. The list is read once at launch, so an adapter
+plugged in later is a restart's job. `--can-channel` sets the value the dropdown starts on; the
+choice is not saved, because several consoles share one settings file.
 
 To do it by hand, the equivalent commands are:
 

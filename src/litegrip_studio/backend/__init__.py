@@ -282,6 +282,18 @@ class GripperBackend(ABC):
         """Short human-readable identity, for the title bar and logs."""
 
     # ── optional ────────────────────────────────────────────────────────────
+    def set_channel(
+        self, channel: str, *, calibration_path: str | None = None
+    ) -> None:
+        """Point this backend at another CAN interface, before a connection.
+
+        Only the real backend has interfaces to move between; the simulator
+        raises.  ``calibration_path`` is the path the chosen channel remembers,
+        because the file that belongs to one interface is not the file that
+        belongs to another.
+        """
+        raise Unsupported("this backend has no CAN interface to choose")
+
     def calibration_info(self) -> CalibrationInfo | None:
         """The calibration currently applied, if this backend tracks one.
 

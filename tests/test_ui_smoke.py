@@ -77,6 +77,7 @@ class FakeSignals(QObject):
     telemetry = pyqtSignal(object)
     motion_state = pyqtSignal(str)
     conn_state = pyqtSignal(str, str)
+    channel_changed = pyqtSignal(str)
     fault = pyqtSignal(int, str, str)
     gate_state = pyqtSignal(str, str)
     calib_info = pyqtSignal(object)
@@ -841,6 +842,76 @@ class TestTheGateIsNotTheOnlyThingShown:
 
         assert window.tabs.count() == len(TAB_NAMES)
         assert "失败" in window.connect_bar._conn_label.text()
+
+
+class TestChoosingTheCanInterface:
+    """The dropdown in the connection bar, wired through the window.
+
+    The bar's own tests cover what the widget does; these are about the two
+    things only the window knows — the interface list, which is read once at
+    launch, and the per-channel calibration path, which lives in the settings.
+    """
+
+    def test_the_window_offers_the_interfaces_it_was_given(self, qapp, worker) -> None:
+        window = MainWindow(worker, channels=["can0", "can1"])
+        window.start()
+        window._heartbeat.stop()
+
+        combo = window.connect_bar._channel
+        assert [combo.itemText(i) for i in range(combo.count())] == ["can0", "can1"]
+
+    def test_opening_the_window_is_not_a_switch(self, window, worker) -> None:
+        assert worker.of(cmd.SelectChannel) == []
+
+    def test_choosing_a_switch_carries_that_channels_remembered_file(
+        self, qapp, worker
+    ) -> None:
+        """A probe applied after selecting can1 writes can1's file, not the one
+        the console started on."""
+        settings = Settings(_Store())
+        settings.set_calibration_path("can1", "/tmp/can1.json")
+        window = MainWindow(worker, settings, channels=["can0", "can1"])
+        window.start()
+        window._heartbeat.stop()
+
+        window.connect_bar._channel.setCurrentText("can1")
+
+        (command,) = worker.of(cmd.SelectChannel)
+        assert command.channel == "can1"
+        assert command.calibration_path == "/tmp/can1.json"
+
+    def test_with_no_settings_the_switch_names_no_file(self, qapp, worker) -> None:
+        window = MainWindow(worker, channels=["can0", "can1"])
+        window.start()
+        window._heartbeat.stop()
+
+        window.connect_bar._channel.setCurrentText("can1")
+
+        (command,) = worker.of(cmd.SelectChannel)
+        assert command.calibration_path is None
+
+    def test_a_refused_switch_puts_the_old_interface_back(self, qapp, worker) -> None:
+        """The worker refuses while connected; the dropdown has to stop
+        claiming a bus the backend never moved to."""
+        window = MainWindow(worker, channels=["can0", "can1"])
+        window.start()
+        window._heartbeat.stop()
+        window.connect_bar._channel.setCurrentText("can1")
+        assert window.connect_bar._channel.currentText() == "can1"
+
+        worker.channel_changed.emit("can0")
+
+        assert window.connect_bar._channel.currentText() == "can0"
+
+    def test_a_backend_with_no_interface_shows_no_dropdown(self, qapp, worker) -> None:
+        worker.backend = type(
+            "SimBackend", (), {"channel": "", "describe": lambda self: "仿真 (Plant)"}
+        )()
+        window = MainWindow(worker)
+        window.start()
+        window._heartbeat.stop()
+
+        assert window.connect_bar._channel_row.isHidden()
 
 
 class TestTheWindowCanBeMadeSmallEnoughToLiveOnTheScreen:

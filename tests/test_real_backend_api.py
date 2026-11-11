@@ -43,7 +43,9 @@ from litegrip_studio.backend import (
     FaultActive,
     LinkDown,
     NotReady,
+    Unsupported,
 )
+from litegrip_studio.backend import real as real_module
 from litegrip_studio.backend.real import RealBackend
 from litegrip_studio.units import Limits, torque_from_force
 
@@ -1156,6 +1158,110 @@ class TestTheTravelSetting:
         backend.load_calibration(str(env.user))
         assert backend.limits().max_stroke_mm == 150.0
         assert backend.calibration_info().max_stroke_mm == 150.0
+
+
+class TestSwitchingTheInterface:
+    """``set_channel``: the interface is an SDK object, so a switch rebuilds it.
+
+    The interface lives on ``LiteGrip``, not on its config — a socket opened on
+    one bus cannot be pointed at another — which is why these tests stand a
+    factory in for ``LiteGrip`` and count what it built.
+    """
+
+    @pytest.fixture
+    def made(self, monkeypatch) -> list[StubGripper]:
+        objects: list[StubGripper] = []
+
+        def factory(config: GripperConfig | None = None) -> StubGripper:
+            stub = StubGripper(config)
+            objects.append(stub)
+            return stub
+
+        monkeypatch.setattr(real_module, "LiteGrip", factory)
+        return objects
+
+    @pytest.fixture
+    def unconnected(self, made) -> RealBackend:
+        return RealBackend(
+            channel="can0",
+            can_id=8,
+            mst_id=18,
+            calibration_path="/tmp/can0.json",
+        )
+
+    def test_the_new_interface_gets_a_new_sdk_object(self, unconnected, made) -> None:
+        unconnected.set_channel("can1", calibration_path="/tmp/can1.json")
+
+        assert unconnected.channel == "can1"
+        assert len(made) == 2
+        assert made[1].config.can_channel == "can1"
+
+    def test_the_ids_the_console_was_launched_with_are_carried_over(
+        self, unconnected, made
+    ) -> None:
+        """A rebuild on the SDK's defaults would silently speak with another
+        node's ID."""
+        unconnected.set_channel("can1", calibration_path="/tmp/can1.json")
+
+        assert made[1].config.can_id == 8
+        assert made[1].config.mst_id == 18
+
+    def test_the_travel_this_console_measured_is_carried_over(self, made) -> None:
+        backend = RealBackend(channel="can0", max_stroke_mm=150.0)
+
+        backend.set_channel("can1", calibration_path="/tmp/can1.json")
+
+        assert made[1].config.max_stroke_mm == pytest.approx(150.0)
+
+    def test_the_remembered_path_moves_to_the_new_channel(
+        self, unconnected, made
+    ) -> None:
+        before = made[0]
+
+        unconnected.set_channel("can1", calibration_path="/tmp/can1.json")
+
+        assert unconnected._calibration_path == "/tmp/can1.json"
+        assert made[1] is not before
+
+    def test_a_calibration_in_effect_is_dropped(self, unconnected, made) -> None:
+        """It belonged to the other gripper; keeping it would open the gate for
+        a unit whose stops were never measured."""
+        unconnected.set_calibration_memory(1.775959, -0.064279, 65.21)
+        assert unconnected.calibration_info() is not None
+
+        unconnected.set_channel("can1", calibration_path="/tmp/can1.json")
+
+        assert unconnected.calibration_info() is None
+
+    def test_rechoosing_the_same_interface_keeps_the_sdk_object(
+        self, unconnected, made
+    ) -> None:
+        before = made[0]
+
+        unconnected.set_channel("can0", calibration_path="/tmp/other.json")
+
+        assert made == [before]
+        assert unconnected._calibration_path == "/tmp/other.json"
+
+    def test_switching_while_connected_is_refused(self, backend) -> None:
+        with pytest.raises(NotReady):
+            backend.set_channel("can1")
+
+        assert backend.channel == "can0"
+
+    def test_an_empty_interface_is_refused(self, unconnected, made) -> None:
+        with pytest.raises(ValueError):
+            unconnected.set_channel("")
+
+        assert len(made) == 1
+
+    def test_an_injected_sdk_object_cannot_be_switched(self) -> None:
+        """A test double has no socket behind it, and pretending otherwise would
+        make the switch look exercised when it is not."""
+        backend = RealBackend(gripper=StubGripper())
+
+        with pytest.raises(Unsupported):
+            backend.set_channel("can1")
 
 
 class TestThreadOwnership:

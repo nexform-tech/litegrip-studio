@@ -46,6 +46,7 @@ from litegrip_studio.can_link import (
     CanLink,
     link_failure,
     parse_link,
+    socketcan_interfaces,
 )
 
 IP_PATH = "/usr/sbin/ip"
@@ -1261,3 +1262,34 @@ class TestTellingATransportFailureApart:
         exc.__context__ = exc
 
         assert link_failure(exc, "can0") is None
+
+
+class TestWhichInterfacesExist:
+    """The window's dropdown reads the machine, not a fixed list.
+
+    A console that only ever offered ``can0`` would need a restart to use the
+    second adapter on the bench, which is the problem the picker exists for.
+    """
+
+    def test_socketcan_names_are_returned_in_natural_order(self, tmp_path) -> None:
+        for name in ("can0", "can1", "can2", "can10", "vcan0", "eth0", "lo"):
+            (tmp_path / name).mkdir()
+
+        assert socketcan_interfaces(tmp_path) == [
+            "can0",
+            "can1",
+            "can2",
+            "can10",
+            "vcan0",
+        ]
+
+    def test_an_unreadable_directory_is_empty_not_fatal(self, tmp_path) -> None:
+        """sysfs is absent on some hosts; the interface in use is still shown by
+        the window, so the list is the only thing lost."""
+        assert socketcan_interfaces(tmp_path / "missing") == []
+
+    def test_files_are_not_interfaces(self, tmp_path) -> None:
+        (tmp_path / "can0").write_text("", encoding="utf-8")
+        (tmp_path / "can1").mkdir()
+
+        assert socketcan_interfaces(tmp_path) == ["can1"]

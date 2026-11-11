@@ -58,6 +58,7 @@ from . import (
     GripperBackend,
     LinkDown,
     NotReady,
+    Unsupported,
     ZeroResult,
 )
 
@@ -103,26 +104,40 @@ class RealBackend(GripperBackend):
         self._calibration_path = calibration_path
         self._info: CalibrationInfo | None = None
         self._last_refusal: str | None = None
+        #: The constructor's inputs, kept for :meth:`set_channel`: an interface
+        #: switch builds a new SDK object, and it has to be built with the same
+        #: IDs and travel rather than with the SDK's defaults.
+        self._can_id = can_id
+        self._mst_id = mst_id
+        self._canfd_mode = canfd_mode
+        self._max_stroke_mm = float(max_stroke_mm)
+        self._injected = gripper is not None
 
-        if gripper is not None:
+        if self._injected:
             self._gripper = gripper
             return
 
-        # Built through ``config`` rather than positional arguments: the SDK's
-        # constructor substitutes ``config`` values for any argument left at its
-        # default (the constructor substitutes ``config`` for them), so passing
-        # both means the config silently wins for exactly the arguments that
-        # are hardest to notice.
+        self._gripper = self._build_gripper(channel)
+
+    def _build_gripper(self, channel: str) -> Any:
+        """Open the SDK's object for *channel*, with this console's settings.
+
+        Built through ``config`` rather than positional arguments: the SDK's
+        constructor substitutes ``config`` values for any argument left at its
+        default (the constructor substitutes ``config`` for them), so passing
+        both means the config silently wins for exactly the arguments that
+        are hardest to notice.
+        """
         cfg = GripperConfig()
         cfg.can_channel = channel
-        cfg.max_stroke_mm = float(max_stroke_mm)
-        if can_id is not None:
-            cfg.can_id = int(can_id)
-        if mst_id is not None:
-            cfg.mst_id = int(mst_id)
-        if canfd_mode is not None:
-            cfg.canfd_mode = bool(canfd_mode)
-        self._gripper = LiteGrip(config=cfg)
+        cfg.max_stroke_mm = self._max_stroke_mm
+        if self._can_id is not None:
+            cfg.can_id = int(self._can_id)
+        if self._mst_id is not None:
+            cfg.mst_id = int(self._mst_id)
+        if self._canfd_mode is not None:
+            cfg.canfd_mode = bool(self._canfd_mode)
+        return LiteGrip(config=cfg)
 
     @property
     def channel(self) -> str:
@@ -135,6 +150,41 @@ class RealBackend(GripperBackend):
         key and the save filename have to follow.
         """
         return str(getattr(self._gripper, "channel", "") or self._channel)
+
+    def set_channel(
+        self, channel: str, *, calibration_path: str | None = None
+    ) -> None:
+        """Move this session to another CAN interface, before connecting.
+
+        Rebuilt rather than reconfigured: the SDK keeps the interface on the
+        instance, not in the config, and a socket opened on one bus cannot be
+        pointed at another.  The IDs and travel this console was launched with
+        are carried over; the new channel's calibration file supplies its own
+        on load, exactly as it does at startup.
+
+        ``calibration_path`` replaces the remembered path with the chosen
+        channel's own.  Without that, a probe applied after the switch would
+        write the previous interface's file — the overwrite the per-channel
+        keying exists to prevent.
+        """
+        self._claim()
+        if self._gripper.is_connected:
+            raise NotReady("请先断开连接再切换 CAN 口")
+        if not channel:
+            raise ValueError("CAN 口不能为空")
+        if self._injected:
+            raise Unsupported("注入的 SDK 对象不能切换接口")
+        if channel == self.channel:
+            # Same interface: nothing to reopen, and whatever is loaded is still
+            # this interface's calibration.  Only the file a later load or save
+            # would go to moves.
+            self._calibration_path = calibration_path
+            return
+        self._gripper = self._build_gripper(channel)
+        self._channel = channel
+        self._calibration_path = calibration_path
+        self._info = None
+        self._last_refusal = None
 
     # ── lifecycle ───────────────────────────────────────────────────────────
     def connect(self) -> None:
@@ -626,6 +676,7 @@ class RealBackend(GripperBackend):
         it, and which ``load_calibration`` leaves alone.
         """
         self._claim()
+        self._max_stroke_mm = float(max_stroke_mm)
         self._gripper.config.max_stroke_mm = float(max_stroke_mm)
 
     def describe(self) -> str:

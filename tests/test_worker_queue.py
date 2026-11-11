@@ -437,6 +437,29 @@ class FakeLink:
         return self.outcome
 
 
+class SwitchableBackend(RecordingBackend):
+    """The recorder, plus the interface switch the real backend grew.
+
+    The switch drops the calibration in the same way: the numbers were measured
+    on the other bus, and the real backend rebuilds its SDK object without them.
+    """
+
+    def __init__(self, channel: str = "can0", **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.channel = channel
+        #: Every accepted switch, as ``(channel, calibration_path)``.
+        self.channel_switches: list[tuple[str, str | None]] = []
+        self.set_channel_error: Exception | None = None
+
+    def set_channel(self, channel: str, *, calibration_path: str | None = None) -> None:
+        self._claim()
+        if self.set_channel_error is not None:
+            raise self.set_channel_error
+        self.channel = channel
+        self.channel_switches.append((channel, calibration_path))
+        self.info = None
+
+
 class Bench:
     """A loop, its backend and its recorder, ticked by hand."""
 
@@ -1505,6 +1528,77 @@ class TestTheInterfaceIsPreparedBeforeConnecting:
         assert loop.connected
         assert not loop.stopping
         assert not any("心跳" in text for text in signals.alerts())
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Choosing the interface
+# ═══════════════════════════════════════════════════════════════════════════
+class TestChoosingTheInterface:
+    """``SelectChannel``: which bus the next connection opens.
+
+    The window's dropdown is only the way in; the loop owns the rule, because
+    the command queue is reachable without the window.
+    """
+
+    def bench(self, link: FakeLink | None = None) -> Bench:
+        return Bench(
+            backend=SwitchableBackend(),
+            can_link=link if link is not None else FakeLink(),
+        )
+
+    def test_the_backend_and_the_link_move_together(self) -> None:
+        """A link left on the old interface would configure can0 and then have
+        the SDK open can1 — the one interface nobody prepared."""
+        bench = self.bench()
+
+        bench.send(cmd.SelectChannel("can1", "/tmp/can1.json"))
+
+        assert bench.backend.channel == "can1"
+        assert bench.loop._can_link.channel == "can1"
+        assert bench.backend.channel_switches == [("can1", "/tmp/can1.json")]
+
+    def test_the_gui_is_told_which_channel_is_in_force(self) -> None:
+        bench = self.bench()
+
+        bench.send(cmd.SelectChannel("can1", "/tmp/can1.json"))
+
+        assert bench.signals.of("channel_changed") == [("can1",)]
+
+    def test_the_new_interface_starts_uncalibrated(self) -> None:
+        """The limits on file were measured on the other gripper, so the gate is
+        shut until a file for *this* one is loaded — and the display is told."""
+        bench = self.bench()
+        bench.swap_calibration(USER_CAL)
+        assert bench.loop.gate is GateState.READY
+        before = len(bench.signals.of("calib_info"))
+
+        bench.send(cmd.SelectChannel("can1", "/tmp/can1.json"))
+
+        assert bench.loop.gate is GateState.BLOCKED
+        assert bench.loop.info is None
+        assert bench.signals.of("calib_info")[before:] == [(None,)]
+
+    def test_switching_while_connected_is_refused(self) -> None:
+        bench = self.bench()
+        bench.send(cmd.Connect())
+
+        bench.send(cmd.SelectChannel("can1", "/tmp/can1.json"))
+
+        assert bench.backend.channel == "can0"
+        assert bench.backend.channel_switches == []
+        assert any("断开" in text for text in bench.signals.alerts()), bench.signals.alerts()
+        # The dropdown must snap back to what is actually open.
+        assert bench.signals.of("channel_changed") == [("can0",)]
+
+    def test_a_backend_that_refuses_the_switch_is_reported(self) -> None:
+        bench = self.bench()
+        bench.backend.set_channel_error = RuntimeError("can1 不存在")
+
+        bench.send(cmd.SelectChannel("can1", "/tmp/can1.json"))
+
+        assert bench.backend.channel == "can0"
+        assert any("切换 CAN 口失败" in text for text in bench.signals.alerts())
+        assert bench.signals.of("channel_changed") == [("can0",)]
 
 
 # ═══════════════════════════════════════════════════════════════════════════

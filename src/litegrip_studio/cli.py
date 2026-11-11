@@ -275,7 +275,14 @@ def main(argv: list[str] | None = None) -> int:
 
     worker = GripperWorker(backend, can_link=make_can_link(args))
 
-    window = MainWindow(worker, settings)
+    # Read once, at launch: plugging an adapter in later is a restart's job,
+    # and a list that changed under the operator would need an explanation the
+    # window does not have room for.
+    from .can_link import socketcan_interfaces
+
+    channels = socketcan_interfaces() if args.backend == "real" else ()
+
+    window = MainWindow(worker, settings, channels=channels)
     window.start()
 
     # Two layers, and the order matters: the window's closeEvent stops the worker

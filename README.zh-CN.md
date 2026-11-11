@@ -80,7 +80,7 @@ PYTHON_BIN=.venv/bin/python3 ./run_litegrip_studio.sh sim
 | 选项 | 默认 | 作用 |
 | --- | --- | --- |
 | `--backend {sim,real}` | `real` | 用仿真被控对象代替真机 |
-| `--can-channel NAME` | `can0` | 用哪个 SocketCAN 接口；同时决定取哪个 can 口记住的标定路径 |
+| `--can-channel NAME` | `can0` | 启动时用哪个 SocketCAN 接口；也是下拉框的初值，同时决定取哪个 can 口记住的标定路径 |
 | `--can-bitrate INT` | `1000000` | 连接时把接口配成这个波特率 |
 | `--no-can-setup` | 关 | 连接时不准备接口，也不弹授权框 |
 | `--can-id INT` | 取自标定文件 | 电机 CAN ID |
@@ -108,6 +108,12 @@ PYTHON_BIN=.venv/bin/python3 ./run_litegrip_studio.sh sim
 
 如果接口由某个 unit 文件或脚本管着、你不想要那个授权框，加 `--no-can-setup`；波特率不是
 1 Mbit 就用 `--can-bitrate`。
+
+**接口也可以直接在窗口里选。** 连接区的「CAN 口」下拉框列出机器上所有的 `can*` 和 `vcan*`
+接口，排在最前面的是启动时用的那个。只有断开状态下才能切换——先「断开」，选好，再按「连接」；
+切换时也会带上那个 can 口记住的标定文件路径。接口列表只在启动时读一次，后来才插上的适配器要
+重启上位机才会出现。`--can-channel` 只是下拉框启动时的初值；选择不会写进设置，因为同一台机器
+上可能同时开着好几个上位机。
 
 要手动做，等价的三条命令是：
 
