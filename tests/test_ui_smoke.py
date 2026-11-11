@@ -92,6 +92,8 @@ class FakeSignals(QObject):
 
 
 class FakeBackend:
+    channel = "can0"
+
     def describe(self) -> str:
         return "仿真 (Plant) | 用户标定"
 
@@ -583,7 +585,24 @@ class TestWhatIsRemembered:
 
         worker.calibration_applied.emit("/tmp/bench.json")
 
-        assert store.value("calibration/path") == "/tmp/bench.json"
+        assert store.value("calibration/path/can0") == "/tmp/bench.json"
+
+    def test_an_application_on_can1_is_remembered_under_can1(
+        self, qapp, worker
+    ) -> None:
+        """Four grippers share one settings file.  A single global path made
+        every instance's 应用标定 write to whichever file a load had named
+        last, which is how four calibrations ended up in one file."""
+        store = _Store()
+        worker.backend.channel = "can1"
+        worker.backend.remember_calibration_path = True
+        window = MainWindow(worker, Settings(store))
+        window._heartbeat.stop()
+
+        worker.calibration_applied.emit("/tmp/can1.json")
+
+        assert store.value("calibration/path/can1") == "/tmp/can1.json"
+        assert store.value("calibration/path/can0") is None
 
     def test_a_simulated_application_is_not_remembered(self, qapp, worker) -> None:
         """A simulated calibration describes a plant.  Remembering it is how a
@@ -596,7 +615,7 @@ class TestWhatIsRemembered:
 
         worker.calibration_applied.emit("/tmp/sim.json")
 
-        assert store.value("calibration/path") is None
+        assert store.value("calibration/path/can0") is None
 
     def test_a_loaded_calibration_is_remembered_as_a_path(self, qapp, worker) -> None:
         """载入文件… names the file this bench uses, not just for this run.
@@ -612,7 +631,7 @@ class TestWhatIsRemembered:
 
         worker.calibration_loaded.emit("/tmp/bench.json")
 
-        assert store.value("calibration/path") == "/tmp/bench.json"
+        assert store.value("calibration/path/can0") == "/tmp/bench.json"
 
     def test_a_simulated_load_is_not_remembered(self, qapp, worker) -> None:
         store = _Store()
@@ -622,7 +641,7 @@ class TestWhatIsRemembered:
 
         worker.calibration_loaded.emit("/tmp/sim.json")
 
-        assert store.value("calibration/path") is None
+        assert store.value("calibration/path/can0") is None
 
     def test_loading_the_factory_file_forgets_the_path_instead(self, qapp, worker) -> None:
         """Back to the factory numbers means back to *nothing named*.
@@ -632,14 +651,14 @@ class TestWhatIsRemembered:
         save over — the two things that separate a calibration somebody took from
         the fallback that ships with the SDK."""
         factory = calibration.factory_path()
-        store = _Store(**{"calibration/path": "/home/qaz/.litegrip/gone.json"})
+        store = _Store(**{"calibration/path/can0": "/home/qaz/.litegrip/gone.json"})
         worker.backend.remember_calibration_path = True
         window = MainWindow(worker, Settings(store))
         window._heartbeat.stop()
 
         worker.calibration_loaded.emit(str(factory))
 
-        assert store.value("calibration/path") is None
+        assert store.value("calibration/path/can0") is None
 
 
 class TestClosing:

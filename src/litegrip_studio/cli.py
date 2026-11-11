@@ -184,11 +184,15 @@ def resolve_calibration_path(args, settings) -> str | None:
     of its own precisely so that it can never overwrite the one that cannot be
     regenerated.  Keeping the two separate at the entrance is what makes that
     guarantee hold from both directions.
+
+    The real backend's path is keyed by ``--can-channel``: four instances share
+    one settings file, and the file this one loaded must not be the one another
+    interface saves to.
     """
     if args.calibration is not None:
         return args.calibration
     if args.backend == "real":
-        return settings.calibration_path
+        return settings.calibration_path_for(args.can_channel)
     return None
 
 

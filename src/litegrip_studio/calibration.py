@@ -96,18 +96,30 @@ _SAVED_KEYS = (
 )
 
 
-def default_user_path() -> Path:
-    """``$LITEGRIP_CALIB``, or the SDK's legacy ``DEFAULT_CALIB`` location.
+def default_user_path(channel: str = "can0") -> Path:
+    """``$LITEGRIP_CALIB``, or *channel*'s own file under ``~/.litegrip``.
+
+    One gripper per channel, one file per channel — mirroring the SDK's
+    :func:`litegrip.gripper.default_calib_path`.  A single shared file let the
+    four instances a four-gripper bench runs overwrite each other's direction
+    and travel, and the file that got overwritten was whichever one an instance
+    had loaded last.
 
     The variable is read per call rather than once at import, which is what lets
-    a test (or a launcher) redirect it.  The per-channel
-    ``LiteGrip.default_calib_path`` is deliberately not mirrored: the console
-    always names the file it loads and saves explicitly.
+    a test (or a launcher) redirect it.  ``LITEGRIP_CALIB`` still names one
+    explicit path for every channel: setting it is itself a choice of file.
+
+    *channel* is a SocketCAN interface name (``can0``, ``can1``, ...).  A name
+    that would escape ``~/.litegrip`` is refused rather than turning into a path
+    outside it.
     """
     env = os.environ.get("LITEGRIP_CALIB")
     if env:
         return Path(env).expanduser()
-    return Path.home() / ".litegrip" / "litegrip_calibration.json"
+    name = f"{channel}_calibration.json"
+    if not channel or Path(name).name != name:
+        raise ValueError(f"标定文件名不能由这个通道名构成: {channel!r}")
+    return Path.home() / ".litegrip" / name
 
 
 def _sdk_factory_path() -> Path:
@@ -192,6 +204,33 @@ def is_factory_file(path: str | os.PathLike[str] | None) -> bool:
         except OSError:  # pragma: no cover - unresolvable candidate
             continue
     return False
+
+
+def channel_mismatch(info: CalibrationInfo, channel: str) -> str | None:
+    """Why *info* cannot describe the gripper on *channel*, or ``None``.
+
+    The SDK accepts an explicitly named file regardless of the channel recorded
+    in it — the ``path=`` branch is exactly the one that skips its own channel
+    filter — so the console is the only thing that can tie a file to the
+    interface it is driving.  With one file per channel, a file that names
+    another interface is the signature of the wrong file having been picked,
+    not of a gripper that moved.
+
+    Two cases are deliberately not mismatches.  A file without a ``channel``
+    predates the key and has no claim either way.  The factory file belongs to
+    a nominal unit and names ``can0`` because that is the bench it was recorded
+    on; every gripper may use it as the fallback, which is why it is exempt
+    from the check rather than treated as another unit's file.
+    """
+    if not channel or info.raw is None or is_factory_file(info.path):
+        return None
+    declared = info.raw.get("channel")
+    if not declared or declared == channel:
+        return None
+    return (
+        f"标定文件属于 {declared}，而本实例连接的是 {channel}："
+        f"请载入 {channel} 自己的标定文件（{default_user_path(channel)}）"
+    )
 
 
 def sdk_root() -> Path | None:

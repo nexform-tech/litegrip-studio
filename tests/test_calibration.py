@@ -1034,13 +1034,36 @@ class TestPaths:
         monkeypatch.setenv("LITEGRIP_CALIB", str(tmp_path / "x.json"))
         assert calibration.default_user_path() == tmp_path / "x.json"
 
-    def test_the_user_path_defaults_to_the_sdk_location(self, monkeypatch) -> None:
-        """Mirrors ``DEFAULT_CALIB`` — if these diverge, the file the console
-        validates is not the file the SDK loads."""
+    def test_the_user_path_defaults_to_one_file_per_channel(self, monkeypatch) -> None:
+        """Mirrors ``LiteGrip.default_calib_path``.  A single shared file let
+        four grippers overwrite one another's calibration; the channel is the
+        only identity they share a CAN ID with."""
         monkeypatch.delenv("LITEGRIP_CALIB", raising=False)
-        assert calibration.default_user_path() == (
-            Path.home() / ".litegrip" / "litegrip_calibration.json"
+
+        assert calibration.default_user_path("can0") == (
+            Path.home() / ".litegrip" / "can0_calibration.json"
         )
+        assert calibration.default_user_path("can3") == (
+            Path.home() / ".litegrip" / "can3_calibration.json"
+        )
+
+    def test_the_environment_still_names_one_path_for_every_channel(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """``LITEGRIP_CALIB`` is itself a choice of file, so it outranks the
+        per-channel default rather than being joined to it."""
+        monkeypatch.setenv("LITEGRIP_CALIB", str(tmp_path / "shared.json"))
+
+        assert calibration.default_user_path("can0") == tmp_path / "shared.json"
+        assert calibration.default_user_path("can1") == tmp_path / "shared.json"
+
+    def test_a_channel_that_would_escape_the_folder_is_refused(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.delenv("LITEGRIP_CALIB", raising=False)
+
+        with pytest.raises(ValueError):
+            calibration.default_user_path("../../etc/evil")
 
     def test_the_factory_path_points_inside_the_sdk(self, monkeypatch) -> None:
         monkeypatch.delenv("LITEGRIP_FACTORY_CALIB", raising=False)
@@ -1132,6 +1155,52 @@ class TestPaths:
 
         assert calibration.factory_candidates() == (mine,)
         assert calibration.factory_path() == mine
+
+
+class TestChannelMismatch:
+    """A file that names another interface describes another gripper.
+
+    The SDK applies an explicitly named file without checking the channel in it,
+    so nothing below the console connects the file to the interface it drives.
+    """
+
+    def test_a_file_for_another_channel_is_reported(self, tmp_path) -> None:
+        info = calibration.resolve(_write(tmp_path / "can0.json", USER_RAW))
+
+        message = calibration.channel_mismatch(info, "can1")
+
+        assert message is not None
+        assert "can0" in message and "can1" in message
+
+    def test_a_file_for_this_channel_is_accepted(self, tmp_path) -> None:
+        info = calibration.resolve(_write(tmp_path / "can0.json", USER_RAW))
+
+        assert calibration.channel_mismatch(info, "can0") is None
+
+    def test_a_file_that_names_no_channel_is_not_evidence(self, tmp_path) -> None:
+        """Older files predate the key; they make no claim either way."""
+        raw = {k: v for k, v in USER_RAW.items() if k != "channel"}
+        info = calibration.resolve(_write(tmp_path / "old.json", raw))
+
+        assert calibration.channel_mismatch(info, "can3") is None
+
+    def test_the_factory_file_is_usable_on_every_channel(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """It names ``can0`` because that is the bench it was recorded on, but
+        it is the fallback every gripper may run on."""
+        factory = _write(tmp_path / "factory.json", FACTORY_RAW)
+        monkeypatch.setenv("LITEGRIP_FACTORY_CALIB", str(factory))
+        monkeypatch.delenv("LITEGRIP_CALIB", raising=False)
+        info = calibration.resolve()
+
+        assert info.provenance == calibration.PROVENANCE_FACTORY
+        assert calibration.channel_mismatch(info, "can1") is None
+
+    def test_no_channel_means_no_check(self, tmp_path) -> None:
+        info = calibration.resolve(_write(tmp_path / "can0.json", USER_RAW))
+
+        assert calibration.channel_mismatch(info, "") is None
 
 
 class TestPathsAreShownRelative:

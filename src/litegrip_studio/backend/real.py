@@ -99,6 +99,7 @@ class RealBackend(GripperBackend):
         gripper: Any | None = None,
     ) -> None:
         super().__init__()
+        self._channel = channel
         self._calibration_path = calibration_path
         self._info: CalibrationInfo | None = None
         self._last_refusal: str | None = None
@@ -122,6 +123,18 @@ class RealBackend(GripperBackend):
         if canfd_mode is not None:
             cfg.canfd_mode = bool(canfd_mode)
         self._gripper = LiteGrip(config=cfg)
+
+    @property
+    def channel(self) -> str:
+        """The interface this backend opened, not the one a file claims.
+
+        ``load_calibration`` writes the file's ``channel`` into the SDK's
+        config, so reading ``config.can_channel`` after a load would answer
+        with whatever the last file said.  The instance's own channel is the
+        one the transport was opened on, and it is the identity the settings
+        key and the save filename have to follow.
+        """
+        return str(getattr(self._gripper, "channel", "") or self._channel)
 
     # ── lifecycle ───────────────────────────────────────────────────────────
     def connect(self) -> None:
@@ -455,6 +468,16 @@ class RealBackend(GripperBackend):
         explicit = path if path is not None else self._calibration_path
         info = calibration.resolve(explicit, self._travel_mm())
 
+        # A file that names another interface describes another gripper.  The
+        # SDK would apply it anyway (its ``path=`` branch skips the channel
+        # filter), and the cross-check below only compares the file's numbers
+        # with the numbers the SDK applied — both sides of that comparison come
+        # from the same file, so a wrong-gripper calibration would pass it.
+        mismatch = calibration.channel_mismatch(info, self.channel)
+        if mismatch is not None:
+            self._info = replace(info, problems=info.problems + (mismatch,))
+            return False
+
         sdk_path = calibration.sdk_load_path(info)
         if sdk_path is None:
             # Unusable, or an unsaved probe result.  Nothing is handed to the
@@ -514,7 +537,11 @@ class RealBackend(GripperBackend):
         info = self._info
         if info is None or info.limits is None:
             raise NotReady("没有可保存的标定")
-        target = path or self._calibration_path or str(calibration.default_user_path())
+        target = (
+            path
+            or self._calibration_path
+            or str(calibration.default_user_path(self.channel))
+        )
 
         # A factory file is data, not state: it ships with the SDK and describes
         # whichever unit it was taken on.  Overwriting it would replace the

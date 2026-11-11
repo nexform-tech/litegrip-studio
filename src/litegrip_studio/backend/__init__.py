@@ -267,6 +267,12 @@ class GripperBackend(ABC):
     #: bench's own on the next real run.
     remember_calibration_path: bool = True
 
+    #: The interface this backend drives, when it has one.  The settings file
+    #: keys the remembered calibration path by it, so two grippers on one
+    #: machine do not share a save target.  Empty for the simulator, which has
+    #: no interface and never remembers a path anyway.
+    channel: str = ""
+
     @abstractmethod
     def limits(self) -> Limits:
         """The travel limits currently in effect."""

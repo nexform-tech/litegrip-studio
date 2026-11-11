@@ -69,7 +69,7 @@ class TestDefaults:
         assert settings.speed_mm_s == constants.SPEED_DEFAULT_MM_S
         assert settings.force_n == constants.FORCE_DEFAULT_N
         assert settings.live_follow is False
-        assert settings.calibration_path is None
+        assert settings.calibration_path_for("can0") is None
         assert settings.active_tab == 0
         assert settings.show_debug_log is False
 
@@ -95,7 +95,7 @@ class TestRoundTrip:
         settings.speed_mm_s = 80.0
         settings.force_n = 25.0
         settings.live_follow = True
-        settings.calibration_path = "/tmp/cal.json"
+        settings.set_calibration_path("can0", "/tmp/cal.json")
         settings.active_tab = 2
         settings.show_debug_log = True
 
@@ -103,7 +103,7 @@ class TestRoundTrip:
         assert reopened.speed_mm_s == pytest.approx(80.0)
         assert reopened.force_n == pytest.approx(25.0)
         assert reopened.live_follow is True
-        assert reopened.calibration_path == "/tmp/cal.json"
+        assert reopened.calibration_path_for("can0") == "/tmp/cal.json"
         assert reopened.active_tab == 2
         assert reopened.show_debug_log is True
 
@@ -111,16 +111,50 @@ class TestRoundTrip:
         """A console that is killed rather than closed must not lose the file
         the operator chose, which is what the next start reads."""
         store = Store()
-        Settings(store).calibration_path = "/tmp/cal.json"
+        Settings(store).set_calibration_path("can0", "/tmp/cal.json")
 
         assert store.syncs >= 1
 
     def test_clearing_the_calibration_path_removes_the_key(self) -> None:
-        store = raw(**{"calibration/path": "/tmp/cal.json"})
-        Settings(store).calibration_path = None
+        store = raw(**{"calibration/path/can0": "/tmp/cal.json"})
+        Settings(store).set_calibration_path("can0", None)
 
+        assert "calibration/path/can0" in store.removed
+        assert Settings(store).calibration_path_for("can0") is None
+
+    def test_each_channel_remembers_its_own_file(self) -> None:
+        """The defect this keying exists for: one settings file, four instances,
+        one remembered path — so a can1 load decided where can2 saved."""
+        store = Store()
+        settings = Settings(store)
+        settings.set_calibration_path("can0", "/tmp/can0.json")
+        settings.set_calibration_path("can1", "/tmp/can1.json")
+
+        assert settings.calibration_path_for("can0") == "/tmp/can0.json"
+        assert settings.calibration_path_for("can1") == "/tmp/can1.json"
+        assert settings.calibration_path_for("can2") is None
+
+    def test_clearing_one_channel_leaves_the_others_alone(self) -> None:
+        store = Store()
+        settings = Settings(store)
+        settings.set_calibration_path("can0", "/tmp/can0.json")
+        settings.set_calibration_path("can1", "/tmp/can1.json")
+
+        settings.set_calibration_path("can0", None)
+
+        assert settings.calibration_path_for("can0") is None
+        assert settings.calibration_path_for("can1") == "/tmp/can1.json"
+
+    def test_a_legacy_path_is_adopted_once(self) -> None:
+        """An older console wrote one global key.  It names one bench file and
+        cannot say which interface it belonged to, so the first channel to ask
+        takes it and the others start from their defaults."""
+        store = raw(**{"calibration/path": "/tmp/legacy.json"})
+        settings = Settings(store)
+
+        assert settings.calibration_path_for("can1") == "/tmp/legacy.json"
         assert "calibration/path" in store.removed
-        assert Settings(store).calibration_path is None
+        assert settings.calibration_path_for("can2") is None
 
     def test_the_window_geometry_is_stored_opaquely(self) -> None:
         """Qt's own format; the console must not try to understand it."""
@@ -236,7 +270,7 @@ class TestTheStoreIsHostileInput:
 
         settings = Settings(Broken())
         assert settings.speed_mm_s == constants.SPEED_DEFAULT_MM_S
-        assert settings.calibration_path is None
+        assert settings.calibration_path_for("can0") is None
 
     def test_a_store_that_cannot_be_written_is_survivable(self) -> None:
         class ReadOnly(Store):

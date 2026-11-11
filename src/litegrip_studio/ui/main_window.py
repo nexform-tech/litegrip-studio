@@ -484,12 +484,19 @@ class MainWindow(QMainWindow):
         The simulator is excluded by the backend's own flag rather than by this
         method: its file describes a plant, and a later real run that loaded it
         would measure the bench with a simulation's numbers.
+
+        The path is stored under the backend's CAN channel.  Four instances share
+        one settings file; writing one global key let a file loaded on can1
+        become the target can2's 应用标定 wrote to.
         """
         if self._settings is None:
             return
         if not getattr(self.worker.backend, "remember_calibration_path", False):
             return
-        self._settings.calibration_path = path
+        channel = getattr(self.worker.backend, "channel", "")
+        if not channel:
+            return
+        self._settings.set_calibration_path(channel, path)
 
     def _on_log(self, level: str, text: str) -> None:
         self._append(level, text)
